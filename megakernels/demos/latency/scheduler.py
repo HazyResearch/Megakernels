@@ -48,7 +48,10 @@ def make_globals(
 
     stacked_params = model.stacked_params
 
-    max_attn_partitions = get_sm_count(device)
+    def align_sm_to_partition_cacheline(x: int) -> int:
+        return int(math.ceil(x / 16) * 16)
+
+    max_attn_partitions = align_sm_to_partition_cacheline(get_sm_count(device))
 
     barriers = torch.zeros(
         [
@@ -59,6 +62,7 @@ def make_globals(
         dtype=torch.int32,
         device=device,
     )
+
 
     return Globals(
         # model params
