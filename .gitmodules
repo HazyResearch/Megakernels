@@ -1,4 +1,4 @@
 [submodule "ThunderKittens"]
 	path = ThunderKittens
-	url = https://github.com/HazyResearch/ThunderKittens.git
+	url = https://github.com/HaoZhang-Ethan/ThunderKittens.git
 	branch = bvm-single-ctrl-pre-new-warps

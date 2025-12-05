@@ -26,7 +26,8 @@ from megakernels.scheduler import (
 
 
 class ScriptConfig(pydra.Config):
-    model: str = "meta-llama/Llama-3.2-1B-Instruct"
+    # model: str = "meta-llama/Llama-3.2-1B-Instruct"
+    model: str = "/home/fit/qianxueh/WORK/alchem/zhanghao/Mega/Models/Meta-Llama-3.2-1B-Instruct"
     device: str = "cuda:0"
     prompt: str = "tell me a funny joke about cookies"
     chat: bool = False
