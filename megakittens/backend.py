@@ -1,8 +1,8 @@
 from typing import Any, Callable, List
 
+from functorch.compile import make_boxed_func
 import torch
 from torch._dynamo.backends.common import aot_autograd
-from functorch.compile import make_boxed_func
 
 
 def megakittens_backend(
