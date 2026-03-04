@@ -29,6 +29,8 @@ def compile(
         )(_fn)
         functools.update_wrapper(megakernel_fn, _fn)
         return megakernel_fn
+
     if fn is not None:
         return _compile(fn)
-    return _compile
+    else:
+        return _compile
