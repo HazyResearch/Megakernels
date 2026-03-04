@@ -1,9 +1,7 @@
 .DS_Store
-
 local/
 __pycache__/
 *.egg-info/
-
 *.so
 *.i
 *.ii
