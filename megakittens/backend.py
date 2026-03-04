@@ -13,7 +13,7 @@ def megakittens_backend(
     verify: bool = False,
     profile: bool = False,
     debug: bool = False,
-    save_graph: bool = False,
+    save_dag: bool = False,
 ) -> Callable[[torch.fx.GraphModule, List[Any]], Callable[..., Any]]:
     def _megakittens_backend(gm: torch.fx.GraphModule, example_inputs: List[Any]) -> Callable[..., Any]:
         if debug:

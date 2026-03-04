@@ -9,4 +9,4 @@ __pycache__/
 *.ptx
 *.cubin
 *.fatbin
-*.png
+megakittens_graphs/

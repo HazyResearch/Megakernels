@@ -4,7 +4,7 @@ torch.manual_seed(42)
 import megakittens
 
 
-@megakittens.compile(debug=True, save_graph=True)
+@megakittens.compile(debug=True, save_dag=True)
 def mlp(x: torch.Tensor, W: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     z = torch.matmul(x, W) + b
     return torch.relu(z)
