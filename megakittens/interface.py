@@ -13,6 +13,7 @@ def compile(
     verify: bool = False,
     profile: bool = False,
     debug: bool = False,
+    save_graph: bool = False,
 ) -> Callable[..., Any]:
     """Compile a PyTorch function into a MegaKernel."""
     def _compile(_fn: Callable[..., Any]) -> Callable[..., Any]:
@@ -21,7 +22,8 @@ def compile(
                 fn=_fn,
                 verify=verify,
                 profile=profile,
-                debug=debug 
+                debug=debug,
+                save_graph=save_graph,
             ),
             nopython=True, # graph breaks currently not supported (TODO: support it)
             disable=not enable,

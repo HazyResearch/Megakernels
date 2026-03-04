@@ -9,3 +9,4 @@ __pycache__/
 *.ptx
 *.cubin
 *.fatbin
+*.png
