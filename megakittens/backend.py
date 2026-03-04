@@ -1,4 +1,6 @@
-from typing import Any, Callable, List
+from __future__ import annotations
+
+from typing import Any, Callable, Dict, List, Mapping
 
 import torch
 from functorch.compile import make_boxed_func
