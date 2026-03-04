@@ -1,6 +1,8 @@
 from typing import Any, Callable, List
 
 import torch
+from torch._dynamo.backends.common import aot_autograd
+from functorch.compile import make_boxed_func
 
 
 def megakittens_backend(
@@ -13,6 +15,9 @@ def megakittens_backend(
     def _megakittens_backend(gm: torch.fx.GraphModule, example_inputs: List[Any]) -> Callable[..., Any]:
         if debug:
             print(f"[MegaKittens] Compiling function `{fn.__qualname__}`")
-        return gm.forward
+        return make_boxed_func(gm.forward)
 
-    return _megakittens_backend
+    return aot_autograd(
+        fw_compiler=_megakittens_backend,
+        bw_compiler=_megakittens_backend
+    )
