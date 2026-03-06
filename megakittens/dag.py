@@ -1,7 +1,7 @@
 from enum import Enum
 from typing import Any, Literal, Tuple
 
-from pydantic import BaseModel, NonNegativeInt
+from pydantic import BaseModel, Field, NonNegativeInt
 
 
 class DType(str, Enum):
@@ -21,18 +21,29 @@ class OpType(str, Enum):
     relu = "relu"
 
 
+class Device(BaseModel):
+    type: Literal["cuda"]
+    index: int = Field(ge=0, le=7)
+
+    def __str__(self) -> str:
+        return f"{self.type}:{self.index}"
+
+    model_config = {"frozen": True}
+
+
 class Node(BaseModel):
+    input_index: int # -1 if not an input
     dtype: DType
     shape: Tuple[NonNegativeInt, ...] # TODO: support dynamic shapes
-    device: Literal["cuda"] # TODO: support other device types
-    default: Any
+    device: Device
+    # TODO: support default values
 
     model_config = {"frozen": True}
 
 
 class Edge(BaseModel):
     optype: OpType
-    in_nodes: Tuple[Node]
-    out_nodes: Tuple[Node]
+    in_nodes: Tuple[Node, ...]
+    out_nodes: Tuple[Node, ...]
 
     model_config = {"frozen": True}
