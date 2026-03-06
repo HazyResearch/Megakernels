@@ -31,6 +31,9 @@ _CALL_FUNCTION_OPS = {
     operator.matmul: OpType.matmul,
     torch.ops.aten.add: OpType.add,
     torch.ops.aten.add.default: OpType.add,
+    torch.ops.aten.add.Tensor: OpType.add,
+    torch.ops.aten.mm: OpType.matmul,
+    torch.ops.aten.mm.default: OpType.matmul,
     torch.ops.aten.matmul: OpType.matmul,
     torch.ops.aten.matmul.default: OpType.matmul,
     torch.ops.aten.relu: OpType.relu,
@@ -164,10 +167,14 @@ def fx_graph_to_mk_dag(
                 dtype = _torch_dtype_to_mk_dtype(node, tensor_meta.dtype)
                 tensor_meta_device = getattr(tensor_meta, "device", None)
                 if tensor_meta_device is None:
-                    raise RuntimeError(
-                        f"[MegaKittens] Missing tensor metadata device for node '{node.name}'"
-                        f" (op={node.op}, target={node.target!r}, meta_keys={list(node.meta.keys())})"
-                    )
+                    val_node = node.meta.get("val")
+                    if isinstance(val_node, torch.Tensor):
+                        tensor_meta_device = val_node.device
+                    else:
+                        raise RuntimeError(
+                            f"[MegaKittens] Missing tensor metadata device for node '{node.name}'"
+                            f" (op={node.op}, target={node.target!r}, meta_keys={list(node.meta.keys())})"
+                        )
                 device = _torch_device_to_mk_device(tensor_meta_device)
 
             elif "val" in node.meta:
