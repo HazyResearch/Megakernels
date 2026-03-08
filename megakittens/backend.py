@@ -427,7 +427,13 @@ def megakittens_backend(
             gm.graph.print_tabular()
         
         nodes = fx_graph_to_mk_dag(gm, example_inputs)
-        tensors, instructions, input_tensor_indices, output_tensor_indices = schedule(nodes)
+        (
+            tensors,
+            instructions,
+            num_barriers,
+            input_tensor_indices,
+            output_tensor_indices,
+        ) = schedule(nodes)
 
         if save_dag or save_schedule:
             from . import utils
@@ -438,7 +444,7 @@ def megakittens_backend(
             utils.save_dag_as_png(dag_json, base_path)
 
         if save_schedule:
-            utils.save_schedule_as_txt(tensors, instructions, base_path)
+            utils.save_schedule_as_txt(tensors, instructions, num_barriers, base_path)
 
         return make_boxed_func(gm.forward)
 

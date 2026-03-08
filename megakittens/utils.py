@@ -116,6 +116,7 @@ def save_dag_as_png(
 def save_schedule_as_txt(
     tensors: List[torch.Tensor],
     instructions: List[Instruction],
+    num_barriers: int,
     base_path: Path,
 ) -> None:
     """
@@ -124,34 +125,60 @@ def save_schedule_as_txt(
     lines: List[str] = []
 
     lines.append(f"Tensors: {len(tensors)}")
-    lines.append("-" * 60)
-    for idx, t in enumerate(tensors):
-        # TODO: print barrier tensor
-        shape_str = "x".join(str(d) for d in t.shape)
-        lines.append(f"  T{idx:<4d}  dtype={t.dtype}  shape=[{shape_str}]  device={t.device}")
-
-    lines.append("")
+    lines.append(f"Barriers: {num_barriers}")
     lines.append(f"Instructions: {len(instructions)}")
     lines.append("-" * 60)
-    # TODO: dynamically column-align all fields
-    itype_width = max((len(inst.itype.name) for inst in instructions), default=0)
-    itype_width = max(itype_width, 12)
-    for idx, inst in enumerate(instructions):
-        src_field = f"src={[f'T{t}' for t in inst.src_tensors]}"
-        dst_field = f"dst={[f'T{t}' for t in inst.dst_tensors]}"
-        idx_field = f"idx={list(inst.indices)}"
-        src_bar_field = f"src_bar={list(inst.src_barriers)}"
-        src_bar_tgt_field = f"src_bar_tgt={list(inst.src_barrier_targets)}"
-        dst_bar_field = f"dst_bar={list(inst.dst_barrier)}"
-        lines.append(
-            f"  I{idx:<5d} {inst.itype.name:<{itype_width}}"
-            f"  {src_field:<16}"
-            f" {dst_field:<16}"
-            f" {idx_field:<20}"
-            f" {src_bar_field:<16}"
-            f" {src_bar_tgt_field:<28}"
-            f" {dst_bar_field}"
-        )
+
+    if tensors:
+        t_id_strs = [f"T{idx}" for idx in range(len(tensors))]
+        t_dtype_strs = [f"dtype={t.dtype}" for t in tensors]
+        t_shape_strs = [f"shape=[{'x'.join(str(d) for d in t.shape)}]" for t in tensors]
+        t_device_strs = [f"device={t.device}" for t in tensors]
+
+        w_t_id = max(len(s) for s in t_id_strs)
+        w_t_dtype = max(len(s) for s in t_dtype_strs)
+        w_t_shape = max(len(s) for s in t_shape_strs)
+
+        for i in range(len(tensors)):
+            lines.append(
+                f"  {t_id_strs[i]:<{w_t_id}}"
+                f"  {t_dtype_strs[i]:<{w_t_dtype}}"
+                f"  {t_shape_strs[i]:<{w_t_shape}}"
+                f"  {t_device_strs[i]}"
+            )
+
+    lines.append("")
+    lines.append("-" * 60)
+
+    if instructions:
+        id_strs = [f"I{idx}" for idx in range(len(instructions))]
+        itype_strs = [inst.itype.name for inst in instructions]
+        src_strs = [f"src=[{', '.join(f'T{t}' for t in inst.src_tensors)}]" for inst in instructions]
+        dst_strs = [f"dst=[{', '.join(f'T{t}' for t in inst.dst_tensors)}]" for inst in instructions]
+        idx_strs = [f"idx={list(inst.indices)}" for inst in instructions]
+        src_bar_strs = [f"src_bar={list(inst.src_barriers)}" for inst in instructions]
+        src_bar_tgt_strs = [f"src_bar_tgt={list(inst.src_barrier_targets)}" for inst in instructions]
+        dst_bar_strs = [f"dst_bar={list(inst.dst_barrier)}" for inst in instructions]
+
+        w_id = max(len(s) for s in id_strs)
+        w_itype = max(len(s) for s in itype_strs)
+        w_src = max(len(s) for s in src_strs)
+        w_dst = max(len(s) for s in dst_strs)
+        w_idx = max(len(s) for s in idx_strs)
+        w_src_bar = max(len(s) for s in src_bar_strs)
+        w_src_bar_tgt = max(len(s) for s in src_bar_tgt_strs)
+
+        for i in range(len(instructions)):
+            lines.append(
+                f"  {id_strs[i]:<{w_id}}"
+                f"  {itype_strs[i]:<{w_itype}}"
+                f"  {src_strs[i]:<{w_src}}"
+                f"  {dst_strs[i]:<{w_dst}}"
+                f"  {idx_strs[i]:<{w_idx}}"
+                f"  {src_bar_strs[i]:<{w_src_bar}}"
+                f"  {src_bar_tgt_strs[i]:<{w_src_bar_tgt}}"
+                f"  {dst_bar_strs[i]}"
+            )
 
     txt_path = base_path.parent / (base_path.name + ".schedule.txt")
     base_path.parent.mkdir(parents=True, exist_ok=True)

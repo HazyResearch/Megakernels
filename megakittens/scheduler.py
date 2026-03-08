@@ -63,7 +63,7 @@ def _resolve_itype(node: Node) -> IType:
 
 def schedule(
     dag_nodes: List[Node],
-) -> Tuple[List[torch.Tensor], List[Instruction], Tuple[int, ...], Tuple[int, ...]]:
+) -> Tuple[List[torch.Tensor], List[Instruction], int, Tuple[int, ...], Tuple[int, ...]]:
     """
     Convert a validated DAG into allocated tensors and a flat per-SM instruction list.
     """
@@ -216,6 +216,7 @@ def schedule(
     return (
         tensors,
         instructions,
+        barrier_counter,
         tuple(input_tensor_indices),
         tuple(output_tensor_indices),
     )
