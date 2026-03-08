@@ -427,7 +427,7 @@ def megakittens_backend(
             gm.graph.print_tabular()
         
         nodes = fx_graph_to_mk_dag(gm, example_inputs)
-        tensors, instructions = schedule(nodes)
+        tensors, instructions, input_tensor_indices, output_tensor_indices = schedule(nodes)
 
         if save_dag or save_schedule:
             from . import utils

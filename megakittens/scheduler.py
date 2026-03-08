@@ -61,13 +61,17 @@ def _resolve_itype(node: Node) -> IType:
     return _OPTYPE_TO_ITYPE[node.optype]
 
 
-def schedule(dag_nodes: List[Node]) -> Tuple[List[torch.Tensor], List[Instruction]]:
+def schedule(
+    dag_nodes: List[Node],
+) -> Tuple[List[torch.Tensor], List[Instruction], Tuple[int, ...], Tuple[int, ...]]:
     """
     Convert a validated DAG into allocated tensors and a flat per-SM instruction list.
     """
     # Phase 1: Tensor allocation
     tensors: List[torch.Tensor] = []
     tensor_index: Dict[Tuple[int, int], int] = {}
+    input_tensor_indices: List[int] = []
+    output_tensor_indices: List[int] = []
 
     # TODO: reuse allocated tensors
     for node in dag_nodes:
@@ -80,12 +84,30 @@ def schedule(dag_nodes: List[Node]) -> Tuple[List[torch.Tensor], List[Instructio
             device_str = str(tensor_meta.device)
             tensor_index[(id(node), out_idx)] = len(tensors)
             tensors.append(torch.empty(tensor_meta.shape, dtype=torch_dtype, device=device_str))
+        if node.optype == OpType.input:
+            if len(node.out_tensors) != 1:
+                raise RuntimeError(
+                    f"[MegaKittens] Input node has {len(node.out_tensors)} outputs (expected 1)"
+                )
+            input_tensor_indices.append(tensor_index[(id(node), 0)])
+        elif node.optype == OpType.output:
+            if len(output_tensor_indices) != 0:
+                raise RuntimeError("[MegaKittens] Expected 1 output node")
+            output_tensor_indices.extend(
+                tensor_index[(id(in_node), slot_idx)] for in_node, slot_idx in node.in_nodes
+            )
+    if not input_tensor_indices:
+        raise RuntimeError("[MegaKittens] Graph has no input tensors")
+    if not output_tensor_indices:
+        raise RuntimeError("[MegaKittens] Graph has no output tensors")
 
     # Phase 2: Instruction count per node
     # TODO: make op-specific
     node_inst_count: Dict[int, int] = {}
     for node in dag_nodes:
-        if node.optype not in _OPTYPE_TO_ITYPE:
+        if node.optype in (OpType.input, OpType.output):
+            continue
+        elif node.optype not in _OPTYPE_TO_ITYPE:
             raise RuntimeError(
                 f"[MegaKittens] Unsupported OpType {node.optype} for instruction counting"
             )
@@ -113,12 +135,16 @@ def schedule(dag_nodes: List[Node]) -> Tuple[List[torch.Tensor], List[Instructio
 
     # TODO: reuse barriers
     for node in dag_nodes:
-        if node.optype not in _OPTYPE_TO_ITYPE:
+        if node.optype in (OpType.input, OpType.output):
+            continue
+        elif node.optype not in _OPTYPE_TO_ITYPE:
             raise RuntimeError(
                 f"[MegaKittens] Unsupported OpType {node.optype} for barrier assignment"
             )
         for in_node, _slot_idx in node.in_nodes:
-            if in_node.optype not in _OPTYPE_TO_ITYPE:
+            if in_node.optype in (OpType.input, OpType.output):
+                continue
+            elif in_node.optype not in _OPTYPE_TO_ITYPE:
                 raise RuntimeError(
                     f"[MegaKittens] Unsupported input OpType {in_node.optype} for barrier assignment"
                 )
@@ -147,7 +173,9 @@ def schedule(dag_nodes: List[Node]) -> Tuple[List[torch.Tensor], List[Instructio
     instructions: List[Instruction] = []
 
     for node in dag_nodes:
-        if node.optype not in _OPTYPE_TO_ITYPE:
+        if node.optype in (OpType.input, OpType.output):
+            continue
+        elif node.optype not in _OPTYPE_TO_ITYPE:
             raise RuntimeError(
                 f"[MegaKittens] Unsupported OpType {node.optype} during instruction generation"
             )
@@ -185,4 +213,9 @@ def schedule(dag_nodes: List[Node]) -> Tuple[List[torch.Tensor], List[Instructio
                 dst_barrier=dst_barrier,
             ))
 
-    return tensors, instructions
+    return (
+        tensors,
+        instructions,
+        tuple(input_tensor_indices),
+        tuple(output_tensor_indices),
+    )
