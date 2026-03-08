@@ -9,6 +9,7 @@ from torch._dynamo.backends.common import aot_autograd
 from torch.fx.passes.shape_prop import TensorMetadata
 
 from .dag import DType, Device, Node, OpType, TensorMeta, validate_dag
+from .scheduler import schedule
 
 
 _DTYPE_MAP = {
@@ -417,6 +418,7 @@ def megakittens_backend(
     profile: bool = False,
     debug: bool = False,
     save_dag: bool = False,
+    save_schedule: bool = False,
 ) -> Callable[[torch.fx.GraphModule, List[Any]], Callable[..., Any]]:
     def _megakittens_backend(gm: torch.fx.GraphModule, example_inputs: List[Any]) -> Callable[..., Any]:
         if debug:
@@ -425,12 +427,18 @@ def megakittens_backend(
             gm.graph.print_tabular()
         
         nodes = fx_graph_to_mk_dag(gm, example_inputs)
+        tensors, instructions = schedule(nodes)
 
-        if save_dag:
+        if save_dag or save_schedule:
             from . import utils
             base_path = utils.create_log_base_path(fn=fn)
+
+        if save_dag:
             dag_json = utils.save_dag_as_png_as_json(nodes, base_path)
             utils.save_dag_as_png(dag_json, base_path)
+
+        if save_schedule:
+            utils.save_schedule_as_txt(tensors, instructions, base_path)
 
         return make_boxed_func(gm.forward)
 

@@ -6,7 +6,10 @@ import re
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 
+import torch
+
 from .dag import Node
+from .instruction import Instruction
 
 _LOG_DUMP_COUNTER = itertools.count()
 
@@ -56,7 +59,7 @@ def save_dag_as_png_as_json(
         ],
     }
 
-    json_path = base_path.parent / (base_path.name + ".json")
+    json_path = base_path.parent / (base_path.name + ".graph.json")
     base_path.parent.mkdir(parents=True, exist_ok=True)
     json_path.write_text(json.dumps(dag_json, indent=2))
 
@@ -107,4 +110,49 @@ def save_dag_as_png(
             dot.edge(str(src_id), str(node["id"]), label=f" {input_slot} ")
 
     base_path.parent.mkdir(parents=True, exist_ok=True)
-    dot.render(filename=str(base_path), cleanup=True)
+    dot.render(filename=str(base_path) + ".graph", cleanup=True)
+
+
+def save_schedule_as_txt(
+    tensors: List[torch.Tensor],
+    instructions: List[Instruction],
+    base_path: Path,
+) -> None:
+    """
+    Write a human-readable schedule dump to a .txt file.
+    """
+    lines: List[str] = []
+
+    lines.append(f"Tensors: {len(tensors)}")
+    lines.append("-" * 60)
+    for idx, t in enumerate(tensors):
+        # TODO: print barrier tensor
+        shape_str = "x".join(str(d) for d in t.shape)
+        lines.append(f"  T{idx:<4d}  dtype={t.dtype}  shape=[{shape_str}]  device={t.device}")
+
+    lines.append("")
+    lines.append(f"Instructions: {len(instructions)}")
+    lines.append("-" * 60)
+    # TODO: dynamically column-align all fields
+    itype_width = max((len(inst.itype.name) for inst in instructions), default=0)
+    itype_width = max(itype_width, 12)
+    for idx, inst in enumerate(instructions):
+        src_field = f"src={[f'T{t}' for t in inst.src_tensors]}"
+        dst_field = f"dst={[f'T{t}' for t in inst.dst_tensors]}"
+        idx_field = f"idx={list(inst.indices)}"
+        src_bar_field = f"src_bar={list(inst.src_barriers)}"
+        src_bar_tgt_field = f"src_bar_tgt={list(inst.src_barrier_targets)}"
+        dst_bar_field = f"dst_bar={list(inst.dst_barrier)}"
+        lines.append(
+            f"  I{idx:<5d} {inst.itype.name:<{itype_width}}"
+            f"  {src_field:<16}"
+            f" {dst_field:<16}"
+            f" {idx_field:<20}"
+            f" {src_bar_field:<16}"
+            f" {src_bar_tgt_field:<28}"
+            f" {dst_bar_field}"
+        )
+
+    txt_path = base_path.parent / (base_path.name + ".schedule.txt")
+    base_path.parent.mkdir(parents=True, exist_ok=True)
+    txt_path.write_text("\n".join(lines) + "\n")
