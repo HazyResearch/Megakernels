@@ -428,7 +428,7 @@ def megakittens_backend(
 
         if save_dag:
             from . import utils
-            base_path = utils.make_graph_base_path(fn=fn)
+            base_path = utils.create_log_base_path(fn=fn)
             dag_json = utils.save_json(nodes, base_path)
             utils.save_dag(dag_json, base_path)
 

@@ -8,13 +8,17 @@ from typing import Any, Callable, Dict, List
 
 from .dag import Node
 
-_GRAPH_DUMP_COUNTER = itertools.count()
+_LOG_DUMP_COUNTER = itertools.count()
 
 
-def make_graph_base_path(fn: Callable[..., Any]) -> Path:
-    safe_name = re.sub(r"[^0-9A-Za-z_.-]+", "_", fn.__qualname__).strip("._") or "graph"
-    suffix = next(_GRAPH_DUMP_COUNTER)
-    return Path.cwd() / "megakittens_graphs" / f"{safe_name}.{suffix:02d}"
+def create_log_base_path(fn: Callable[..., Any]) -> Path:
+    safe_name = re.sub(r"[^0-9A-Za-z_.-]+", "_", fn.__qualname__).strip("._")
+    if not safe_name:
+        raise ValueError(
+            f"[MegaKittens] Unable to construct a valid log file base name for function {fn!r}"
+        )
+    suffix = next(_LOG_DUMP_COUNTER)
+    return Path.cwd() / "log" / f"{safe_name}.{suffix:02d}"
 
 
 def save_json(
