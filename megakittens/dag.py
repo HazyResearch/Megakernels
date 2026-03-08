@@ -107,6 +107,10 @@ def validate_dag(dag_nodes: List[Node]) -> None:
     for node in dag_nodes:
         if not isinstance(node, Node):
             raise RuntimeError("[MegaKittens] DAG payload contains non-Node entry")
+        if len(node.out_nodes) != len(node.out_tensors):
+            raise RuntimeError(
+                f"[MegaKittens] Node arity mismatch: out_nodes={len(node.out_nodes)} out_tensors={len(node.out_tensors)}"
+            )
 
     input_nodes = [node for node in dag_nodes if node.optype == OpType.input]
     output_nodes = [node for node in dag_nodes if node.optype == OpType.output]
@@ -116,7 +120,7 @@ def validate_dag(dag_nodes: List[Node]) -> None:
             raise RuntimeError("[MegaKittens] Input node has inbound edges")
 
     for node in output_nodes:
-        if len(node.out_nodes) != 0:
+        if any(len(dst_nodes) != 0 for dst_nodes in node.out_nodes):
             raise RuntimeError("[MegaKittens] Output node has outbound edges")
 
     if len(output_nodes) != 1:
