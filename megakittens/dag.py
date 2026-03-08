@@ -1,10 +1,16 @@
+from __future__ import annotations
+
 from enum import Enum
-from typing import Any, Literal, Tuple
+from typing import List, Literal, Tuple
 
 from pydantic import BaseModel, Field, NonNegativeInt
 
 
 class DType(str, Enum):
+    int64 = "int64"
+    int32 = "int32"
+    int16 = "int16"
+    int8 = "int8"
     fp64 = "fp64"
     fp32 = "fp32"
     bf16 = "bf16"
@@ -16,14 +22,16 @@ class DType(str, Enum):
 
 
 class OpType(str, Enum):
+    input = "input"
     add = "add"
     matmul = "matmul"
     relu = "relu"
+    output = "output"
 
 
 class Device(BaseModel):
-    type: Literal["cuda"]
-    index: int = Field(ge=0, le=7)
+    type: Literal["cpu", "cuda"]
+    index: int | None = Field(ge=0, le=7, default=None)
 
     def __str__(self) -> str:
         return f"{self.type}:{self.index}"
@@ -31,19 +39,21 @@ class Device(BaseModel):
     model_config = {"frozen": True}
 
 
-class Node(BaseModel):
-    input_index: int # -1 if not an input
+class TensorMeta(BaseModel):
     dtype: DType
     shape: Tuple[NonNegativeInt, ...] # TODO: support dynamic shapes
     device: Device
-    # TODO: support default values
-
-    model_config = {"frozen": True}
 
 
-class Edge(BaseModel):
+class Node(BaseModel):
+    """
+    Graph vertex for the DAG. This schema is node-centric (no separate Edge objects).
+    """
     optype: OpType
     in_nodes: Tuple[Node, ...]
-    out_nodes: Tuple[Node, ...]
+    out_tensors: Tuple[TensorMeta, ...]
+    out_nodes: Tuple[List[Node], ...]
 
-    model_config = {"frozen": True}
+    # Op-specific fields
+    input_index: int | None # None if not an input
+    # TODO: support default values
