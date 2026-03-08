@@ -335,7 +335,7 @@ def fx_graph_to_mk_dag(
             if isinstance(attr, torch.Tensor):
                 out_tensors = (_tensor_to_mk_tensor(node, attr),)
             else:
-                raise RuntimeError(f"[MegaKittens] Non-tensor attributes are not supported")
+                raise RuntimeError("[MegaKittens] Non-tensor attributes are not supported")
 
         elif node.op in {"call_function", "call_module", "call_method"}:
             optype = _resolve_optype(gm, node)
