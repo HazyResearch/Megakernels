@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 import itertools
 import json
 import re
@@ -31,7 +32,10 @@ def save_json(
                 "id": idx,
                 "optype": node.optype.value,
                 "input_index": node.input_index,
-                "in_nodes": [node_index_by_id[id(in_node)] for in_node in node.in_nodes],
+                "in_nodes": [
+                    [node_index_by_id[id(in_node)], input_slot]
+                    for in_node, input_slot in node.in_nodes
+                ],
                 "out_nodes": [
                     [node_index_by_id[id(out_node)] for out_node in out_nodes]
                     for out_nodes in node.out_nodes

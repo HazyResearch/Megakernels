@@ -8,7 +8,7 @@ from functorch.compile import make_boxed_func
 from torch._dynamo.backends.common import aot_autograd
 from torch.fx.passes.shape_prop import TensorMetadata
 
-from .dag import DType, Device, Node, OpType, TensorMeta
+from .dag import DType, Device, Node, OpType, TensorMeta, validate_dag
 
 
 _DTYPE_MAP = {
@@ -263,49 +263,6 @@ def _flatten_output_nodes(
         raise RuntimeError(f"[MegaKittens] Unsupported output value type '{type(value).__name__}'")
 
 
-def _validate_topological_dag(dag_nodes: List[Node]) -> None:
-    """Validate DAG node list ordering and edge consistency."""
-    node_index: dict[int, int] = {id(node): idx for idx, node in enumerate(dag_nodes)}
-    for node_idx, node in enumerate(dag_nodes):
-        for in_node, input_idx in node.in_nodes:
-            parent_index = node_index.get(id(in_node))
-            if parent_index is None:
-                raise RuntimeError(
-                    f"[MegaKittens] Invalid DAG connectivity: node at index {node_idx} has missing parent"
-                )
-            if parent_index >= node_idx:
-                raise RuntimeError(
-                    f"[MegaKittens] Invalid DAG topology at index {node_idx}: parent node appears after child"
-                )
-            if input_idx >= len(in_node.out_nodes):
-                raise RuntimeError(
-                    f"[MegaKittens] Invalid input slot {input_idx} for node index {node_idx}"
-                    f" from parent index {parent_index}"
-                )
-            if node not in in_node.out_nodes[input_idx]:
-                raise RuntimeError(
-                    f"[MegaKittens] Invalid DAG connectivity: node index {node_idx}"
-                    f" is not linked from parent index {parent_index} output slot {input_idx}"
-                )
-
-        for out_idx, out_nodes in enumerate(node.out_nodes):
-            for out_node in out_nodes:
-                out_node_idx = node_index.get(id(out_node))
-                if out_node_idx is None:
-                    raise RuntimeError(
-                        f"[MegaKittens] Invalid DAG connectivity: edge from node index {node_idx}"
-                        f" to unknown node (output slot {out_idx})"
-                    )
-                if not any(
-                    id(in_node) == id(node) and input_idx == out_idx
-                    for in_node, input_idx in out_node.in_nodes
-                ):
-                    raise RuntimeError(
-                        f"[MegaKittens] Invalid DAG connectivity: node index {node_idx}"
-                        f" is not registered as input to node index {out_node_idx}"
-                    )
-
-
 def fx_graph_to_mk_dag(
     gm: torch.fx.GraphModule,
     example_inputs: List[Any],
@@ -448,7 +405,7 @@ def fx_graph_to_mk_dag(
         raise RuntimeError(
             f"[MegaKittens] Number of input nodes is {_input_index}, but len(example_inputs) is {len(example_inputs)}"
         )
-    _validate_topological_dag(dag_nodes)
+    validate_dag(dag_nodes)
 
     return dag_nodes
 
