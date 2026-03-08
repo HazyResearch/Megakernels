@@ -12,7 +12,7 @@ from .dag import DType, Device, Node, OpType, TensorMeta, validate_dag
 from .scheduler import schedule
 
 
-_DTYPE_MAP = {
+_TORCH_DTYPE_TO_MK_DTYPE = {
     torch.float64: DType.fp64,
     torch.float32: DType.fp32,
     torch.bfloat16: DType.bf16,
@@ -23,7 +23,7 @@ _DTYPE_MAP = {
     torch.float4_e2m1fn_x2: DType.fp4e2m1x2,
 }
 
-_CALL_FUNCTION_OPS = {
+_TORCH_CALL_FUNCTION_OP_TO_MK_OPTYPE = {
     torch.add: OpType.add,
     torch.matmul: OpType.matmul,
     torch.mm: OpType.matmul,
@@ -41,20 +41,20 @@ _CALL_FUNCTION_OPS = {
     torch.ops.aten.relu.default: OpType.relu,
 }
 
-_CALL_METHOD_OPS = {
+_TORCH_CALL_METHOD_OP_TO_MK_OPTYPE = {
     "add": OpType.add,
     "matmul": OpType.matmul,
     "relu": OpType.relu,
 }
 
-_CALL_MODULE_OPS = {
+_TORCH_CALL_MODULE_OP_TO_MK_OPTYPE = {
     torch.nn.ReLU: OpType.relu,
     torch.nn.ReLU6: OpType.relu,
 }
 
 
 def _torch_dtype_to_mk_dtype(node: torch.fx.Node, dtype: torch.dtype) -> DType:
-    mapped_dtype = _DTYPE_MAP.get(dtype)
+    mapped_dtype = _TORCH_DTYPE_TO_MK_DTYPE.get(dtype)
     if mapped_dtype is None:
         raise RuntimeError(f"[MegaKittens] Unsupported dtype {dtype} in node '{node.name}'")
     return mapped_dtype
@@ -71,15 +71,15 @@ def _torch_device_to_mk_device(value: torch.device) -> Device:
 
 def _resolve_optype(gm: torch.fx.GraphModule, node: torch.fx.Node) -> OpType:
     if node.op == "call_function":
-        if node.target in _CALL_FUNCTION_OPS:
-            return _CALL_FUNCTION_OPS[node.target]
+        if node.target in _TORCH_CALL_FUNCTION_OP_TO_MK_OPTYPE:
+            return _TORCH_CALL_FUNCTION_OP_TO_MK_OPTYPE[node.target]
         raise RuntimeError(
             f"[MegaKittens] Unsupported function op node '{node.name}' target={node.target!r}"
         )
 
     if node.op == "call_method":
-        if node.target in _CALL_METHOD_OPS:
-            return _CALL_METHOD_OPS[node.target]
+        if node.target in _TORCH_CALL_METHOD_OP_TO_MK_OPTYPE:
+            return _TORCH_CALL_METHOD_OP_TO_MK_OPTYPE[node.target]
         raise RuntimeError(
             f"[MegaKittens] Unsupported method op node '{node.name}' target={node.target!r}"
         )
@@ -90,8 +90,8 @@ def _resolve_optype(gm: torch.fx.GraphModule, node: torch.fx.Node) -> OpType:
         except Exception:
             raise RuntimeError(f"[MegaKittens] Invalid call_module node '{node.name}' target={node.target!r}")
         module_type = type(module)
-        if module_type in _CALL_MODULE_OPS:
-            return _CALL_MODULE_OPS[module_type]
+        if module_type in _TORCH_CALL_MODULE_OP_TO_MK_OPTYPE:
+            return _TORCH_CALL_MODULE_OP_TO_MK_OPTYPE[module_type]
         raise RuntimeError(
             f"[MegaKittens] Unsupported module op node '{node.name}' module={type(module).__name__}"
         )
