@@ -429,8 +429,8 @@ def megakittens_backend(
         if save_dag:
             from . import utils
             base_path = utils.make_graph_base_path(fn=fn)
-            utils.save_json(nodes, base_path)
-            utils.save_dag(nodes, base_path)
+            dag_json = utils.save_json(nodes, base_path)
+            utils.save_dag(dag_json, base_path)
 
         return make_boxed_func(gm.forward)
 
