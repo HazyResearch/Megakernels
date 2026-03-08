@@ -34,7 +34,7 @@ class Device(BaseModel):
     index: int | None = Field(ge=0, le=7, default=None)
 
     def __str__(self) -> str:
-        return f"{self.type}:{self.index}"
+        return f"{self.type}:{self.index}" if self.index is not None else self.type
 
     model_config = {"frozen": True}
 
@@ -76,7 +76,7 @@ def _validate_topological_dag(dag_nodes: List[Node]) -> None:
                 raise RuntimeError(
                     f"[MegaKittens] Invalid DAG connectivity: node index {node_idx} uses invalid source output slot {input_idx}"
                 )
-            if node not in in_node.out_nodes[input_idx]:
+            if not any(id(n) == id(node) for n in in_node.out_nodes[input_idx]):
                 raise RuntimeError(
                     f"[MegaKittens] Invalid DAG connectivity: edge from node index {parent_index}"
                     f" output slot {input_idx} to node index {node_idx} is missing"

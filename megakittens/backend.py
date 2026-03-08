@@ -63,7 +63,7 @@ def _torch_device_to_mk_device(value: torch.device) -> Device:
     if value.type == "cpu":
         return Device(type="cpu")
     elif value.type == "cuda":
-        return Device(type=value.type, index=value.index if value.index else None)
+        return Device(type=value.type, index=value.index)
     else:
         raise RuntimeError(f"[MegaKittens] Unsupported device type '{value.type}'")
 
@@ -323,7 +323,7 @@ def fx_graph_to_mk_dag(
             if isinstance(example_input, torch.Tensor):
                 out_tensors = (_tensor_to_mk_tensor(node, example_input),)
             else:
-                raise RuntimeError(f"[MegaKittens] Non-tensor inputs are not supported")
+                raise RuntimeError("[MegaKittens] Non-tensor inputs are not supported")
 
         elif node.op == "get_attr":
             optype = OpType.input
@@ -411,12 +411,12 @@ def fx_graph_to_mk_dag(
 
 
 def megakittens_backend(
-  fn: Callable[..., Any],
-  *,
-  verify: bool = False,
-  profile: bool = False,
-  debug: bool = False,
-  save_dag: bool = False,
+    fn: Callable[..., Any],
+    *,
+    verify: bool = False,
+    profile: bool = False,
+    debug: bool = False,
+    save_dag: bool = False,
 ) -> Callable[[torch.fx.GraphModule, List[Any]], Callable[..., Any]]:
     def _megakittens_backend(gm: torch.fx.GraphModule, example_inputs: List[Any]) -> Callable[..., Any]:
         if debug:
