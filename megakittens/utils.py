@@ -21,7 +21,7 @@ def create_log_base_path(fn: Callable[..., Any]) -> Path:
     return Path.cwd() / "log" / f"{safe_name}.{suffix:02d}"
 
 
-def save_json(
+def save_dag_as_png_as_json(
     nodes: List[Node],
     base_path: Path,
 ) -> dict[str, Any]:
@@ -63,12 +63,12 @@ def save_json(
     return dag_json
 
 
-def save_dag(
+def save_dag_as_png(
     dag_json: dict[str, Any],
     base_path: Path,
 ) -> None:
     """
-    Render a DAG JSON payload (from save_json) as a PNG using graphviz.
+    Render a DAG JSON payload (from save_dag_as_png_as_json) as a PNG using graphviz.
     """
     try:
         import graphviz
