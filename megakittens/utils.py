@@ -6,20 +6,62 @@ import re
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 
-from .dag import Edge, Node
+from .dag import Node
 
 _GRAPH_DUMP_COUNTER = itertools.count()
 
 
+def make_graph_base_path(fn: Callable[..., Any]) -> Path:
+    safe_name = re.sub(r"[^0-9A-Za-z_.-]+", "_", fn.__qualname__).strip("._") or "graph"
+    suffix = next(_GRAPH_DUMP_COUNTER)
+    return Path.cwd() / "megakittens_graphs" / f"{safe_name}.{suffix:02d}"
+
+
+def save_json(
+    nodes: List[Node],
+    base_path: Path,
+) -> dict[str, Any]:
+    """
+    Build a DAG JSON payload from node objects.
+    """
+    node_index_by_id: Dict[int, int] = {id(node): idx for idx, node in enumerate(nodes)}
+    dag_json = {
+        "nodes": [
+            {
+                "id": idx,
+                "optype": node.optype.value,
+                "input_index": node.input_index,
+                "in_nodes": [node_index_by_id[id(in_node)] for in_node in node.in_nodes],
+                "out_nodes": [
+                    [node_index_by_id[id(out_node)] for out_node in out_nodes]
+                    for out_nodes in node.out_nodes
+                ],
+                "out_tensors": [
+                    {
+                        "dtype": tensor.dtype.value,
+                        "shape": [int(dim) for dim in tensor.shape],
+                        "device": tensor.device.model_dump(),
+                    }
+                    for tensor in node.out_tensors
+                ],
+            }
+            for idx, node in enumerate(nodes)
+        ],
+    }
+
+    json_path = base_path.with_suffix(".json")
+    base_path.parent.mkdir(parents=True, exist_ok=True)
+    json_path.write_text(json.dumps(dag_json, indent=2))
+
+    return dag_json
+
+
 def save_dag(
-  nodes: List[Node],
-  edges: List[Edge],
-  fn: Callable[..., Any],
+    nodes: List[Node],
+    base_path: Path,
 ) -> None:
     """
-    Save a DAG (nodes, edges) as both JSON and a rendered PNG.
-    Generates a path from ``fn``'s qualified name under ``megakittens_graphs/``,
-    then writes ``{path}.json`` and ``{path}.png``.
+    Render and save a DAG from node objects.
     """
     try:
         import matplotlib.pyplot as plt
@@ -31,9 +73,11 @@ def save_dag(
             "pip install matplotlib networkx\n"
         )
 
-    suffix = next(_GRAPH_DUMP_COUNTER)
-    safe_name = re.sub(r"[^0-9A-Za-z_.-]+", "_", fn.__qualname__).strip("._") or "graph"
-    base_path = Path.cwd() / "megakittens_graphs" / f"{safe_name}.{suffix:02d}"
+    if not isinstance(nodes, list):
+        raise RuntimeError("[MegaKittens] DAG payload is invalid")
+    for node in nodes:
+        if not isinstance(node, Node):
+            raise RuntimeError("[MegaKittens] DAG node entry is invalid")
 
     ################################
     # Build lookup tables
@@ -187,41 +231,8 @@ def save_dag(
     ax.set_axis_off()
     fig.tight_layout()
 
-    ################################
-    # Build JSON payload
-    ################################
-    base_path.parent.mkdir(parents=True, exist_ok=True)
-    node_index_by_id = {id(node): idx for idx, node in enumerate(nodes)}
-    dag_json = {
-        "nodes": [
-            {
-                "id": idx,
-                "input_index": node.input_index,
-                "dtype": node.dtype.value,
-                "shape": list(node.shape),
-                "device": node.device.model_dump(),
-            }
-            for idx, node in enumerate(nodes)
-        ],
-        "edges": [
-            {
-                "optype": edge.optype.value,
-                "srcs": [node_index_by_id.get(id(src_node), -1) for src_node in edge.in_nodes],
-                "dsts": [node_index_by_id.get(id(dst_node), -1) for dst_node in edge.out_nodes],
-            }
-            for edge in edges
-        ],
-    }
-
-
-    ################################
-    # Export files
-    ################################
-    json_path = base_path.with_suffix(".json")
-    json_path.write_text(json.dumps(dag_json, indent=2))
-
     png_path = base_path.with_suffix(".png")
     fig.savefig(png_path, bbox_inches="tight")
     plt.close(fig)
 
-    print(f"[MegaKittens] Saved DAG to {base_path}.png")
+    print(f"[MegaKittens] Saved DAG to {png_path}")

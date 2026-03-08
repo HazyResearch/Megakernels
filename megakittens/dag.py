@@ -50,7 +50,7 @@ class Node(BaseModel):
     Graph vertex for the DAG. This schema is node-centric (no separate Edge objects).
     """
     optype: OpType
-    in_nodes: Tuple[Node, ...]
+    in_nodes: Tuple[Tuple[Node, NonNegativeInt], ...]
     out_tensors: Tuple[TensorMeta, ...]
     out_nodes: Tuple[List[Node], ...]
 

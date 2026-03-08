@@ -128,36 +128,60 @@ def _get_output_tensors(node: torch.fx.Node) -> tuple[TensorMeta, ...]:
         tensor_meta = node.meta["tensor_meta"]
         val = node.meta.get("val")
         if isinstance(tensor_meta, (tuple, list)):
-            if val is None or not isinstance(val, (tuple, list)):
+            if all(isinstance(tm, TensorMetadata) for tm in tensor_meta):
+                if val is None:
+                    return tuple(_tensor_meta_to_mk_tensor(node, tm) for tm in tensor_meta)
+
+                elif isinstance(val, torch.Tensor):
+                    if len(tensor_meta) != 1:
+                        raise RuntimeError(
+                            f"[MegaKittens] Node '{node.name}' has {len(tensor_meta)} tensor metadata outputs"
+                            f" but single Tensor 'val' provided"
+                        )
+                    return (_tensor_meta_to_mk_tensor(node, tensor_meta[0], fallback_device=val.device),)
+
+                if not isinstance(val, (tuple, list)):
+                    raise RuntimeError(
+                        f"[MegaKittens] Node '{node.name}' has multiple tensor metadata outputs"
+                        f" but 'val' is not a tuple/list"
+                    )
+                if any(not isinstance(v, torch.Tensor) for v in val):
+                    raise RuntimeError(
+                        f"[MegaKittens] Node '{node.name}' has multiple tensor metadata outputs"
+                        f" but 'val' contains non-tensor entries"
+                    )
+                if len(val) != len(tensor_meta):
+                    raise RuntimeError(
+                        f"[MegaKittens] Node '{node.name}' has {len(tensor_meta)} tensor metadata outputs"
+                        f" but 'val' has {len(val)} elements"
+                    )
+
+                return tuple(
+                    _tensor_meta_to_mk_tensor(
+                        node,
+                        tm,
+                        fallback_device=val[idx].device,
+                    )
+                    for idx, tm in enumerate(tensor_meta)
+                )
+
+            elif isinstance(val, torch.Tensor):
+                return (_tensor_to_mk_tensor(node, val),)
+
+            else:
                 raise RuntimeError(
-                    f"[MegaKittens] Node '{node.name}' has multiple tensor metadata outputs"
-                    f" but 'val' is not a tuple/list"
+                    f"[MegaKittens] Node '{node.name}' has tuple/list tensor metadata entries that are not TensorMetadata"
+                    f" and 'val' is not a Tensor (type={type(val).__name__})"
                 )
-            if any(not isinstance(v, torch.Tensor) for v in val):
-                raise RuntimeError(
-                    f"[MegaKittens] Node '{node.name}' has multiple tensor metadata outputs"
-                    f" but 'val' contains non-tensor entries"
-                )
-            if len(val) != len(tensor_meta):
-                raise RuntimeError(
-                    f"[MegaKittens] Node '{node.name}' has {len(tensor_meta)} tensor metadata outputs"
-                    f" but 'val' has {len(val)} elements"
-                )
-            return tuple(
-                _tensor_meta_to_mk_tensor(
-                    node,
-                    tm,
-                    fallback_device=val[idx].device,
-                )
-                for idx, tm in enumerate(tensor_meta)
-            )
-        if isinstance(tensor_meta, TensorMetadata):
-            if val is not None or not isinstance(val, torch.Tensor):
+
+        elif isinstance(tensor_meta, TensorMetadata):
+            if val is not None and not isinstance(val, torch.Tensor):
                 raise RuntimeError(
                     f"[MegaKittens] Node '{node.name}' has single tensor metadata output"
                     f" but 'val' is not a Tensor (type={type(val).__name__})"
                 )
-            return (_tensor_meta_to_mk_tensor(node, tensor_meta, fallback_device=val.device),)
+            fallback_device = val.device if isinstance(val, torch.Tensor) else None
+            return (_tensor_meta_to_mk_tensor(node, tensor_meta, fallback_device=fallback_device),)
         raise RuntimeError(
             f"[MegaKittens] Unsupported tensor_meta type for node '{node.name}'"
             f" (type={type(tensor_meta).__name__})"
@@ -175,12 +199,13 @@ def _get_output_tensors(node: torch.fx.Node) -> tuple[TensorMeta, ...]:
                     )
                 tensors.append(_tensor_to_mk_tensor(node, v))
             return tuple(tensors)
-        if isinstance(value, torch.Tensor):
+        elif isinstance(value, torch.Tensor):
             return (_tensor_to_mk_tensor(node, value),)
-        raise RuntimeError(
-            f"[MegaKittens] Node metadata is not a Tensor for node '{node.name}'"
-            f" (type={type(value).__name__})"
-        )
+        else:
+            raise RuntimeError(
+                f"[MegaKittens] Node metadata is not a Tensor for node '{node.name}'"
+                f" (type={type(value).__name__})"
+            )
 
     else:
         raise RuntimeError(
@@ -219,11 +244,30 @@ def _resolve_input_node_and_output_index(
     return current, output_idx
 
 
+def _flatten_output_nodes(
+    value: Any,
+) -> list[torch.fx.Node]:
+    if isinstance(value, torch.fx.Node):
+        return [value]
+    elif isinstance(value, (list, tuple)):
+        nodes: list[torch.fx.Node] = []
+        for item in value:
+            nodes.extend(_flatten_output_nodes(item))
+        return nodes
+    elif isinstance(value, dict):
+        nodes: list[torch.fx.Node] = []
+        for item in value.values():
+            nodes.extend(_flatten_output_nodes(item))
+        return nodes
+    else:
+        raise RuntimeError(f"[MegaKittens] Unsupported output value type '{type(value).__name__}'")
+
+
 def _validate_topological_dag(dag_nodes: List[Node]) -> None:
     """Validate DAG node list ordering and edge consistency."""
     node_index: dict[int, int] = {id(node): idx for idx, node in enumerate(dag_nodes)}
     for node_idx, node in enumerate(dag_nodes):
-        for in_node in node.in_nodes:
+        for in_node, input_idx in node.in_nodes:
             parent_index = node_index.get(id(in_node))
             if parent_index is None:
                 raise RuntimeError(
@@ -232,6 +276,16 @@ def _validate_topological_dag(dag_nodes: List[Node]) -> None:
             if parent_index >= node_idx:
                 raise RuntimeError(
                     f"[MegaKittens] Invalid DAG topology at index {node_idx}: parent node appears after child"
+                )
+            if input_idx >= len(in_node.out_nodes):
+                raise RuntimeError(
+                    f"[MegaKittens] Invalid input slot {input_idx} for node index {node_idx}"
+                    f" from parent index {parent_index}"
+                )
+            if node not in in_node.out_nodes[input_idx]:
+                raise RuntimeError(
+                    f"[MegaKittens] Invalid DAG connectivity: node index {node_idx}"
+                    f" is not linked from parent index {parent_index} output slot {input_idx}"
                 )
 
         for out_idx, out_nodes in enumerate(node.out_nodes):
@@ -242,7 +296,10 @@ def _validate_topological_dag(dag_nodes: List[Node]) -> None:
                         f"[MegaKittens] Invalid DAG connectivity: edge from node index {node_idx}"
                         f" to unknown node (output slot {out_idx})"
                     )
-                if all(id(in_node) != id(node) for in_node in out_node.in_nodes):
+                if not any(
+                    id(in_node) == id(node) and input_idx == out_idx
+                    for in_node, input_idx in out_node.in_nodes
+                ):
                     raise RuntimeError(
                         f"[MegaKittens] Invalid DAG connectivity: node index {node_idx}"
                         f" is not registered as input to node index {out_node_idx}"
@@ -286,7 +343,6 @@ def fx_graph_to_mk_dag(
         n
         for n in all_graph_nodes
         if n.name in valid_names
-        and n.op != "output"
         and not (n.op == "call_function" and n.target == operator.getitem)
     ]
 
@@ -297,9 +353,11 @@ def fx_graph_to_mk_dag(
 
     for node in graph_nodes:
         input_index: int | None = None
+        out_tensors: tuple[TensorMeta, ...] | None = None
 
         if node.op == "placeholder":
             optype = OpType.input
+            input_nodes = list(node.all_input_nodes)
             if _input_index >= len(example_inputs):
                 raise RuntimeError("[MegaKittens] Number of input nodes is greater than len(example_inputs)")
             input_index = _input_index
@@ -312,6 +370,7 @@ def fx_graph_to_mk_dag(
 
         elif node.op == "get_attr":
             optype = OpType.input
+            input_nodes = list(node.all_input_nodes)
             try:
                 attr = getattr(gm, node.target)
             except Exception:
@@ -323,13 +382,22 @@ def fx_graph_to_mk_dag(
 
         elif node.op in {"call_function", "call_module", "call_method"}:
             optype = _resolve_optype(gm, node)
+            input_nodes = list(node.all_input_nodes)
             out_tensors = _get_output_tensors(node)
+
+        elif node.op == "output":
+            optype = OpType.output
+            if not node.args:
+                raise RuntimeError("[MegaKittens] Output node has no args")
+            input_nodes = _flatten_output_nodes(node.args)
+            if "tensor_meta" in node.meta or "val" in node.meta:
+                out_tensors = _get_output_tensors(node)
 
         else:
             raise RuntimeError(f"[MegaKittens] Invalid node op {node.op}")
 
-        input_refs = []
-        for input_node in node.all_input_nodes:
+        in_nodes_list = []
+        for input_node in input_nodes:
             if input_node.name not in valid_names:
                 raise RuntimeError(
                     f"[MegaKittens] Invalid input '{input_node.name}' for node '{node.name}':"
@@ -348,14 +416,19 @@ def fx_graph_to_mk_dag(
                     f"[MegaKittens] Node '{node.name}' reads output slot {output_idx} of '{resolved_node.name}',"
                     f" but source node has {len(source_node.out_tensors)} outputs"
                 )
-            input_refs.append((source_node, output_idx))
+            in_nodes_list.append((source_node, output_idx))
 
-        in_nodes = [input_node for input_node, _ in input_refs]
+        if node.op == "output" and out_tensors is None:
+            if not in_nodes_list:
+                raise RuntimeError(f"[MegaKittens] Output node '{node.name}' has no resolvable inputs")
+            out_tensors = tuple(
+                in_node.out_tensors[output_idx] for in_node, output_idx in in_nodes_list
+            )
 
         current_node = Node(
             optype=optype,
             out_tensors=out_tensors,
-            in_nodes=tuple(in_nodes),
+            in_nodes=tuple(in_nodes_list),
             out_nodes=tuple([] for _ in out_tensors),
             input_index=input_index,
         )
@@ -364,7 +437,7 @@ def fx_graph_to_mk_dag(
         dag_nodes.append(current_node)
 
         # Add this node to each source node's outgoing tuple group.
-        for input_node, output_idx in input_refs:
+        for input_node, output_idx in in_nodes_list:
             if output_idx >= len(input_node.out_nodes):
                 raise RuntimeError(
                     f"[MegaKittens] Output slot {output_idx} missing for source node '{input_node}'"
@@ -393,11 +466,14 @@ def megakittens_backend(
             print(f"[MegaKittens] Compiling function `{fn.__qualname__}`")
             print(f"[MegaKittens] FX graph:")
             gm.graph.print_tabular()
+        
+        nodes = fx_graph_to_mk_dag(gm, example_inputs)
 
         if save_dag:
-            from .utils import save_dag as _save_dag
-            nodes = fx_graph_to_mk_dag(gm, example_inputs)
-            _save_dag(nodes, fn=fn)
+            from . import utils
+            base_path = utils.make_graph_base_path(fn=fn)
+            utils.save_json(nodes, base_path)
+            utils.save_dag(nodes, base_path)
 
         return make_boxed_func(gm.forward)
 
