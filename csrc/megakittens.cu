@@ -13,7 +13,7 @@
 namespace megakernel {
 
 template <typename config, typename globals, typename... ops>
-__device__ __forceinline__ void mk_internal(const globals &g) {
+__device__ __forceinline__ void _megakernel(const globals &g) {
     uint64_t start_time = timestamp();
 #ifdef MK_DEBUG
     if (threadIdx.x == 0)
@@ -158,30 +158,40 @@ __device__ __forceinline__ void mk_internal(const globals &g) {
 #endif
 }
 
-// Forward a NoOp to the VM, to ensure that the VM can support zeros.
 template <typename config, typename globals, typename... ops>
-struct megakernel_wrapper {
-    __device__ __forceinline__ static void run(const globals &g) {
-        mk_internal<config, globals, NoOp<config>, ops...>(g);
-    }
-};
-
-#ifdef CUTLASS_NAME
-// Add the name "cutlass" to the kernel so that ptxas compiles it to run faster. (No, I'm not kidding.)
-template <typename config, typename globals, typename... ops>
-__launch_bounds__(config::NUM_THREADS, 1)
-__cluster_dims__(config::CLUSTER_BLOCKS)
-__global__ void cutlass_mk(const __grid_constant__ globals g) {
-    megakernel_wrapper<config, globals, ops...>::run(g);
-}
-#define mk cutlass_mk
-#else
-template <typename config, typename globals, typename... ops>
-__launch_bounds__(config::NUM_THREADS, 1)
-__cluster_dims__(config::CLUSTER_BLOCKS)
-__global__ void mk(const __grid_constant__ globals g) {
-    megakernel_wrapper<config, globals, ops...>::run(g);
+__device__ __forceinline__ void megakernel(const __grid_constant__ globals g) {
+    _megakernel<config, globals, NoOp<config>, ops...>(g);
 }
 #endif
+
+template <typename globals, size_t... Is>
+__host__ globals make_megakernel_globals(
+    std::vector<at::Tensor> &tensors,
+    const at::Tensor &instruction_tensor,
+    const at::Tensor &barrier_tensor,
+    std::index_sequence<Is...>
+) {
+    return globals {
+        .tensors      = { kittens::py::tensor_to_gl<typename globals::tensor_gl>(tensors[Is])... },
+        .instructions = kittens::py::tensor_to_gl<typename globals::instruction_gl>(instruction_tensor),
+        .barriers     = kittens::py::tensor_to_gl<typename globals::barrier_gl>(barrier_tensor),
+    };
+}
+
+__host__ void entrypoint(
+    std::vector<at::Tensor> tensors,
+    const at::Tensor &instruction_tensor,
+    const at::Tensor &barrier_tensor
+) {
+    auto g = make_megakernel_globals<globals>(
+        instruction_tensor, barrier_tensor, tensors,
+        std::make_index_sequence<globals::NUM_TENSORS>{}
+    );
+    kittens::py::launch_kernel<config, globals, megakernel>(g);
+}
+
+PYBIND11_MODULE(_C, m) {
+    m.def("entrypoint", &entrypoint);
+}
 
 } // namespace megakernel
