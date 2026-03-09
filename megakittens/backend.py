@@ -102,10 +102,27 @@ def _resolve_optype(gm: torch.fx.GraphModule, node: torch.fx.Node) -> OpType:
 
 
 def _tensor_to_mk_tensor(node: torch.fx.Node, value: torch.Tensor) -> TensorMeta:
+    if not value.is_contiguous():
+        raise RuntimeError(
+            f"[MegaKittens] Tensor for node '{node.name}' must be contiguous"
+        )
     shape = tuple[int, ...](int(dim) for dim in value.shape)
     dtype = _torch_dtype_to_mk_dtype(node, value.dtype)
     device = _torch_device_to_mk_device(value.device)
     return TensorMeta(dtype=dtype, shape=shape, device=device)
+
+
+def _is_contiguous(shape: tuple[int, ...], strides: tuple[int, ...]) -> bool:
+    """Check if strides correspond to a contiguous (row-major) layout."""
+    ndim = len(shape)
+    if ndim == 0:
+        return True
+    expected = 1
+    for i in range(ndim - 1, -1, -1):
+        if shape[i] != 1 and strides[i] != expected:
+            return False
+        expected *= shape[i]
+    return True
 
 
 def _tensor_meta_to_mk_tensor(
@@ -113,6 +130,12 @@ def _tensor_meta_to_mk_tensor(
     tensor_meta: TensorMetadata,
     fallback_device: torch.device | None = None,
 ) -> TensorMeta:
+    if tensor_meta.stride is not None and not _is_contiguous(
+        tuple[int, ...](tensor_meta.shape), tuple(tensor_meta.stride)
+    ):
+        raise RuntimeError(
+            f"[MegaKittens] Tensor for node '{node.name}' must be contiguous"
+        )
     if tensor_meta.dtype is None:
         raise RuntimeError(f"[MegaKittens] Missing tensor metadata dtype for node '{node.name}'")
     shape = tuple[int, ...](int(dim) for dim in tensor_meta.shape)
