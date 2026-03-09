@@ -70,6 +70,8 @@ class Dispatcher:
         input_tensor_indices: Sequence[int],
         output_tensor_indices: Sequence[int],
     ) -> None:
+        if not tensor_metas:
+            raise RuntimeError("[MegaKittens] 'tensor_metas' must not be empty")
         if not isinstance(tensor_metas, list) or not all(isinstance(t, TensorMeta) for t in tensor_metas):
             raise RuntimeError(
                 "[MegaKittens] 'tensor_metas' must be a list of TensorMeta"
@@ -101,7 +103,13 @@ class Dispatcher:
                 raise RuntimeError(
                     f"[MegaKittens] output_tensor_index {idx} out of range [0, {num_tensors})"
                 )
+        devices = {str(m.device) for m in tensor_metas}
+        if len(devices) > 1:
+            raise RuntimeError(
+                f"[MegaKittens] All tensor_metas must share the same device, got {devices}"
+            )
 
+        self.device = str(tensor_metas[0].device)
         self.tensor_metas = tensor_metas
         self.tensors: list[torch.Tensor | None] = [None] * len(tensor_metas)
         self._materialized = False
@@ -139,7 +147,7 @@ class Dispatcher:
     def _materialize(self, args: tuple[Any, ...]) -> None:
         """For the first call: validate & assign inputs, allocate non-input tensors."""
         # Assign input tensor references
-        self._materialize_inputs(self, args)
+        self._materialize_inputs(args)
 
         # Allocate non-input tensors
         for slot_idx, meta in enumerate(self.tensor_metas):
@@ -153,6 +161,12 @@ class Dispatcher:
             self.tensors[slot_idx] = torch.empty(
                 meta.shape, dtype=torch_dtype, device=str(meta.device),
             )
+
+        # Allocate instruction and barrier tensors
+        self.instruction_tensor = _pack_instructions(self.instructions, device=self.device)
+        self.barrier_tensor = torch.zeros(
+            self.num_barriers, dtype=torch.int32, device=self.device,
+        )
 
         self._materialized = True
 
