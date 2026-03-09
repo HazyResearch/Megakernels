@@ -243,4 +243,5 @@ class Dispatcher:
             self.tensors[tensor_idx] = src
 
     def _launch(self) -> None:
+        # TODO: JIT the kernel, with appropriate configs each time
         pass  # TODO: wire up CUDA kernel launch
