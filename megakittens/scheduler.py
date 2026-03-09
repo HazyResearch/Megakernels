@@ -4,10 +4,7 @@ import itertools
 import math
 from typing import Dict, List, Tuple
 
-# TODO: completely remove torch dependency in scheduler and direcly rely on CUDA API
-import torch
-
-from .dag import DType, Node, OpType
+from .dag import DType, Node, OpType, TensorMeta
 from .instruction import (
     IType,
     Instruction,
@@ -24,21 +21,6 @@ MAX_TENSOR_ALLOCATIONS = 256
 
 # TODO: change
 TILE_SIZE = 4
-
-_MK_DTYPE_TO_TORCH_DTYPE: Dict[DType, torch.dtype] = {
-    DType.fp64: torch.float64,
-    DType.fp32: torch.float32,
-    DType.bf16: torch.bfloat16,
-    DType.half: torch.float16,
-    DType.fp8e4m3: torch.float8_e4m3fn,
-    DType.fp8e5m2: torch.float8_e5m2fnuz,
-    DType.fp8e8m0: torch.float8_e8m0fnu,
-    DType.fp4e2m1x2: torch.float4_e2m1fn_x2,
-    DType.int64: torch.int64,
-    DType.int32: torch.int32,
-    DType.int16: torch.int16,
-    DType.int8: torch.int8,
-}
 
 _OPTYPE_TO_ITYPE: Dict[OpType, IType] = {
     OpType.matmul: IType.mm_bf16_bf16_fp32_bf16,
@@ -63,12 +45,12 @@ def _resolve_itype(node: Node) -> IType:
 
 def schedule(
     dag_nodes: List[Node],
-) -> Tuple[List[torch.Tensor], List[Instruction], int, Tuple[int, ...], Tuple[int, ...]]:
+) -> Tuple[List[TensorMeta], List[Instruction], int, Tuple[int, ...], Tuple[int, ...]]:
     """
-    Convert a validated DAG into allocated tensors and a flat per-SM instruction list.
+    Convert a validated DAG into a minimal set of tensors and a flat per-SM instruction list.
     """
-    # Phase 1: Tensor allocation
-    tensors: List[torch.Tensor] = []
+    # Phase 1: Tensor metadata collection
+    tensor_metas: List[TensorMeta] = []
     tensor_index: Dict[Tuple[int, int], int] = {}
     input_tensor_indices: List[int] = []
     output_tensor_indices: List[int] = []
@@ -76,14 +58,12 @@ def schedule(
     # TODO: reuse allocated tensors
     for node in dag_nodes:
         for out_idx, tensor_meta in enumerate(node.out_tensors):
-            if len(tensors) >= MAX_TENSOR_ALLOCATIONS:
+            if len(tensor_metas) >= MAX_TENSOR_ALLOCATIONS:
                 raise RuntimeError(
                     f"[MegaKittens] The given compute graph requires tensor count exceeding {MAX_TENSOR_ALLOCATIONS}."
                 )
-            torch_dtype = _MK_DTYPE_TO_TORCH_DTYPE[tensor_meta.dtype]
-            device_str = str(tensor_meta.device)
-            tensor_index[(id(node), out_idx)] = len(tensors)
-            tensors.append(torch.empty(tensor_meta.shape, dtype=torch_dtype, device=device_str))
+            tensor_index[(id(node), out_idx)] = len(tensor_metas)
+            tensor_metas.append(tensor_meta)
         if node.optype == OpType.input:
             if len(node.out_tensors) != 1:
                 raise RuntimeError(
@@ -214,7 +194,7 @@ def schedule(
             ))
 
     return (
-        tensors,
+        tensor_metas,
         instructions,
         barrier_counter,
         tuple(input_tensor_indices),

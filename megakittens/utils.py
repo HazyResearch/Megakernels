@@ -6,9 +6,7 @@ import re
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 
-import torch
-
-from .dag import Node
+from .dag import Node, TensorMeta
 from .instruction import Instruction
 
 _LOG_DUMP_COUNTER = itertools.count()
@@ -114,7 +112,7 @@ def save_dag_as_png(
 
 
 def save_schedule_as_txt(
-    tensors: List[torch.Tensor],
+    tensor_metas: List[TensorMeta],
     instructions: List[Instruction],
     num_barriers: int,
     base_path: Path,
@@ -124,22 +122,22 @@ def save_schedule_as_txt(
     """
     lines: List[str] = []
 
-    lines.append(f"Tensors: {len(tensors)}")
+    lines.append(f"Tensors: {len(tensor_metas)}")
     lines.append(f"Barriers: {num_barriers}")
     lines.append(f"Instructions: {len(instructions)}")
     lines.append("-" * 60)
 
-    if tensors:
-        t_id_strs = [f"T{idx}" for idx in range(len(tensors))]
-        t_dtype_strs = [f"dtype={t.dtype}" for t in tensors]
-        t_shape_strs = [f"shape=[{'x'.join(str(d) for d in t.shape)}]" for t in tensors]
-        t_device_strs = [f"device={t.device}" for t in tensors]
+    if tensor_metas:
+        t_id_strs = [f"T{idx}" for idx in range(len(tensor_metas))]
+        t_dtype_strs = [f"dtype={t.dtype.value}" for t in tensor_metas]
+        t_shape_strs = [f"shape=[{'x'.join(str(d) for d in t.shape)}]" for t in tensor_metas]
+        t_device_strs = [f"device={t.device}" for t in tensor_metas]
 
         w_t_id = max(len(s) for s in t_id_strs)
         w_t_dtype = max(len(s) for s in t_dtype_strs)
         w_t_shape = max(len(s) for s in t_shape_strs)
 
-        for i in range(len(tensors)):
+        for i in range(len(tensor_metas)):
             lines.append(
                 f"  {t_id_strs[i]:<{w_t_id}}"
                 f"  {t_dtype_strs[i]:<{w_t_dtype}}"

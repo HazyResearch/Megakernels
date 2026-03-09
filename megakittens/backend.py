@@ -8,7 +8,9 @@ from functorch.compile import make_boxed_func
 from torch._dynamo.backends.common import aot_autograd
 from torch.fx.passes.shape_prop import TensorMetadata
 
+from . import utils
 from .dag import DType, Device, Node, OpType, TensorMeta, validate_dag
+from .dispatcher import Dispatcher
 from .scheduler import schedule
 
 
@@ -428,7 +430,7 @@ def megakittens_backend(
         
         nodes = fx_graph_to_mk_dag(gm, example_inputs)
         (
-            tensors,
+            tensor_metas,
             instructions,
             num_barriers,
             input_tensor_indices,
@@ -436,7 +438,6 @@ def megakittens_backend(
         ) = schedule(nodes)
 
         if save_dag or save_schedule:
-            from . import utils
             base_path = utils.create_log_base_path(fn=fn)
 
         if save_dag:
@@ -444,9 +445,17 @@ def megakittens_backend(
             utils.save_dag_as_png(dag_json, base_path)
 
         if save_schedule:
-            utils.save_schedule_as_txt(tensors, instructions, num_barriers, base_path)
+            utils.save_schedule_as_txt(tensor_metas, instructions, num_barriers, base_path)
 
-        return make_boxed_func(gm.forward)
+        dispatcher = Dispatcher(
+            tensor_metas=tensor_metas,
+            instructions=instructions,
+            num_barriers=num_barriers,
+            input_tensor_indices=input_tensor_indices,
+            output_tensor_indices=output_tensor_indices,
+        )
+
+        return make_boxed_func(dispatcher)
 
     return aot_autograd(
         fw_compiler=_megakittens_backend,
