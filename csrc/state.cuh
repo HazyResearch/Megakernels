@@ -27,7 +27,7 @@ struct page_t {
 
 template <typename config>
 struct state_t {
-    instruction_state_t<config> (&all_instructions)[config::INSTRUCTION_PIPE_STAGES];
+    instruction_state_t<config> (&instruction_states)[config::INSTRUCTION_PIPE_STAGES];
 
     kittens::semaphore (&instruction_arrived)[config::INSTRUCTION_PIPE_STAGES];
     kittens::semaphore (&instruction_finished)[config::INSTRUCTION_PIPE_STAGES];
@@ -47,25 +47,25 @@ struct state_t {
     uint32_t pid_order_shared_addr;
 
     __device__ inline int (&instruction())[config::INSTRUCTION_WIDTH] {
-        return all_instructions[instruction_ring].instruction;
+        return instruction_states[instruction_ring].instruction;
     }
     __device__ inline const int (&instruction() const)[config::INSTRUCTION_WIDTH] {
-        return all_instructions[instruction_ring].instruction;
+        return instruction_states[instruction_ring].instruction;
     }
     __device__ inline int (&pid_order())[config::NUM_PAGES] {
-        return all_instructions[instruction_ring].pid_order;
+        return instruction_states[instruction_ring].pid_order;
     }
     __device__ inline const int (&pid_order() const)[config::NUM_PAGES] {
-        return all_instructions[instruction_ring].pid_order;
+        return instruction_states[instruction_ring].pid_order;
     }
     __device__ inline void *scratch() const {
-        return (void *)&all_instructions[instruction_ring].scratch[0];
+        return (void *)&instruction_states[instruction_ring].scratch[0];
     }
     __device__ inline kittens::semaphore (&semaphores())[config::DYNAMIC_SEMAPHORES] {
-        return all_instructions[instruction_ring].semaphores;
+        return instruction_states[instruction_ring].semaphores;
     }
     __device__ inline const kittens::semaphore (&semaphores() const)[config::DYNAMIC_SEMAPHORES] {
-        return all_instructions[instruction_ring].semaphores;
+        return instruction_states[instruction_ring].semaphores;
     }
 
     __device__ inline void await_instruction() {

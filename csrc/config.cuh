@@ -53,14 +53,11 @@ struct default_config {
 };
 template <typename config>
 using instruction_layout = std::conditional_t<config::ENABLE_GLOBAL_WORK_QUEUE, kittens::gl<int, 1, 1, -1, config::INSTRUCTION_WIDTH>, kittens::gl<int, 1, -1, -1, config::INSTRUCTION_WIDTH>>;
-template <typename config>
-using timing_layout = std::conditional_t<config::ENABLE_GLOBAL_WORK_QUEUE, kittens::gl<int, 1, 1, -1, config::TIMING_WIDTH>, kittens::gl<int, 1, -1, -1, config::TIMING_WIDTH>>;
 template <typename config, int NUM_DEVICES>
 using multigpu_instruction_layout = kittens::pgl<kittens::gl<int, 1, -1, -1, config::INSTRUCTION_WIDTH>, NUM_DEVICES, false>;
-template <typename config, int NUM_DEVICES>
-using multigpu_timing_layout = kittens::pgl<kittens::gl<int, 1, -1, -1, config::TIMING_WIDTH>, NUM_DEVICES, false>;
 
-template <typename config> void print_config() {
+template <typename config>
+void print_config() {
     std::cout << "---------------- CONFIG INFO ----------------" << std::endl;
     std::cout << "INSTRUCTION_PIPELINE_STAGES: "
               << config::INSTRUCTION_PIPELINE_STAGES << std::endl;
