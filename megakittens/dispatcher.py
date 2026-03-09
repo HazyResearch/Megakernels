@@ -7,7 +7,65 @@ from typing import Any, Sequence
 import torch
 
 from .dag import DType, TensorMeta
-from .instruction import Instruction
+from .instruction import (
+    Instruction,
+    MAX_DST_BARRIERS,
+    MAX_DST_TENSORS,
+    MAX_INDICES,
+    MAX_SRC_BARRIER_TARGETS,
+    MAX_SRC_BARRIERS,
+    MAX_SRC_TENSORS,
+)
+
+
+def _pack_uint8s_to_int32s(values: tuple[int, ...], count: int) -> list[int]:
+    """Pack *count* uint8 values into count/4 int32s (little-endian, zero-padded)."""
+    padded = list(values) + [0] * max(0, count - len(values))
+    result: list[int] = []
+    for i in range(0, count, 4):
+        chunk = bytes(padded[i : i + 4])
+        (val,) = struct.unpack("<i", chunk)
+        result.append(val)
+    return result
+
+
+def _pack_instruction(inst: Instruction) -> list[int]:
+    """Pack a single Instruction into a flat list of 32 int32 values."""
+    inst_packed: list[int] = [0] * 32
+
+    # 0 (0-3B): itype
+    inst_packed[0] = inst.itype.value
+
+    # 1-4 (4-19B): src_tensors (16 uint8 -> 4 int32)
+    inst_packed[1:5] = _pack_uint8s_to_int32s(inst.src_tensors, MAX_SRC_TENSORS)
+
+    # 5-6 (20-27B): dst_tensors (8 uint8 -> 2 int32)
+    inst_packed[5:7] = _pack_uint8s_to_int32s(inst.dst_tensors, MAX_DST_TENSORS)
+
+    # 7-20 (28-83B): indices (14 int32, zero-padded)
+    indices = list(inst.indices) + [0] * max(0, MAX_INDICES - len(inst.indices))
+    inst_packed[7:21] = indices
+
+    # 21-22 (84-91B): src_barriers (8 uint8 -> 2 int32)
+    inst_packed[21:23] = _pack_uint8s_to_int32s(inst.src_barriers, MAX_SRC_BARRIERS)
+
+    # 23-30 (92-123B): src_barrier_targets (8 int32, zero-padded)
+    targets = list(inst.src_barrier_targets) + [0] * max(
+        0, MAX_SRC_BARRIER_TARGETS - len(inst.src_barrier_targets)
+    )
+    inst_packed[23:31] = targets
+
+    # 31 (124-127B): dst_barrier (4 uint8 -> 1 int32)
+    inst_packed[31:32] = _pack_uint8s_to_int32s(inst.dst_barrier, MAX_DST_BARRIERS)
+
+    return inst_packed
+
+
+def _pack_instructions(instructions: list[Instruction], *, device: str) -> torch.Tensor:
+    """Pack a list of Instruction objects into an (N, 32) int32 tensor."""
+    buf = [_pack_instruction(inst) for inst in instructions]
+    return torch.tensor(buf, dtype=torch.int32, device=device)
+
 
 # TODO: completely remove torch dependency and purely rely on CUDA API
 _MK_DTYPE_TO_TORCH_DTYPE: dict[DType, torch.dtype] = {
