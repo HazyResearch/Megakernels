@@ -14,12 +14,6 @@ namespace megakernel {
 
 template <typename config, typename globals, typename... ops>
 __device__ __forceinline__ void _megakernel(const globals &g) {
-    uint64_t start_time = timestamp();
-#ifdef MK_DEBUG
-    if (threadIdx.x == 0)
-        printf("Thread %d: Kernel launched\n", threadIdx.x);
-    group<config::NUM_WARPS>::sync(15);
-#endif
     __shared__ alignas(128) instruction_state_t<config>
         instruction_state[config::INSTRUCTION_PIPELINE_STAGES];
     __shared__ kittens::semaphore
