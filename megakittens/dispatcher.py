@@ -109,7 +109,7 @@ class Dispatcher:
                 f"[MegaKittens] All tensor_metas must share the same device, got {devices}"
             )
 
-        self.device = str(tensor_metas[0].device)
+        self.device = str(tensor_metas[0].device) # TODO: handle multi-GPU case
         self.tensor_metas = tensor_metas
         self.tensors: list[torch.Tensor | None] = [None] * len(tensor_metas)
         self._materialized = False
