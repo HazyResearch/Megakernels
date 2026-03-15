@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "megakittens"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "torch>=2.9,<3",
+    "cuda-python[all]>=13.1,<14",
+    "numpy>=2.4,<3",
+]
