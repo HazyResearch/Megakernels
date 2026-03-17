@@ -118,3 +118,12 @@ def get_kernel_from_cubin_module(
 def unload_cubin_module(module: cuda_driver.CUmodule) -> None:
     (err,) = cuda_driver.cuModuleUnload(module)
     check_cuda(err)
+
+
+def set_kernel_dynamic_smem(fn: cuda_driver.CUfunction, dynamic_smem_bytes: bytes) -> None:
+    (err,) = cuda_driver.cuFuncSetAttribute(
+        fn,
+        cuda_driver.CUfunction_attribute.CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+        dynamic_smem_bytes
+    )
+    check_cuda(err)
