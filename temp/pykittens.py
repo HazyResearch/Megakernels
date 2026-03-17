@@ -5,6 +5,7 @@ import cuda.bindings.driver as cuda_driver
 from pydantic import BaseModel, Field, model_validator
 import torch
 
+from c_utils import align_up
 from cuda_utils import check_cuda
 
 
@@ -76,28 +77,26 @@ class gl(BaseModel):
 
     @property
     def memory_layout(self):
-        def _align_up(offset: int, alignment: int) -> int:
-            return (offset + alignment - 1) // alignment * alignment
-        off = 8  # raw_ptr
+        offset = 8  # raw_ptr
         field_offsets = {'raw_ptr': 0}
         for name, s in [('batch', self.b), ('depth', self.d), ('rows', self.r), ('cols', self.c)]:
             if s > 0: # compiled_dim: empty struct, 1 byte
-                field_offsets[name] = off
-                off += 1
+                field_offsets[name] = offset
+                offset += 1
             else:     # runtime_dim: size_t, 8 bytes
-                off = _align_up(off, 8)
-                field_offsets[name] = off
-                off += 8
+                offset = align_up(offset, 8)
+                field_offsets[name] = offset
+                offset += 8
         if len(self.tma_types) > 0:
-            off = _align_up(off, 64)
+            offset = align_up(offset, 64)
             for i in range(len(self.tma_types)):
-                field_offsets[f'tma_desc_{i}'] = off
-                off += 128
-            off += 1  # empty descriptor_dict<> tail
-            total_size = _align_up(off, 64)
+                field_offsets[f'tma_desc_{i}'] = offset
+                offset += 128
+            offset += 1  # empty descriptor_dict<> tail
+            total_size = align_up(offset, 64)
         else:
-            off += 1  # empty descriptor_dict<> tail
-            total_size = _align_up(off, 8)
+            offset += 1  # empty descriptor_dict<> tail
+            total_size = align_up(offset, 8)
         return {
             "total_size": total_size,
             "field_offsets": field_offsets
@@ -229,6 +228,6 @@ class gl(BaseModel):
                 struct.pack_into('<Q', buf, layout["field_offsets"][name], v)
         tma_descs = [self.create_tma_descriptor(t.data_ptr(), *shape, tma_type) for tma_type in self.tma_types]
         for i, desc in enumerate(tma_descs):
-            off = layout["field_offsets"][f'tma_desc_{i}']
-            buf[off:off+128] = desc
+            offset = layout["field_offsets"][f'tma_desc_{i}']
+            buf[offset:offset+128] = desc
         return bytes(buf)

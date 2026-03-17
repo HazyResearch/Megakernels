@@ -127,3 +127,46 @@ def set_kernel_dynamic_smem(fn: cuda_driver.CUfunction, dynamic_smem_bytes: int)
         dynamic_smem_bytes
     )
     check_cuda(err)
+
+
+def launch_kernel(
+    fn: cuda_driver.CUfunction,
+    packed_args,
+    grid: tuple[int, ...],
+    block: tuple[int, ...],
+    dynamic_smem_bytes: int,
+    stream,
+    cluster: tuple[int, ...] | None = None,
+) -> None:
+    assert 1 <= len(grid) <= 3
+    assert 1 <= len(block) <= 3
+    config = cuda_driver.CUlaunchConfig()
+    config.gridDimX = grid[0]
+    config.gridDimY = grid[1] if len(grid) > 1 else 1
+    config.gridDimZ = grid[2] if len(grid) > 2 else 1
+    config.blockDimX = block[0]
+    config.blockDimY = block[1] if len(block) > 1 else 1
+    config.blockDimZ = block[2] if len(block) > 2 else 1
+    config.sharedMemBytes = dynamic_smem_bytes
+    config.hStream = stream
+
+    if cluster is not None:
+        assert 1 <= len(cluster) <= 3
+        preferred_attr = cuda_driver.CUlaunchAttribute()
+        preferred_attr.id = cuda_driver.CUlaunchAttributeID.CU_LAUNCH_ATTRIBUTE_PREFERRED_CLUSTER_DIMENSION
+        preferred_attr.value.preferredClusterDim.x = cluster[0]
+        preferred_attr.value.preferredClusterDim.y = cluster[1] if len(cluster) > 1 else 1
+        preferred_attr.value.preferredClusterDim.z = cluster[2] if len(cluster) > 2 else 1
+        minimum_attr = cuda_driver.CUlaunchAttribute()
+        minimum_attr.id = cuda_driver.CUlaunchAttributeID.CU_LAUNCH_ATTRIBUTE_CLUSTER_DIMENSION
+        minimum_attr.value.clusterDim.x = cluster[0]
+        minimum_attr.value.clusterDim.y = cluster[1] if len(cluster) > 1 else 1
+        minimum_attr.value.clusterDim.z = cluster[2] if len(cluster) > 2 else 1
+        config.numAttrs = 2
+        config.attrs = [preferred_attr, minimum_attr]
+    else:
+        config.numAttrs = 0
+        config.attrs = []
+
+    (err,) = cuda_driver.cuLaunchKernelEx(config, fn, packed_args, 0)
+    check_cuda(err)
