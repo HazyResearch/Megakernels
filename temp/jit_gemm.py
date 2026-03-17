@@ -127,30 +127,6 @@ def create_tma_descriptor(
     return struct.pack('<16Q', *(int(x) for x in tmap.opaque))
 
 
-def _gl_layout(b: int, d: int, r: int, c: int, n_tma: int):
-    """Compute (field_offsets, total_size) for gl<T,b,d,r,c,...>."""
-    off = 8  # raw_ptr
-    fields = {'raw_ptr': (0, 8)}
-    for name, v in [('batch', b), ('depth', d), ('rows', r), ('cols', c)]:
-        if v > 0:           # compiled_dim — empty struct, 1 byte
-            fields[name] = (off, 1)
-            off += 1
-        else:               # runtime_dim — size_t, 8 bytes
-            off = _align_up(off, 8)
-            fields[name] = (off, 8)
-            off += 8
-    if n_tma > 0:           # CUtensorMap: alignas(64) in NVRTC
-        off = _align_up(off, 64)
-        for i in range(n_tma):
-            fields[f'tma_{i}'] = (off, 128)
-            off += 128
-        off += 1            # empty descriptor_dict<> tail
-        total = _align_up(off, 64)
-    else:
-        off += 1
-        total = _align_up(off, 8)
-    return fields, total
-
 
 class gl(BaseModel):
     """Python mirror of TK gl<T, b, d, r, c, ...TMA_Types>."""
@@ -162,7 +138,7 @@ class gl(BaseModel):
     c: int
 
     # Runtime values
-    data_ptr: int
+    raw_ptr: int
     batch: int
     depth: int
     rows: int
@@ -170,39 +146,62 @@ class gl(BaseModel):
     tma_descs: list[bytes] = []
 
     @model_validator(mode='after')
-    def _check_gl_dims(self):
+    def _validate_gl(self):
+        assert self.raw_ptr > 0, "raw_ptr cannot be null"
         for name, s, v in [('b', self.b, self.batch), ('d', self.d, self.depth),
                            ('r', self.r, self.rows),  ('c', self.c, self.cols)]:
             assert s > 0 or s == -1, f"{name} must be >0 or -1"
             if s > 0:
                 assert v == s, f"{name} value {v} != static {s}"
-        for i, desc in enumerate(self.tma_descs):
-            assert len(desc) == 128, f"tma_{i}: need 128 bytes"
+        for desc in self.tma_descs:
+            assert len(desc) == 128, f"TMA descriptor should be 128 bytes"
         return self
 
     @property
-    def _layout(self):
-        return _gl_layout(self.b, self.d, self.r, self.c, len(self.tma_descs))
+    def align(self) -> int:
+        return 64 if self.tma_descs else 8  # CUtensorMap: alignas(64) in NVRTC
+
+    @property
+    def memory_layout(self):
+        off = 8  # raw_ptr
+        field_offsets = {'raw_ptr': 0}
+        for name, s in [('batch', self.b), ('depth', self.d), ('rows', self.r), ('cols', self.c)]:
+            if s > 0: # compiled_dim: empty struct, 1 byte
+                field_offsets[name] = off
+                off += 1
+            else:     # runtime_dim: size_t, 8 bytes
+                off = _align_up(off, 8)
+                field_offsets[name] = off
+                off += 8
+        if len(self.tma_descs) > 0:
+            off = _align_up(off, 64)
+            for i in range(len(self.tma_descs)):
+                field_offsets[f'tma_desc_{i}'] = off
+                off += 128
+            off += 1  # empty descriptor_dict<> tail
+            total_size = _align_up(off, 64)
+        else:
+            off += 1  # empty descriptor_dict<> tail
+            total_size = _align_up(off, 8)
+        return {
+            "total_size": total_size,
+            "field_offsets": field_offsets
+        }
 
     @property
     def size(self) -> int:
-        return self._layout[1]
-
-    @property
-    def align(self) -> int:
-        return 64 if self.tma_descs else 8
+        return self.memory_layout["total_size"]
 
     def to_bytes(self) -> bytes:
-        flds, total = self._layout
-        buf = bytearray(total)
-        struct.pack_into('<Q', buf, flds['raw_ptr'][0], self.data_ptr)
-        for nm, s, v in [('batch',self.b,self.batch), ('depth',self.d,self.depth),
-                         ('rows',self.r,self.rows),   ('cols',self.c,self.cols)]:
-            off, sz = flds[nm]
-            if s == -1:
-                struct.pack_into('<Q', buf, off, v)
+        memory_layout = self.memory_layout
+        buf = bytearray(memory_layout["total_size"])
+        struct.pack_into('<Q', buf, memory_layout["field_offsets"]['raw_ptr'], self.raw_ptr)
+        for name, s, v in [('batch', self.b, self.batch), ('depth', self.d, self.depth),
+                           ('rows',  self.r, self.rows),  ('cols',  self.c, self.cols)]:
+            if s == -1:  # only pack if runtime dimension
+                struct.pack_into('<Q', buf, memory_layout["field_offsets"][name], v)
         for i, desc in enumerate(self.tma_descs):
-            off = flds[f'tma_{i}'][0]
+            off = memory_layout["field_offsets"][f'tma_desc_{i}']
             buf[off:off+128] = desc
         return bytes(buf)
 
@@ -217,7 +216,7 @@ class gl(BaseModel):
             for ti in tiles:
                 descs.append(create_tma_descriptor(
                     t.data_ptr(), shape[0], shape[1], shape[2], shape[3], ti))
-        return cls(data_ptr=t.data_ptr(),
+        return cls(raw_ptr=t.data_ptr(),
                    batch=shape[0], depth=shape[1], rows=shape[2], cols=shape[3],
                    b=b, d=d, r=r, c=c, tma_descs=descs)
 
