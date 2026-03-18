@@ -18,10 +18,6 @@ struct default_config {
     // How many semaphores are available for dynamic use?
     static constexpr int DYNAMIC_SEMAPHORES = 32;
 
-    // Scheduling approach -- explicit SM scheduling or work stealing?
-    static constexpr bool ENABLE_GLOBAL_WORK_QUEUE = false;
-    static constexpr int  GLOBAL_WORK_QUEUE_PARTITIONS = 1; // Only used if ENABLE_GLOBAL_WORK_QUEUE is true, can help minimize overhead.
-
     // One controller warp, one load warp, one store warp, and one mma warp.
     static constexpr int NUM_CONSUMER_WARPS = 16;
     static constexpr int NUM_WARPS = 4 + NUM_CONSUMER_WARPS;
@@ -51,39 +47,8 @@ struct default_config {
     static constexpr int CONSUMER_REGISTERS = 104;
     static constexpr int NON_CONSUMER_REGISTERS = 64;
 };
-template <typename config>
-using instruction_layout = std::conditional_t<config::ENABLE_GLOBAL_WORK_QUEUE, kittens::gl<int, 1, 1, -1, config::INSTRUCTION_WIDTH>, kittens::gl<int, 1, -1, -1, config::INSTRUCTION_WIDTH>>;
-template <typename config, int NUM_DEVICES>
-using multigpu_instruction_layout = kittens::pgl<kittens::gl<int, 1, -1, -1, config::INSTRUCTION_WIDTH>, NUM_DEVICES, false>;
 
 template <typename config>
-void print_config() {
-    std::cout << "---------------- CONFIG INFO ----------------" << std::endl;
-    std::cout << "INSTRUCTION_PIPELINE_STAGES: "
-              << config::INSTRUCTION_PIPELINE_STAGES << std::endl;
-    std::cout << "INSTRUCTION_WIDTH: " << config::INSTRUCTION_WIDTH
-              << std::endl;
-    std::cout << "TIMING_WIDTH: " << config::TIMING_WIDTH << std::endl;
-    std::cout << "ENABLE_GLOBAL_WORK_QUEUE: " << config::ENABLE_GLOBAL_WORK_QUEUE << std::endl;
-    if constexpr (config::ENABLE_GLOBAL_WORK_QUEUE) {
-        std::cout << "GLOBAL_WORK_QUEUE_PARTITIONS: " << config::GLOBAL_WORK_QUEUE_PARTITIONS << std::endl;
-    }
-    std::cout << "NUM_CONSUMER_WARPS: " << config::NUM_CONSUMER_WARPS
-              << std::endl;
-    std::cout << "NUM_WARPS: " << config::NUM_WARPS << std::endl;
-    std::cout << "NUM_THREADS: " << config::NUM_THREADS << std::endl;
-    std::cout << "NUM_BLOCKS: " << config::NUM_BLOCKS << std::endl;
-    std::cout << "CLUSTER_BLOCKS: " << config::CLUSTER_BLOCKS << std::endl;
-    std::cout << "MAX_SHARED_MEMORY: " << config::MAX_SHARED_MEMORY
-              << std::endl;
-    std::cout << "STATIC_SHARED_MEMORY: " << config::STATIC_SHARED_MEMORY
-              << std::endl;
-    std::cout << "PAGE_SIZE: " << config::PAGE_SIZE << std::endl;
-    std::cout << "NUM_PAGES: " << config::NUM_PAGES << std::endl;
-    std::cout << "SCRATCH_BYTES: " << config::SCRATCH_BYTES << std::endl;
-    std::cout << "DYNAMIC_SEMAPHORES: " << config::DYNAMIC_SEMAPHORES
-              << std::endl;
-    std::cout << "---------------------------------------------" << std::endl;
-}
+using instruction_layout = kittens::gl<int, 1, 1, -1, config::INSTRUCTION_WIDTH>;
 
 } // namespace megakittens
