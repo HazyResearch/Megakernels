@@ -4,11 +4,11 @@ from pathlib import Path
 
 import cuda.bindings.nvrtc as nvrtc
 
-from cuda_utils import cuda_include_dirs, get_cuda_driver_version
+from .cuda_utils import cuda_include_dirs, get_cuda_driver_version
 
 
 CUBIN_CACHE_DIR = Path.home() / ".cache" / "megakittens" / "cubin"
-THUNDERKITTENS_ROOT = Path(__file__).resolve().parent.parent / "csrc" / "ThunderKittens"
+THUNDERKITTENS_ROOT = Path(__file__).resolve().parent.parent.parent / "csrc" / "ThunderKittens"
 THUNDERKITTENS_ARCH_DEFINES = {
     10: "-DKITTENS_BLACKWELL", 9: "-DKITTENS_HOPPER", 8: "-DKITTENS_AMPERE"
 }

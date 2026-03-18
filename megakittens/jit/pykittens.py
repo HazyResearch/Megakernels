@@ -5,8 +5,8 @@ import cuda.bindings.driver as cuda_driver
 from pydantic import BaseModel, Field, model_validator
 import torch
 
-from c_utils import align_up
-from cuda_utils import check_cuda
+from .c_utils import align_up
+from .cuda_utils import check_cuda
 
 
 class st(BaseModel):
