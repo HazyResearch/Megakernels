@@ -1,5 +1,3 @@
-import time
-
 import torch
 
 from megakittens.jit.c_utils import c_int, pack_args

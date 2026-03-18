@@ -1,20 +1,25 @@
 #pragma once
 
-#include "kittens.cuh"
-#include "config.cuh"
-#include "util.cuh"
-#include "controller/controller.cuh"
-#include "launcher.cuh"
-#include "storer.cuh"
-#include "loader.cuh"
-#include "consumer.cuh"
-#include "noop.cuh"
+// #include "kittens.cuh"
+// #include "config.cuh"
+// #include "util.cuh"
+// #include "controller/controller.cuh"
+// #include "launcher.cuh"
+// #include "storer.cuh"
+// #include "loader.cuh"
+// #include "consumer.cuh"
+// #include "noop.cuh"
 
 namespace megakittens {
 
-template <typename Config, typename Globals, typename... Ops>
-__global__ __launch_bounds__(Config::NUM_THREADS, min_blocks_per_sm<Config>())
-void kernel(const Globals &g) {
+template <typename Config, typename Globals, typename ...Ops>
+__global__ __launch_bounds__(Config::NUM_THREADS, Config::MIN_BLOCKS_PER_SM)
+void kernel(const __grid_constant__ Globals g) {
+
+    using C = Config;
+    using G = Globals;
+
+    printf("yay;");
 
     /*
 

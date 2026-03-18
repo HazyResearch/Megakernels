@@ -3,10 +3,20 @@ from __future__ import annotations
 import struct
 from typing import Any, Sequence
 
-# TODO: completely remove torch dependency and purely rely on CUDA API
-import torch
+import cuda.bindings.driver as cuda_driver
+import torch  # TODO: completely remove torch dependency and purely rely on CUDA API
 
-from .dag import DType, TensorMeta
+from .dag import Device, DType, TensorMeta
+from .jit.c_utils import pack_args
+from .jit.cuda_utils import (
+    get_kernel_from_cubin_module,
+    get_sm_arch,
+    initialize_cuda_context,
+    launch_kernel,
+    load_cubin_module,
+    unload_cubin_module,
+)
+from .jit.nvrtc_jit import compile_source_to_cubin
 from .instruction import (
     Instruction,
     MAX_DST_BARRIERS,
@@ -167,17 +177,25 @@ class Dispatcher:
                 f"[MegaKittens] All tensor_metas must share the same device, got {devices}"
             )
 
-        self.device = str(tensor_metas[0].device) # TODO: handle multi-GPU case
-        self.tensor_metas = tensor_metas
+        self.device: Device = tensor_metas[0].device  # TODO: handle multi-GPU case
+        self.tensor_metas: list[TensorMeta] = tensor_metas
         self.tensors: list[torch.Tensor | None] = [None] * len(tensor_metas)
-        self._materialized = False
-        self.instructions = instructions
-        self.instruction_tensor = None
-        self.num_barriers = num_barriers
-        self.barrier_tensor = None
-        self.input_tensor_indices = tuple(input_tensor_indices)
-        self._input_indices_set = frozenset(input_tensor_indices) # for quick lookup
-        self.output_tensor_indices = tuple(output_tensor_indices)
+        self._materialized: bool = False
+        self.instructions: list[Instruction] = instructions
+        self.instruction_tensor: torch.Tensor | None = None
+        self.num_barriers: int = num_barriers
+        self.barrier_tensor: torch.Tensor | None = None
+        self.input_tensor_indices: tuple[int, ...] = tuple(input_tensor_indices)
+        self._input_indices_set: frozenset[int] = frozenset(input_tensor_indices)
+        self.output_tensor_indices: tuple[int, ...] = tuple(output_tensor_indices)
+        self._kernel_fn: cuda_driver.CUfunction | None = None
+        self._cubin_module: cuda_driver.CUmodule | None = None
+
+    def __del__(self) -> None:
+        if self._cubin_module is not None:
+            unload_cubin_module(self._cubin_module)
+            self._cubin_module = None
+            self._kernel_fn = None
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         return self.call(*args, **kwargs)
@@ -221,9 +239,9 @@ class Dispatcher:
             )
 
         # Allocate instruction and barrier tensors
-        self.instruction_tensor = _pack_instructions(self.instructions, device=self.device)
+        self.instruction_tensor = _pack_instructions(self.instructions, device=str(self.device))
         self.barrier_tensor = torch.zeros(
-            self.num_barriers, dtype=torch.int32, device=self.device,
+            self.num_barriers, dtype=torch.int32, device=str(self.device),
         )
 
         self._materialized = True
@@ -242,6 +260,35 @@ class Dispatcher:
             )
             self.tensors[tensor_idx] = src
 
+    def _compile_kernel(self) -> None:
+        device_index = self.device.index if self.device.index else torch.cuda.current_device()  # TODO: handle multi-GPU case
+        initialize_cuda_context(device_index)
+        major, minor = get_sm_arch(device_index)  # TODO: Generate config and globals correctly based on instructions
+        source = """
+            #include "megakittens.cuh"
+            struct MKConfig {{
+                static constexpr int NUM_THREADS = {num_threads};
+                static constexpr int MIN_BLOCKS_PER_SM = {min_blocks_per_sm};
+            }};
+            struct MKGlobals {{}};
+        """.format(num_threads=32, min_blocks_per_sm=1)
+        cubin, (kernel_name,) = compile_source_to_cubin(
+            source, (b"megakittens::kernel<MKConfig, MKGlobals>",), major, minor,
+        )
+        self._cubin_module = load_cubin_module(cubin)
+        self._kernel_fn = get_kernel_from_cubin_module(self._cubin_module, kernel_name)
+
     def _launch(self) -> None:
-        # TODO: JIT the kernel, with appropriate configs each time
-        pass  # TODO: wire up CUDA kernel launch
+        if self._kernel_fn is None:
+            self._compile_kernel()
+        device_index = self.device.index if self.device.index else torch.cuda.current_device()
+        _holder, packed = pack_args([(b'\x00', 1, 1)])  # TODO: Generate gls correctly based on tensors
+        stream = torch.cuda.current_stream(device_index).cuda_stream
+        launch_kernel(
+            self._kernel_fn,
+            packed,
+            grid=(1,),
+            block=(32,),
+            dynamic_smem_bytes=0,
+            stream=stream,  # TODO: Clusters
+        )

@@ -8,7 +8,8 @@ from .cuda_utils import cuda_include_dirs, get_cuda_driver_version
 
 
 CUBIN_CACHE_DIR = Path.home() / ".cache" / "megakittens" / "cubin"
-THUNDERKITTENS_ROOT = Path(__file__).resolve().parent.parent.parent / "csrc" / "ThunderKittens"
+MEGAKITTENS_ROOT = Path(__file__).resolve().parent.parent.parent / "csrc"
+THUNDERKITTENS_ROOT = MEGAKITTENS_ROOT / "ThunderKittens"
 THUNDERKITTENS_ARCH_DEFINES = {
     10: "-DKITTENS_BLACKWELL", 9: "-DKITTENS_HOPPER", 8: "-DKITTENS_AMPERE"
 }
@@ -20,6 +21,7 @@ COMMON_NVRTC_FLAGS = (
     "-DNDEBUG",
     "-lineinfo",
     "-DKITTENS_NO_HOST",
+    f"-I{MEGAKITTENS_ROOT}",
     f"-I{THUNDERKITTENS_ROOT / 'include'}",
     f"-I{THUNDERKITTENS_ROOT / 'prototype'}",
     *(f"-I{d}" for d in cuda_include_dirs()),
