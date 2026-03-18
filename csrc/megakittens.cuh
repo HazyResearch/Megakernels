@@ -1,14 +1,13 @@
 #pragma once
 
 // #include "kittens.cuh"
-// #include "config.cuh"
-// #include "util.cuh"
-// #include "controller/controller.cuh"
-// #include "launcher.cuh"
-// #include "storer.cuh"
-// #include "loader.cuh"
-// #include "consumer.cuh"
-// #include "noop.cuh"
+
+// #include "controller.cuh"
+// #include "schema.cuh"
+// #include "utils.cuh"
+// #include "workers.cuh"
+
+// #include "ops/noop.cuh"
 
 namespace megakittens {
 

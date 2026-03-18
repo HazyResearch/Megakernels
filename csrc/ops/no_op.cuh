@@ -1,7 +1,7 @@
 
 #pragma once
 
-#include "util.cuh"
+#include "kittens.cuh"
 
 namespace megakittens {
 
