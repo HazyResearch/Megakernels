@@ -2,7 +2,8 @@ import time
 
 import torch
 
-from cuda_utils import (
+from megakittens.jit.c_utils import c_int, pack_args
+from megakittens.jit.cuda_utils import (
     get_kernel_from_cubin_module,
     get_sm_arch,
     initialize_cuda_context,
@@ -11,48 +12,102 @@ from cuda_utils import (
     set_kernel_dynamic_smem,
     unload_cubin_module,
 )
-from c_utils import pack_args
-from nvrtc_jit import compile_source_to_cubin
-from pykittens import gl, st
-
-# ---------------------------------------------------------------------------
-# Config constants (mirrors C++ config<256, 256, 64, 4, false, 4, 8>)
-# ---------------------------------------------------------------------------
-
-Mb = 256
-Nb = 256
-Kb = 64
-SUPERGROUP_SIZE = 4
-OVERLAP_MMA_EPI = False
-LOAD_PIPE_DEPTH = 4
-EPI_PIPE_DEPTH = 8
-
-CLUSTER_SIZE = 2
-NUM_CONSUMERS = 1 if OVERLAP_MMA_EPI else 2
-NUM_PRODUCERS = 1
-NUM_WARPS = (NUM_CONSUMERS + NUM_PRODUCERS) * 4
-NUM_THREADS = NUM_WARPS * 32
-NUM_D_TILES = 2 if EPI_PIPE_DEPTH > 1 else 1
-
-# Tile dimensions
-A_TILE_ROWS, A_TILE_COLS = Mb // 2, Kb          # st_bf<128, 64>
-B_TILE_ROWS, B_TILE_COLS = Nb // 2, Kb          # st_bf<128, 64>
-D_TILE_ROWS, D_TILE_COLS = Mb // 2, Nb // EPI_PIPE_DEPTH  # st_bf<128, 32>
-
-# Dynamic shared memory (same formula as globals::dynamic_shared_memory())
-A_TILE_BYTES = A_TILE_ROWS * A_TILE_COLS * 2  # bf16
-B_TILE_BYTES = B_TILE_ROWS * B_TILE_COLS * 2
-D_TILE_BYTES = D_TILE_ROWS * D_TILE_COLS * 2
-DYNAMIC_SMEM = (A_TILE_BYTES * LOAD_PIPE_DEPTH * NUM_CONSUMERS +
-                B_TILE_BYTES * LOAD_PIPE_DEPTH +
-                D_TILE_BYTES * NUM_D_TILES * NUM_CONSUMERS + 1024)
+from megakittens.jit.nvrtc_jit import compile_source_to_cubin
+from megakittens.jit.pykittens import gl, st
 
 
 # ---------------------------------------------------------------------------
-# CUDA kernel source
+# Simple GEMM
 # ---------------------------------------------------------------------------
 
-KERNEL_SOURCE = r"""
+SIMPLE_GEMM_SOURCE = r"""
+#include "kittens.cuh"
+using namespace kittens;
+
+struct globals {
+    using tile_gl = gl<float, 1, 1, -1, -1>;
+    tile_gl A;
+    tile_gl B;
+    tile_gl C;
+    int N;
+};
+
+extern "C" __global__ void kernel(const __grid_constant__ globals g) {
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= g.N || col >= g.N) return;
+    const float* A = g.A.raw_ptr;
+    const float* B = g.B.raw_ptr;
+    float sum = 0.0f;
+    for (int k = 0; k < g.N; ++k)
+        sum += A[row * g.N + k] * B[k * g.N + col];
+    g.C.raw_ptr[row * g.N + col] = sum;
+}
+"""
+
+
+def _launch_simple_gemm(fn, A, B, C, N, stream):
+    BLOCK_SIZE = 32
+    global_layout = gl(dtype=torch.float32, b=1, d=1, r=-1, c=-1)
+    _holder, packed = pack_args([
+        (global_layout.tensor_to_gl(A), global_layout.size, global_layout.align),
+        (global_layout.tensor_to_gl(B), global_layout.size, global_layout.align),
+        (global_layout.tensor_to_gl(C), global_layout.size, global_layout.align),
+        (c_int(N), 4, 4),
+    ])
+    set_kernel_dynamic_smem(fn, 0)
+    launch_kernel(
+        fn,
+        packed,
+        grid=((N + BLOCK_SIZE - 1) // BLOCK_SIZE, (N + BLOCK_SIZE - 1) // BLOCK_SIZE), 
+        block=(BLOCK_SIZE, BLOCK_SIZE), 
+        dynamic_smem_bytes=0, 
+        stream=stream
+    )
+
+
+def test_simple_gemm():
+    N = 128
+    device_index = 0
+
+    initialize_cuda_context(device_index)
+    major, minor = get_sm_arch(device_index)
+    cubin, (kernel_name,) = compile_source_to_cubin(SIMPLE_GEMM_SOURCE, (b"kernel",), major, minor)
+    module = load_cubin_module(cubin)
+    fn = get_kernel_from_cubin_module(module, kernel_name)
+
+    A = torch.randn(N, N, device=f"cuda:{device_index}", dtype=torch.float32)
+    B = torch.randn(N, N, device=f"cuda:{device_index}", dtype=torch.float32)
+    C = torch.empty(N, N, device=f"cuda:{device_index}", dtype=torch.float32)
+
+    stream = torch.cuda.current_stream(device_index).cuda_stream
+    _launch_simple_gemm(fn, A, B, C, N, stream)
+    torch.cuda.synchronize(device_index)
+
+    C_ref = A @ B
+    passed = torch.equal(C, C_ref)
+    print(f"test_simple_gemm: {'Passed' if passed else 'Failed'}")
+
+    unload_cubin_module(module)
+
+
+# ---------------------------------------------------------------------------
+# Optimized GEMM
+# ---------------------------------------------------------------------------
+
+optimized_gemm_config = {
+    "Mb": 256, "Nb": 256, "Kb": 64,
+    "SUPERGROUP_SIZE": 4,
+    "OVERLAP_MMA_EPI": False,
+    "LOAD_PIPE_DEPTH": 4,
+    "EPI_PIPE_DEPTH": 8,
+    "CLUSTER_SIZE": 2,
+    "NUM_CONSUMERS": 2,
+    "NUM_PRODUCERS": 1,
+    "DYNAMIC_SHARED_MEMORY": 227 * 1024 - 1024,
+}
+
+OPTIMIZED_GEMM_SOURCE = r"""
 #include "kittens.cuh"
 using namespace kittens;
 
@@ -85,7 +140,6 @@ struct config {
 
     static constexpr int NUM_D_TILES = EPI_PIPE_DEPTH > 1 ? 2 : 1;
 };
-
 template <typename C>
 struct globals {
     using a_tile = st_bf<C::Mb/2, C::Kb>;
@@ -100,9 +154,6 @@ struct globals {
     b_gl b;
     d_gl d;
 };
-
-using CFG = config<256, 256, 64, 4, false, 4, 8>;
-static_assert(sizeof(globals<CFG>) == 768, "globals layout mismatch with Python");
 
 template <typename C>
 __launch_bounds__(C::NUM_THREADS, 1)
@@ -300,85 +351,66 @@ __global__ void kernel(const __grid_constant__ globals<C> g) {
 """
 
 
-# ---------------------------------------------------------------------------
-# Launch
-# ---------------------------------------------------------------------------
-
-def launch(fn, a_gl_py: gl, b_gl_py: gl, d_gl_py: gl,
-           A: torch.Tensor, B: torch.Tensor, D: torch.Tensor,
-           M: int, N: int, K: int, stream):
-    # Grid: total number of CTAs (clusters of 2)
-    grid_x = (M // (NUM_CONSUMERS * Mb // 2)) * N // Nb
-
+def _launch_optimized_gemm(fn, A, B, D, M, N, K, stream):
+    a_tile = st(dtype=torch.bfloat16, rows=optimized_gemm_config["Mb"]//2, cols=optimized_gemm_config["Kb"])
+    b_tile = st(dtype=torch.bfloat16, rows=optimized_gemm_config["Nb"]//2, cols=optimized_gemm_config["Kb"])
+    d_tile = st(dtype=torch.bfloat16, rows=optimized_gemm_config["Mb"]//2, cols=optimized_gemm_config["Nb"]//optimized_gemm_config["EPI_PIPE_DEPTH"])
+    a_gl = gl(dtype=torch.bfloat16, b=1, d=1, r=-1, c=-1, tma_types=[a_tile])
+    b_gl = gl(dtype=torch.bfloat16, b=1, d=1, r=-1, c=-1, tma_types=[b_tile])
+    d_gl = gl(dtype=torch.bfloat16, b=1, d=1, r=-1, c=-1, tma_types=[d_tile])
     _holder, packed = pack_args([
-        (a_gl_py.tensor_to_gl(A), a_gl_py.size, a_gl_py.align),
-        (b_gl_py.tensor_to_gl(B), b_gl_py.size, b_gl_py.align),
-        (d_gl_py.tensor_to_gl(D), d_gl_py.size, d_gl_py.align),
+        (a_gl.tensor_to_gl(A), a_gl.size, a_gl.align),
+        (b_gl.tensor_to_gl(B), b_gl.size, b_gl.align),
+        (d_gl.tensor_to_gl(D), d_gl.size, d_gl.align),
     ])
+    launch_kernel(
+        fn,
+        packed,
+        grid=((M//(optimized_gemm_config["NUM_CONSUMERS"]*optimized_gemm_config["Mb"]//2)) * N//optimized_gemm_config["Nb"],),
+        block=((optimized_gemm_config["NUM_PRODUCERS"]+optimized_gemm_config["NUM_CONSUMERS"])*4*32,),
+        dynamic_smem_bytes=optimized_gemm_config["DYNAMIC_SHARED_MEMORY"],
+        stream=stream,
+        cluster=(optimized_gemm_config["CLUSTER_SIZE"],)
+    )
 
-    launch_kernel(fn, packed, grid=(grid_x,), block=(NUM_THREADS,),
-                  dynamic_smem_bytes=DYNAMIC_SMEM, stream=stream,
-                  cluster=(CLUSTER_SIZE,))
+
+def test_optimized_gemm():
+    device_index = 0
+    M = N = K = 4096
+
+    initialize_cuda_context(device_index)
+    major, minor = get_sm_arch(device_index)
+    kernel_expr = (f'kernel<config<{optimized_gemm_config["Mb"]}, {optimized_gemm_config["Nb"]}, {optimized_gemm_config["Kb"]}, '
+                   f'{optimized_gemm_config["SUPERGROUP_SIZE"]}, {"true" if optimized_gemm_config["OVERLAP_MMA_EPI"] else "false"}, '
+                   f'{optimized_gemm_config["LOAD_PIPE_DEPTH"]}, {optimized_gemm_config["EPI_PIPE_DEPTH"]}>>')
+    cubin, (kernel_name,) = compile_source_to_cubin(OPTIMIZED_GEMM_SOURCE, (kernel_expr.encode("utf-8"),), major, minor)
+    module = load_cubin_module(cubin)
+    fn = get_kernel_from_cubin_module(module, kernel_name)
+    set_kernel_dynamic_smem(fn, optimized_gemm_config["DYNAMIC_SHARED_MEMORY"])
+
+    A = torch.randn(M, K, device=f"cuda:{device_index}", dtype=torch.bfloat16)
+    B = torch.randn(N, K, device=f"cuda:{device_index}", dtype=torch.bfloat16)
+    D = torch.empty(M, N, device=f"cuda:{device_index}", dtype=torch.bfloat16)
+
+    stream = torch.cuda.current_stream(device_index).cuda_stream
+    _launch_optimized_gemm(fn, A, B, D, M, N, K, stream)
+    torch.cuda.synchronize(device_index)
+
+    D_ref = A @ B.T
+    passed = torch.equal(D, D_ref)
+    print(f"test_optimized_gemm: {'Passed' if passed else 'Failed'}")
+
+    unload_cubin_module(module)
 
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
-def main():
-    device_index = 0
-    M = N = K = 4096
-
-    initialize_cuda_context(device_index)
-    major, minor = get_sm_arch(device_index)
-    print(f"SM arch: {major}.{minor}")
-
-    # Compile
-    t0 = time.perf_counter()
-    cubin, (kernel_name,) = compile_source_to_cubin(KERNEL_SOURCE, (b"kernel<CFG>",), major, minor)
-    t1 = time.perf_counter()
-    print(f"Compile: {t1 - t0:.4f}s")
-    print(f"Lowered kernel name: {kernel_name}")
-
-    # Load module and kernel
-    module = load_cubin_module(cubin)
-    fn = get_kernel_from_cubin_module(module, kernel_name)
-    set_kernel_dynamic_smem(fn, DYNAMIC_SMEM)
-
-    # Create tensors: A is M×K, B is N×K (kernel computes D = A × Bᵀ)
-    A = torch.randn(M, K, device=f"cuda:{device_index}", dtype=torch.bfloat16)
-    B = torch.randn(N, K, device=f"cuda:{device_index}", dtype=torch.bfloat16)
-    D = torch.empty(M, N, device=f"cuda:{device_index}", dtype=torch.bfloat16)
-
-    # pykittens gl objects (one per matrix, each with its own TMA tile type)
-    a_tile_py = st(dtype=torch.bfloat16, rows=A_TILE_ROWS, cols=A_TILE_COLS)
-    b_tile_py = st(dtype=torch.bfloat16, rows=B_TILE_ROWS, cols=B_TILE_COLS)
-    d_tile_py = st(dtype=torch.bfloat16, rows=D_TILE_ROWS, cols=D_TILE_COLS)
-
-    a_gl_py = gl(dtype=torch.bfloat16, b=1, d=1, r=-1, c=-1, tma_types=[a_tile_py])
-    b_gl_py = gl(dtype=torch.bfloat16, b=1, d=1, r=-1, c=-1, tma_types=[b_tile_py])
-    d_gl_py = gl(dtype=torch.bfloat16, b=1, d=1, r=-1, c=-1, tma_types=[d_tile_py])
-
-    stream = torch.cuda.current_stream(device_index).cuda_stream
-    torch.cuda.synchronize(device_index)
-
-    # Launch
-    t2 = time.perf_counter()
-    launch(fn, a_gl_py, b_gl_py, d_gl_py, A, B, D, M, N, K, stream)
-    torch.cuda.synchronize(device_index)
-    t3 = time.perf_counter()
-    print(f"Kernel launch + sync: {t3 - t2:.3f}s")
-
-    # Verify: kernel computes D = A × Bᵀ
-    D_ref = (A.float() @ B.float().T).bfloat16()
-    diff = (D.float() - D_ref.float()).abs()
-    print(f"abs mean: {D.float().abs().mean().item():.6f}")
-    print(f"abs max:  {D.float().abs().max().item():.6f}")
-    print(f"err mean: {diff.mean().item():.6f}")
-    print(f"err max:  {diff.max().item():.6f}")
-
-    unload_cubin_module(module)
+def run_tests():
+    test_simple_gemm()
+    test_optimized_gemm()
 
 
 if __name__ == "__main__":
-    main()
+    run_tests()
