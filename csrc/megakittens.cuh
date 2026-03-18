@@ -81,37 +81,7 @@ __device__ __forceinline__ void _megakernel(const globals &g) {
 
 template <typename config, typename globals, typename... ops>
 __device__ __forceinline__ void megakernel(const __grid_constant__ globals g) {
-    _megakernel<config, globals, NoOp<config>, ops...>(g);
-}
-
-template <typename globals, size_t... Is>
-__host__ globals make_megakernel_globals(
-    std::vector<at::Tensor> &tensors,
-    const at::Tensor &instruction_tensor,
-    const at::Tensor &barrier_tensor,
-    std::index_sequence<Is...>
-) {
-    return globals {
-        .tensors      = { kittens::py::tensor_to_gl<typename globals::tensor_gl>(tensors[Is])... },
-        .instructions = kittens::py::tensor_to_gl<typename globals::instruction_gl>(instruction_tensor),
-        .barriers     = kittens::py::tensor_to_gl<typename globals::barrier_gl>(barrier_tensor),
-    };
-}
-
-__host__ void entrypoint(
-    std::vector<at::Tensor> tensors,
-    const at::Tensor &instruction_tensor,
-    const at::Tensor &barrier_tensor
-) {
-    auto g = make_megakernel_globals<globals>(
-        instruction_tensor, barrier_tensor, tensors,
-        std::make_index_sequence<globals::NUM_TENSORS>{}
-    );
-    kittens::py::launch_kernel<config, globals, megakernel>(g);
-}
-
-PYBIND11_MODULE(_C, m) {
-    m.def("entrypoint", &entrypoint);
+    // _megakernel<config, globals, NoOp<config>, ops...>(g);
 }
 
 } // namespace megakernel
