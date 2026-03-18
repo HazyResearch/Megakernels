@@ -1,4 +1,13 @@
 import ctypes
+import struct
+
+
+def c_int(v: int) -> bytes:
+    return struct.pack('<i', v)
+
+
+def c_float(v: float) -> bytes:
+    return struct.pack('<f', v)
 
 
 def align_up(offset: int, alignment: int) -> int:
