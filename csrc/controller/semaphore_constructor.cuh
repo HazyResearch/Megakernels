@@ -4,14 +4,14 @@
 
 #include "../util.cuh"
 
-namespace megakernel {
+namespace megakittens {
 namespace controller {
 
 template <typename config, typename globals>
 struct semaphore_constructor_op_dispatcher {
     template <typename op> struct dispatcher {
         __device__ static inline int
-        run(const globals &g, ::megakernel::state<config> &kvms) {
+        run(const globals &g, ::megakittens::state<config> &kvms) {
             auto out = op::controller::init_semaphores(g, kvms);
             asm volatile("fence.proxy.async.shared::cta;\n" ::: "memory");
             return out;
@@ -21,7 +21,7 @@ struct semaphore_constructor_op_dispatcher {
 
 template <typename config, typename globals, typename... ops>
 __device__ void inline semaphore_constructor_loop(
-    const globals &g, ::megakernel::state<config> &kvms) {
+    const globals &g, ::megakittens::state<config> &kvms) {
     static_assert(config::INSTRUCTION_PIPELINE_STAGES == 2,
                   "Need to be changed.");
     int num_iters = g.instructions.rows();
@@ -47,7 +47,7 @@ __device__ void inline semaphore_constructor_loop(
                 semaphore_constructor_op_dispatcher<config,
                                                     globals>::dispatcher,
                 ops...>::template run<int, config, globals,
-                                      ::megakernel::state<config>>(
+                                      ::megakittens::state<config>>(
                 opcode, g, kvms);
         }
         arrive(kvms.semaphores_ready);
@@ -81,4 +81,4 @@ __device__ void inline semaphore_constructor_loop(
 }
 
 } // namespace controller
-} // namespace megakernel
+} // namespace megakittens

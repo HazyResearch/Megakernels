@@ -4,7 +4,7 @@
 
 #include "../util.cuh"
 
-namespace megakernel {
+namespace megakittens {
 namespace controller {
 
 template <typename config, typename globals>
@@ -20,7 +20,7 @@ struct page_allocator_op_dispatcher {
 
 template <typename config, typename globals, typename... ops>
 __device__ void inline page_allocator_loop(const globals &g,
-                                           ::megakernel::state<config> &kvms) {
+                                           ::megakittens::state<config> &kvms) {
     static_assert(config::INSTRUCTION_PIPELINE_STAGES <= 16,
                   "This would be an absurd thing to do.");
     constexpr uint32_t membermask = 0xFFFFFFFF >> (32 - config::NUM_PAGES);
@@ -71,4 +71,4 @@ __device__ void inline page_allocator_loop(const globals &g,
 }
 
 } // namespace controller
-} // namespace megakernel
+} // namespace megakittens

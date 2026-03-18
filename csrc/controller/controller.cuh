@@ -8,11 +8,11 @@
 #include "semaphore_constructor.cuh"
 #include "page_allocator.cuh"
 
-namespace megakernel {
+namespace megakittens {
 namespace controller {
 
 template <typename config, typename globals, typename... ops>
-__device__ void main_loop(const globals &g, ::megakernel::state<config> &kvms) {
+__device__ void main_loop(const globals &g, ::megakittens::state<config> &kvms) {
     auto laneid = ::kittens::laneid();
     int num_iters = g.instructions.rows();
     int num_semaphores[config::INSTRUCTION_PIPELINE_STAGES];
@@ -134,7 +134,7 @@ __device__ void main_loop(const globals &g, ::megakernel::state<config> &kvms) {
                 semaphore_constructor_op_dispatcher<config,
                                                     globals>::dispatcher,
                 ops...>::template run<int, config, globals,
-                                        ::megakernel::state<config>>(opcode,
+                                        ::megakittens::state<config>>(opcode,
                                                                     g, kvms);
 
             // broadcast the result to all lanes
@@ -214,4 +214,4 @@ __device__ void main_loop(const globals &g, ::megakernel::state<config> &kvms) {
 }
 
 } // namespace controller
-} // namespace megakernel
+} // namespace megakittens

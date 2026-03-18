@@ -4,7 +4,7 @@
 
 #include "../util.cuh"
 
-namespace megakernel {
+namespace megakittens {
 namespace controller {
 
 template <typename config, typename globals>
@@ -67,4 +67,4 @@ __device__ void inline store_timings_and_reset(int *timings,
 }
 
 } // namespace controller
-} // namespace megakernel
+} // namespace megakittens

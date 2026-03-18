@@ -2,7 +2,7 @@
 
 #include "kittens.cuh"
 
-namespace megakernel {
+namespace megakittens {
 
 struct default_config {
     // Instruction pipeline stages (should NOT change)
@@ -86,4 +86,4 @@ void print_config() {
     std::cout << "---------------------------------------------" << std::endl;
 }
 
-} // namespace megakernel
+} // namespace megakittens

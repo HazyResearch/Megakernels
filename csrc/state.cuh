@@ -3,7 +3,7 @@
 #include "kittens.cuh"
 #include "config.cuh"
 
-namespace megakernel {
+namespace megakittens {
 
 template <typename config> 
 struct __align__(128) instruction_state_t {
@@ -102,4 +102,4 @@ struct state_t {
     }
 };
 
-} // namespace megakernel
+} // namespace megakittens

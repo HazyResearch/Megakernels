@@ -3,7 +3,7 @@
 
 #include "util.cuh"
 
-namespace megakernel {
+namespace megakittens {
 
 template <typename config> struct NoOp {
     static constexpr int opcode = 0;
@@ -55,4 +55,4 @@ template <typename config> struct NoOp {
     };
 };
 
-} // namespace megakernel
+} // namespace megakittens

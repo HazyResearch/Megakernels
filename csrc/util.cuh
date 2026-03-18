@@ -3,7 +3,7 @@
 #include "kittens.cuh"
 #include "config.cuh"
 
-namespace megakernel {
+namespace megakittens {
 
 __device__ inline unsigned int get_smid() {
     unsigned int ret;
@@ -88,7 +88,7 @@ struct dispatch_op<op_dispatcher, op, ops...> {
     }
 };
 
-} // namespace megakernel
+} // namespace megakittens
 
 #ifdef MK_DEBUG
 #define MK_DEBUG_PRINT_START(msg)                                              \
@@ -101,19 +101,19 @@ struct dispatch_op<op_dispatcher, op, ops...> {
 #endif
 
 #define MAKE_WORKER(name, start_event, end_event, group_size)              \
-namespace megakernel {                                                     \
+namespace megakittens {                                                     \
 namespace name {                                                           \
 template <typename config, typename globals> struct name##_op_dispatcher { \
     template <typename op> struct dispatcher {                             \
         __device__ static inline void                                      \
-        run(const globals &g, ::megakernel::state<config> &mks) {          \
+        run(const globals &g, ::megakittens::state<config> &mks) {          \
             op::name::run(g, mks);                                         \
         }                                                                  \
     };                                                                     \
 };                                                                         \
 template <typename config, typename globals, typename... ops>              \
 __device__ __forceinline__ void main_loop(const globals &g,                \
-                            ::megakernel::state<config> &mks) {            \
+                            ::megakittens::state<config> &mks) {            \
     MK_DEBUG_PRINT_START(#name);                                           \
     int num_iters = g.instructions.rows();                                 \
     for (mks.instruction_index = 0, mks.instruction_ring = 0;              \
@@ -125,7 +125,7 @@ __device__ __forceinline__ void main_loop(const globals &g,                \
         if(mks.instruction()[0] == -1) break;                              \
         dispatch_op<name##_op_dispatcher<config, globals>::dispatcher,     \
                     ops...>::template run<void, config, globals,           \
-                                            ::megakernel::state<config>>(  \
+                                            ::megakittens::state<config>>(  \
             mks.instruction()[0], g, mks);                                 \
         kittens::warp::sync();                                             \
         if (kittens::group<group_size>::laneid() == 0) {                   \

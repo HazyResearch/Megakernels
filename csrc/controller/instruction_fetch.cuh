@@ -4,7 +4,7 @@
 
 #include "../util.cuh"
 
-namespace megakernel {
+namespace megakittens {
 namespace controller {
 
 template <typename config, typename globals>
@@ -40,4 +40,4 @@ __device__ inline bool load_instructions(int *instruction,
 }
 
 } // namespace controller
-} // namespace megakernel
+} // namespace megakittens
