@@ -10,4 +10,7 @@ dependencies = [
     "torch>=2.9,<3",
     "cuda-python[all]>=13.0,<14",
     "numpy>=2.4,<3",
+    "pydantic==2.12.*",
+    "graphviz==0.21.*",
+    "tabulate==0.10.*",
 ]
