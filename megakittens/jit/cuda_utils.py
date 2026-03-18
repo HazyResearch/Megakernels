@@ -15,6 +15,11 @@ def check_cuda(err: cuda_driver.CUresult) -> None:
 def initialize_cuda_context(device_index: int = 0) -> None:
     (err,) = cuda_driver.cuInit(0)
     check_cuda(err)
+    driver_ver = get_cuda_driver_version()
+    if driver_ver < 13000:
+        raise RuntimeError(
+            f"[MegaKittens] CUDA 13.0+ is required, found {driver_ver // 1000}.{(driver_ver % 1000) // 10}"
+        )
     err, dev = cuda_driver.cuDeviceGet(device_index)
     check_cuda(err)
     err, ctx = cuda_driver.cuDevicePrimaryCtxRetain(dev)
