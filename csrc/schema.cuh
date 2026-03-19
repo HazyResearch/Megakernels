@@ -46,10 +46,10 @@ struct __align__(128) instruction_state_t {
 template <typename Config>
 struct page_t {
     int data[Config::PAGE_SIZE/sizeof(int)];
-    __device__ inline void *ptr(int byte_offset = 0) {
+    __device__ __forceinline__ void *ptr(int byte_offset = 0) {
         return reinterpret_cast<void *>(reinterpret_cast<uint64_t>(&data[0])+byte_offset);
     }
-    __device__ inline const void *ptr(int byte_offset = 0) const {
+    __device__ __forceinline__ const void *ptr(int byte_offset = 0) const {
         return reinterpret_cast<const void *>(reinterpret_cast<uint64_t>(&data[0])+byte_offset);
     }
 };
@@ -72,41 +72,41 @@ struct state_t {
     kittens::semaphore &tensor_finished;
     kittens::tensor_allocator<1, 2> &tensor_alloc;
 
-    __device__ inline int (&instruction())[Config::INSTRUCTION_WIDTH] {
+    __device__ __forceinline__ int (&instruction())[Config::INSTRUCTION_WIDTH] {
         return instruction_states[stage].instruction;
     }
-    __device__ inline const int (&instruction() const)[Config::INSTRUCTION_WIDTH] {
+    __device__ __forceinline__ const int (&instruction() const)[Config::INSTRUCTION_WIDTH] {
         return instruction_states[stage].instruction;
     }
-    __device__ inline int (&pid_order())[Config::NUM_PAGES] {
+    __device__ __forceinline__ int (&pid_order())[Config::NUM_PAGES] {
         return instruction_states[stage].pid_order;
     }
-    __device__ inline const int (&pid_order() const)[Config::NUM_PAGES] {
+    __device__ __forceinline__ const int (&pid_order() const)[Config::NUM_PAGES] {
         return instruction_states[stage].pid_order;
     }
-    __device__ inline kittens::semaphore (&semaphores())[Config::DYNAMIC_SEMAPHORES] {
+    __device__ __forceinline__ kittens::semaphore (&semaphores())[Config::DYNAMIC_SEMAPHORES] {
         return instruction_states[stage].semaphores;
     }
-    __device__ inline const kittens::semaphore (&semaphores() const)[Config::DYNAMIC_SEMAPHORES] {
+    __device__ __forceinline__ const kittens::semaphore (&semaphores() const)[Config::DYNAMIC_SEMAPHORES] {
         return instruction_states[stage].semaphores;
     }
-    __device__ inline void *scratch() const {
+    __device__ __forceinline__ void *scratch() const {
         return reinterpret_cast<void *>(&instruction_states[stage].scratch[0]);
     }
 
-    __device__ inline int pid(int lid) {
+    __device__ __forceinline__ int pid(int lid) {
         return pid_order()[lid];
     }
-    __device__ inline void finish_page(int pid, int count) {
+    __device__ __forceinline__ void finish_page(int pid, int count) {
         kittens::arrive(page_finished[pid], count);
     }
-    __device__ inline void wait_page_ready(int pid) {
+    __device__ __forceinline__ void wait_page_ready(int pid) {
         kittens::wait(page_finished[pid], iter & 0b1);
     }
-    __device__ inline void wait_tensor_ready() {
+    __device__ __forceinline__ void wait_tensor_ready() {
         kittens::wait(tensor_finished, iter & 0b1);
     }
-    __device__ inline void wait_semaphores_ready() {
+    __device__ __forceinline__ void wait_semaphores_ready() {
         kittens::wait(semaphores_ready, iter & 0b1);
     }
 };
