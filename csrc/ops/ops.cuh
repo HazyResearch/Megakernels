@@ -15,12 +15,12 @@ enum WorkerType {
 
 template <typename Op, WorkerType worker_type, typename T, typename Globals, typename... Args>
 __device__ __forceinline__ static T dispatch_op(const Globals &g, Args &...args) {
-    if constexpr      (worker_type == WorkerType::page_manager)      return Op::controller::release_lid(g, args...);
-    else if constexpr (worker_type == WorkerType::semaphore_manager) return Op::controller::init_semaphores(g, args...);
-    else if constexpr (worker_type == WorkerType::loader)            return Op::loader::run(g, args...);
-    else if constexpr (worker_type == WorkerType::launcher)          return Op::launcher::run(g, args...);
-    else if constexpr (worker_type == WorkerType::consumer)          return Op::consumer::run(g, args...);
-    else if constexpr (worker_type == WorkerType::storer)            return Op::storer::run(g, args...);
+    if constexpr      (worker_type == WorkerType::page_manager)      return Op<Config, Globals>::controller::release_lid(g, args...);
+    else if constexpr (worker_type == WorkerType::semaphore_manager) return Op<Config, Globals>::controller::init_semaphores(g, args...);
+    else if constexpr (worker_type == WorkerType::loader)            return Op<Config, Globals>::loader::run(g, args...);
+    else if constexpr (worker_type == WorkerType::launcher)          return Op<Config, Globals>::launcher::run(g, args...);
+    else if constexpr (worker_type == WorkerType::consumer)          return Op<Config, Globals>::consumer::run(g, args...);
+    else if constexpr (worker_type == WorkerType::storer)            return Op<Config, Globals>::storer::run(g, args...);
     else asm volatile("{trap;\n}");
 }
 
