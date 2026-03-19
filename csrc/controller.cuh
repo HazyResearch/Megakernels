@@ -59,7 +59,7 @@ __device__ __forceinline__ void controller_loop(const Globals &g, megakittens::s
             const int last_opcode = s.instruction_states[last_stage].instruction[0];
             if (lane_id < Config::NUM_PAGES) {
                 const int lid = dispatch_op<WorkerType::page_manager, int, Config, Globals>(
-                        last_opcode, g, s.instruction_states[last_stage].instruction, lane_id);
+                        last_opcode, g, s, lane_id);
                 s.instruction_states[s.stage].pid_order[lane_id] = s.instruction_states[last_stage].pid_order[lid];
             }
         }
