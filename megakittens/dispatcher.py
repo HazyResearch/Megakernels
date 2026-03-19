@@ -8,12 +8,14 @@ import torch  # TODO: completely remove torch dependency and purely rely on CUDA
 
 from .dag import Device, DType, TensorMeta
 from .jit.c_utils import pack_args
+from .jit.pykittens import gl
 from .jit.cuda_utils import (
     get_kernel_from_cubin_module,
     get_sm_arch,
     initialize_cuda_context,
     launch_kernel,
     load_cubin_module,
+    set_kernel_dynamic_smem,
     unload_cubin_module,
 )
 from .jit.nvrtc_jit import compile_source_to_cubin
@@ -130,6 +132,12 @@ class Dispatcher:
     MegaKernel.
     """
 
+    CLUSTER_SIZE = 2
+    NUM_CONSUMER_WARPS = 8
+    NUM_WARPS = 4 + NUM_CONSUMER_WARPS
+    NUM_THREADS = NUM_WARPS*32
+    DYNAMIC_SHARED_MEMORY = 227*1024 - (256 + 2*(128 + 128 + 32*8 + 4096))
+
     def __init__(
         self,
         tensor_metas: list[TensorMeta],
@@ -191,6 +199,13 @@ class Dispatcher:
         self._kernel_fn: cuda_driver.CUfunction | None = None
         self._cubin_module: cuda_driver.CUmodule | None = None
 
+        # TODO: dims should later be adaptively chosen as compile/runtime dim
+        self.all_tensors = [self.instruction_tensor, self.barrier_tensor] + self.tensors
+        self.gls: list[gl] = []
+        for t in self.all_tensors:
+            shape = (1,) * (4 - len(t.shape)) + tuple(t.shape)
+            self.gls.append(gl(dtype=t.dtype, b=shape[0], d=shape[1], r=shape[2], c=shape[3]))
+
     def __del__(self) -> None:
         if self._cubin_module is not None:
             unload_cubin_module(self._cubin_module)
@@ -241,7 +256,7 @@ class Dispatcher:
         # Allocate instruction and barrier tensors
         self.instruction_tensor = _pack_instructions(self.instructions, device=str(self.device))
         self.barrier_tensor = torch.zeros(
-            self.num_barriers, dtype=torch.int32, device=str(self.device),
+            max(self.num_barriers, 1), dtype=torch.int32, device=str(self.device),
         )
 
         self._materialized = True
@@ -264,31 +279,35 @@ class Dispatcher:
         device_index = self.device.index if self.device.index else torch.cuda.current_device()  # TODO: handle multi-GPU case
         initialize_cuda_context(device_index)
         major, minor = get_sm_arch(device_index)  # TODO: Generate config and globals correctly based on instructions
-        source = """
+        source = f"""
             #include "megakittens.cuh"
-            struct MKConfig {{
-                static constexpr int NUM_THREADS = {num_threads};
-                static constexpr int MIN_BLOCKS_PER_SM = {min_blocks_per_sm};
+            struct MKConfig : megakittens::default_config {{}};
+            struct MKGlobals {{
+                {self.gls[0].cpp_type} instructions;
+                {self.gls[1].cpp_type} barriers;
             }};
-            struct MKGlobals {{}};
-        """.format(num_threads=32, min_blocks_per_sm=1)
+        """  # TODO: add normal tensors
         cubin, (kernel_name,) = compile_source_to_cubin(
             source, (b"megakittens::kernel<MKConfig, MKGlobals>",), major, minor,
         )
         self._cubin_module = load_cubin_module(cubin)
         self._kernel_fn = get_kernel_from_cubin_module(self._cubin_module, kernel_name)
+        set_kernel_dynamic_smem(self._kernel_fn, self.DYNAMIC_SHARED_MEMORY)
 
     def _launch(self) -> None:
         if self._kernel_fn is None:
             self._compile_kernel()
         device_index = self.device.index if self.device.index else torch.cuda.current_device()
-        _holder, packed = pack_args([(b'\x00', 1, 1)])  # TODO: Generate gls correctly based on tensors
+        _globals_holder, globals_packed = pack_args(
+            [(g.tensor_to_gl(t), g.size, g.align) for g, t in zip(self.gls, self.all_tensors)]
+        )
         stream = torch.cuda.current_stream(device_index).cuda_stream
         launch_kernel(
             self._kernel_fn,
-            packed,
-            grid=(1,),
-            block=(32,),
-            dynamic_smem_bytes=0,
-            stream=stream,  # TODO: Clusters
+            globals_packed,
+            grid=(len(self.instructions),),
+            block=(self.NUM_THREADS,),
+            dynamic_smem_bytes=self.DYNAMIC_SHARED_MEMORY,
+            stream=stream,
+            cluster=(self.CLUSTER_SIZE,),
         )

@@ -72,6 +72,17 @@ class gl(BaseModel):
         return self
 
     @property
+    def cpp_type(self) -> str:
+        dtype_str = {  # TODO: remove dependency on torch.dtype
+            torch.float64: "double",
+            torch.float32: "float",
+            torch.bfloat16: "kittens::bf16",
+            torch.float16: "kittens::half",
+            torch.int32: "int",
+        }[self.dtype]
+        return f"kittens::gl<{dtype_str}, {self.b}, {self.d}, {self.r}, {self.c}>"  # TODO: add TMA descs
+
+    @property
     def align(self) -> int:
         return 64 if self.tma_types else 8  # CUtensorMap: alignas(64) in NVRTC
 
