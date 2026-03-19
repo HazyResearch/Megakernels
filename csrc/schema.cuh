@@ -12,6 +12,7 @@ struct default_config {
 
     static constexpr int CLUSTER_SIZE = 2;
     static constexpr int MIN_BLOCKS_PER_SM = 1;
+    static_assert(CLUSTER_SIZE == 1 || CLUSTER_SIZE == 2);
 
     static constexpr int NUM_CONSUMER_WARPS = 8;
     static constexpr int NUM_WARPS = 4 + NUM_CONSUMER_WARPS;
@@ -70,7 +71,7 @@ struct state_t {
     kittens::semaphore (&page_finished)[Config::NUM_PAGES];
 
     kittens::semaphore &tensor_finished;
-    kittens::tensor_allocator<1, 2> &tensor_alloc;
+    kittens::tensor_allocator<1, Config::CLUSTER_SIZE> &tensor_alloc;
 
     __device__ __forceinline__ int (&instruction())[Config::INSTRUCTION_WIDTH] {
         return instruction_states[stage].instruction;

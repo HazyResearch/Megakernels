@@ -25,7 +25,7 @@ void kernel(const __grid_constant__ Globals g) {
             reinterpret_cast<void *>(((uint64_t)&__shm[0] + 1023) & ~(uint64_t)1023));
 
     // Allocate tensor memory
-    typename state_t<Config>::tensor_allocator_t tensor_alloc;
+    kittens::tensor_allocator<1, Config::CLUSTER_SIZE> tensor_alloc;
 
     // Instantiate MegaKittens state
     state_t<Config> s{0, 0, clc_handle, clc_arrived, instruction_states, instruction_arrived, instruction_finished,
