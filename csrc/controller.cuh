@@ -49,6 +49,7 @@ __device__ __forceinline__ void controller_loop(const Globals &g, megakittens::s
         int *instruction_ptr = &g.instructions[{instruction_index, 0}];
         if (lane_id < Config::INSTRUCTION_WIDTH)
             s.instruction_states[s.stage].instruction[lane_id] = instruction_ptr[lane_id];
+        kittens::warp::sync();
 
         // Step 3. Establish physical page order
         if (i == 0) {

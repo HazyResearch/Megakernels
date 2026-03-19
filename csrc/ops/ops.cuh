@@ -15,7 +15,7 @@ enum WorkerType {
 
 template <typename Op, WorkerType worker_type, typename T, typename Globals, typename... Args>
 __device__ __forceinline__ static T dispatch_op(const Globals &g, Args &...args) {
-    if constexpr      (worker_type == WorkerType::page_manager)      return Op<Config, Globals>::controller::release_lid(g, args...);
+    if constexpr      (worker_type == WorkerType::page_manager)      return Op<Config, Globals>::controller::lid_release_order(g, args...);
     else if constexpr (worker_type == WorkerType::semaphore_manager) return Op<Config, Globals>::controller::init_semaphores(g, args...);
     else if constexpr (worker_type == WorkerType::loader)            return Op<Config, Globals>::loader::run(g, args...);
     else if constexpr (worker_type == WorkerType::launcher)          return Op<Config, Globals>::launcher::run(g, args...);

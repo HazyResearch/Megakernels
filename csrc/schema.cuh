@@ -96,17 +96,17 @@ struct state_t {
     __device__ __forceinline__ int pid(int lid) {
         return pid_order()[lid];
     }
-    __device__ __forceinline__ void finish_page(int pid, int count) {
+    __device__ __forceinline__ void page_wait(int pid) {
+        kittens::wait(page_finished[pid], iter&0b1);
+    }
+    __device__ __forceinline__ void page_finish(int pid, int count) {
         kittens::arrive(page_finished[pid], count);
     }
-    __device__ __forceinline__ void wait_page_ready(int pid) {
-        kittens::wait(page_finished[pid], iter & 0b1);
+    __device__ __forceinline__ void tensor_wait() {
+        kittens::wait(tensor_finished, iter&0b1);
     }
-    __device__ __forceinline__ void wait_tensor_ready() {
-        kittens::wait(tensor_finished, iter & 0b1);
-    }
-    __device__ __forceinline__ void wait_semaphores_ready() {
-        kittens::wait(semaphores_ready, iter & 0b1);
+    __device__ __forceinline__ void tensor_finish(int count) {
+        kittens::arrive(tensor_finished, count);
     }
 };
 

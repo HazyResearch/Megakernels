@@ -10,41 +10,37 @@ struct NoOp {
     static constexpr int opcode = 0;
 
     struct controller {
-        static __device__ int
-        release_lid(const Globals &g, typename Config::instruction_t &instruction, int &query) {
-            return query;
+        __device__ __forceinline__ static int lid_release_order(const Globals &g, state_t<Config> &s, int lid) {
+            return lid;
         }
-        static __device__ int init_semaphores(const Globals &g, state<Config> &s) {
+        __device__ __forceinline__ static int init_semaphores(const Globals &g, state_t<Config> &s) {
             return 0;
         }
     };
 
     struct loader {
-        static __device__ void run(const Globals &g, state<Config> &s) {
+        __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
             if (kittens::laneid() < Config::NUM_PAGES) { // release all pages ASAP!
-                auto pid = s.pid(kittens::laneid());
-                s.wait_page_ready(pid);
-                s.finish_page(pid, Config::NUM_CONSUMER_WARPS);
+                int pid = s.pid(kittens::laneid());
+                s.page_wait(pid);
+                s.page_finish(pid, Config::NUM_CONSUMER_WARPS);
             }
-
-            kittens::warp::arrive(s.instruction_fetch_ready, Config::NUM_CONSUMER_WARPS);
         }
     };
 
     struct launcher {
-        static __device__ void run(const Globals &g, state<Config> &s) {
-            s.wait_tensor_ready();
-            if (kittens::laneid() == 0)
-                arrive(s.tensor_finished, Config::NUM_CONSUMER_WARPS);
+        __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
+            s.tensor_wait();
+            if (kittens::warp::elect_leader()) s.tensor_finish(Config::NUM_CONSUMER_WARPS);
         }
     };
 
     struct consumer {
-        static __device__ void run(const Globals &g, state<Config> &s) {}
+        __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {}
     };
 
     struct storer {
-        static __device__ void run(const Globals &g, state<Config> &s) {}
+        __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {}
     };
 };
 
