@@ -11,13 +11,11 @@ template <typename config> struct NoOp {
     struct controller {
         template <typename globals>
         static __device__ int
-        release_lid(const globals &g,
-                    typename config::instruction_t &instruction, int &query) {
+        release_lid(const globals &g, typename config::instruction_t &instruction, int &query) {
             return query;
         }
         template <typename globals>
-        static __device__ int init_semaphores(const globals &g,
-                                              state<config> &s) {
+        static __device__ int init_semaphores(const globals &g, state<config> &s) {
             return 0;
         }
     };
