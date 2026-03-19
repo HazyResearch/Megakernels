@@ -198,13 +198,8 @@ class Dispatcher:
         self.output_tensor_indices: tuple[int, ...] = tuple(output_tensor_indices)
         self._kernel_fn: cuda_driver.CUfunction | None = None
         self._cubin_module: cuda_driver.CUmodule | None = None
-
-        # TODO: dims should later be adaptively chosen as compile/runtime dim
-        self.all_tensors = [self.instruction_tensor, self.barrier_tensor] + self.tensors
-        self.gls: list[gl] = []
-        for t in self.all_tensors:
-            shape = (1,) * (4 - len(t.shape)) + tuple(t.shape)
-            self.gls.append(gl(dtype=t.dtype, b=shape[0], d=shape[1], r=shape[2], c=shape[3]))
+        self.all_tensors: list[torch.Tensor | None] = [None] * (2 + len(tensor_metas))
+        self.gls: list[gl | None] = [None] * len(self.all_tensors)
 
     def __del__(self) -> None:
         if self._cubin_module is not None:
@@ -259,6 +254,13 @@ class Dispatcher:
             max(self.num_barriers, 1), dtype=torch.int32, device=str(self.device),
         )
 
+        # Build gls
+        # TODO: dims should later be adaptively chosen as compile/runtime dim
+        self.all_tensors = [self.instruction_tensor, self.barrier_tensor] + self.tensors
+        for i, t in enumerate(self.all_tensors):
+            shape = (1,) * (4 - len(t.shape)) + tuple(t.shape)
+            self.gls[i] = gl(dtype=t.dtype, b=shape[0], d=shape[1], r=shape[2], c=shape[3])
+
         self._materialized = True
 
     def _materialize_inputs(self, args: tuple[Any, ...]) -> None:
@@ -274,6 +276,7 @@ class Dispatcher:
                 src, self.tensor_metas[tensor_idx], f"Input {input_arg_idx}"
             )
             self.tensors[tensor_idx] = src
+            self.all_tensors[2 + tensor_idx] = src  # TODO: if input dims change, all other dims + gls should change
 
     def _compile_kernel(self) -> None:
         device_index = self.device.index if self.device.index else torch.cuda.current_device()  # TODO: handle multi-GPU case
@@ -298,8 +301,9 @@ class Dispatcher:
         if self._kernel_fn is None:
             self._compile_kernel()
         device_index = self.device.index if self.device.index else torch.cuda.current_device()
+        # TODO: include normal tensors once they are added to MKGlobals
         _globals_holder, globals_packed = pack_args(
-            [(g.tensor_to_gl(t), g.size, g.align) for g, t in zip(self.gls, self.all_tensors)]
+            [(g.tensor_to_gl(t), g.size, g.align) for g, t in zip(self.gls[:2], self.all_tensors[:2])]
         )
         stream = torch.cuda.current_stream(device_index).cuda_stream
         launch_kernel(
