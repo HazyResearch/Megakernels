@@ -93,7 +93,6 @@ struct state_t {
     __device__ __forceinline__ void *scratch() const {
         return reinterpret_cast<void *>(&instruction_states[stage].scratch[0]);
     }
-
     __device__ __forceinline__ int pid(int lid) {
         return pid_order()[lid];
     }
