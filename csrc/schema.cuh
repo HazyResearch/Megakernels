@@ -24,7 +24,7 @@ struct default_config {
     static_assert(DYNAMIC_SEMAPHORES <= 32); // for warp parallel processing
 
     static constexpr int SCRATCH_BYTES = 4096;
-    static constexpr int STATIC_SHARED_MEMORY = 256 + INSTRUCTION_PIPE_STAGES *
+    static constexpr int STATIC_SHARED_MEMORY = 512 + INSTRUCTION_PIPE_STAGES *
         (INSTRUCTION_WIDTH*4 + 128 + DYNAMIC_SEMAPHORES*8 + SCRATCH_BYTES); // sizeof(instruction_state_t)
     static constexpr int DYNAMIC_SHARED_MEMORY = kittens::MAX_SHARED_MEMORY - STATIC_SHARED_MEMORY;
 

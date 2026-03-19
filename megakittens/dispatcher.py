@@ -136,7 +136,7 @@ class Dispatcher:
     NUM_CONSUMER_WARPS = 8
     NUM_WARPS = 4 + NUM_CONSUMER_WARPS
     NUM_THREADS = NUM_WARPS*32
-    DYNAMIC_SHARED_MEMORY = 227*1024 - (256 + 2*(128 + 128 + 32*8 + 4096))
+    DYNAMIC_SHARED_MEMORY = 227*1024 - (512 + 2*(128 + 128 + 32*8 + 4096))  # 64B extra for __align__(128) padding
 
     def __init__(
         self,
