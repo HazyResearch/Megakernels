@@ -9,7 +9,7 @@
 
 namespace megakittens {
 
-template <typename Config, typename Globals, typename>
+template <typename Config, typename Globals>
 __global__ __launch_bounds__(Config::NUM_THREADS, Config::MIN_BLOCKS_PER_SM)
 void kernel(const __grid_constant__ Globals g) {
     // Allocate shared memory
@@ -25,11 +25,11 @@ void kernel(const __grid_constant__ Globals g) {
             reinterpret_cast<void *>(((uint64_t)&__shm[0] + 1023) & ~(uint64_t)1023));
 
     // Allocate tensor memory
-    typename state<Config>::tensor_allocator_t tensor_alloc;
+    typename state_t<Config>::tensor_allocator_t tensor_alloc;
 
     // Instantiate MegaKittens state
-    state<Config> s{0, 0, clc_handle, clc_arrived, instruction_states, instruction_arrived, instruction_finished,
-                    pages, page_finished, tensor_finished, tensor_alloc};
+    state_t<Config> s{0, 0, clc_handle, clc_arrived, instruction_states, instruction_arrived, instruction_finished,
+                      pages, page_finished, tensor_finished, tensor_alloc};
 
     // Initialize common semaphores
     if (threadIdx.x < Config::INSTRUCTION_PIPE_STAGES) {
