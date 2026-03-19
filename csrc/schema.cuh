@@ -10,7 +10,9 @@ struct default_config {
     using instruction_t = int[INSTRUCTION_WIDTH];
     static_assert(INSTRUCTION_WIDTH <= 32); // for warp parallel processing
 
+    static constexpr int CLUSTER_SIZE = 2;
     static constexpr int MIN_BLOCKS_PER_SM = 1;
+
     static constexpr int NUM_CONSUMER_WARPS = 8;
     static constexpr int NUM_WARPS = 4 + NUM_CONSUMER_WARPS;
     static constexpr int NUM_THREADS = NUM_WARPS * kittens::WARP_THREADS;
@@ -33,9 +35,6 @@ struct default_config {
 };
 
 template <typename Config>
-using instruction_gl = kittens::gl<int, 1, 1, -1, Config::INSTRUCTION_WIDTH>;
-
-template <typename Config> 
 struct __align__(128) instruction_state_t {
     Config::instruction_t instruction;
     int pid_order[Config::NUM_PAGES];
