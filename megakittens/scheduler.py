@@ -165,6 +165,10 @@ def schedule(
             for slot in range(len(node.out_tensors))
         )
 
+        src_metas = tuple(in_node.out_tensors[slot_idx] for in_node, slot_idx in node.in_nodes)
+        dst_metas = node.out_tensors
+        itype.validate(src_metas, dst_metas)
+
         key = (itype, src_tensors, dst_tensors)
         if key not in opcode_map:
             opcode = opcode_counter

@@ -51,6 +51,11 @@ class IType(ABC):
         """The OpType value this instruction implements (e.g. ``"add"``, ``"matmul"``)."""
         ...
 
+    @abstractmethod
+    def validate(self, src_metas: tuple, dst_metas: tuple) -> None:
+        """Validate input/output TensorMeta. Raise RuntimeError on failure."""
+        ...
+
     def __repr__(self) -> str:
         return f"{type(self).__name__}()"
 
@@ -68,7 +73,7 @@ class Add(IType):
 
     @property
     def tile_size(self) -> int:
-        return 4
+        return 64
 
     @property
     def cpp_template(self) -> str:
@@ -81,6 +86,19 @@ class Add(IType):
     @property
     def op_type(self) -> str:
         return "add"
+
+    def validate(self, src_metas: tuple, dst_metas: tuple) -> None:
+        if len(src_metas) != 2:
+            raise RuntimeError(f"[MegaKittens] Add requires 2 source tensors, got {len(src_metas)}")
+        if len(dst_metas) != 1:
+            raise RuntimeError(f"[MegaKittens] Add requires 1 destination tensor, got {len(dst_metas)}")
+        dst_shape = dst_metas[0].shape
+        for dim in dst_shape:
+            if dim % self.tile_size != 0:
+                raise RuntimeError(
+                    f"[MegaKittens] Add output shape {dst_shape} is not a multiple of tile_size={self.tile_size}. "
+                    f"Dimension {dim} must be divisible by {self.tile_size}."
+                )
 
 
 class OpMeta(BaseModel):
