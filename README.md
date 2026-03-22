@@ -6,7 +6,7 @@ GPU megakernel runtime that fuses PyTorch operator graphs into a single persiste
 
 MegaKittens requires pretty modern setup.
 
-- NVIDIA Blackwell GPU (B200 sm100a or B300 sm103a)
+- NVIDIA Blackwell GPUs (B200/sm100a or B300/sm103a)
 - CUDA 13+
 - Python 3.12+
 - PyTorch 2.9+
