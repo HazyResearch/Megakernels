@@ -83,8 +83,7 @@ def test_simple_gemm():
     torch.cuda.synchronize(device_index)
 
     C_ref = A @ B
-    passed = torch.equal(C, C_ref)
-    print(f"test_simple_gemm: {'Passed' if passed else 'Failed'}")
+    assert torch.equal(C, C_ref)
 
     unload_cubin_module(module)
 
@@ -395,8 +394,7 @@ def test_optimized_gemm():
     torch.cuda.synchronize(device_index)
 
     D_ref = A @ B.T
-    passed = torch.equal(D, D_ref)
-    print(f"test_optimized_gemm: {'Passed' if passed else 'Failed'}")
+    assert torch.equal(D, D_ref)
 
     unload_cubin_module(module)
 
@@ -405,10 +403,6 @@ def test_optimized_gemm():
 # Main
 # ---------------------------------------------------------------------------
 
-def run_tests():
+if __name__ == "__main__":
     test_simple_gemm()
     test_optimized_gemm()
-
-
-if __name__ == "__main__":
-    run_tests()
