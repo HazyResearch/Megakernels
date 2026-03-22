@@ -19,7 +19,7 @@ struct NoOp {
     struct loader {
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
             if (kittens::laneid() < Config::NUM_PAGES) { // release all pages ASAP!
-                int pid = s.pid(kittens::laneid());
+                int pid = s.lid_to_pid(kittens::laneid());
                 s.page_wait(pid);
                 s.page_finish(pid, Config::NUM_CONSUMER_WARPS);
             }
