@@ -453,6 +453,7 @@ def megakittens_backend(
         
         nodes = fx_graph_to_mk_dag(gm, example_inputs)
         (
+            op_metas,
             tensor_metas,
             instructions,
             num_barriers,
@@ -471,6 +472,7 @@ def megakittens_backend(
             utils.save_schedule_as_txt(tensor_metas, instructions, num_barriers, base_path)
 
         dispatcher = Dispatcher(
+            op_metas=op_metas,
             tensor_metas=tensor_metas,
             instructions=instructions,
             num_barriers=num_barriers,

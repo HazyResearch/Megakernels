@@ -15,7 +15,16 @@ enum WorkerType {
     storer = 5
 };
 
-template <typename Op, WorkerType worker_type, typename T, typename... Args>
+template <typename Op>
+concept MegaKittensOp = requires {
+    typename Op::controller;
+    typename Op::loader;
+    typename Op::launcher;
+    typename Op::consumer;
+    typename Op::storer;
+};
+
+template <MegaKittensOp Op, WorkerType worker_type, typename T, typename... Args>
 __device__ __forceinline__ static T dispatch_op(Args &...args) {
     if constexpr      (worker_type == WorkerType::page_manager)      return Op::controller::lid_release_order(args...);
     else if constexpr (worker_type == WorkerType::semaphore_manager) return Op::controller::init_semaphores(args...);
@@ -24,19 +33,6 @@ __device__ __forceinline__ static T dispatch_op(Args &...args) {
     else if constexpr (worker_type == WorkerType::consumer)          return Op::consumer::run(args...);
     else if constexpr (worker_type == WorkerType::storer)            return Op::storer::run(args...);
     else asm volatile("{trap;\n}");
-}
-
-template <WorkerType worker_type, typename T, typename Config, typename Globals, typename... Args>
-__device__ __forceinline__ static T dispatch_op(const int opcode, Args &...args) {
-    switch (opcode) {
-        case 0:
-            return dispatch_op<NoOp<Config, Globals>, worker_type, T>(args...);
-            break;
-        default:
-            return dispatch_op<NoOp<Config, Globals>, worker_type, T>(args...);
-            // TODO: revert to:
-            // asm volatile("{trap;\n}");
-    }
 }
 
 } // namespace megakittens

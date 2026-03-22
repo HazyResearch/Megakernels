@@ -7,8 +7,6 @@ namespace megakittens {
 
 template <typename Config, typename Globals>
 struct NoOp {
-    static constexpr int opcode = 0;
-
     struct controller {
         __device__ __forceinline__ static int lid_release_order(const Globals &g, state_t<Config> &s, int lid) {
             return lid;

@@ -7,6 +7,7 @@ import cuda.bindings.driver as cuda_driver
 import torch  # TODO: completely remove torch dependency and purely rely on CUDA API
 
 from .dag import Device, DType, TensorMeta
+from .instruction import OpMeta
 from .jit.c_utils import pack_args
 from .jit.pykittens import gl
 from .jit.cuda_utils import (
@@ -30,9 +31,9 @@ from .instruction import (
 )
 
 
-def _pack_uint8s_to_int32s(values: tuple[int, ...], count: int) -> list[int]:
-    """Pack *count* uint8 values into count/4 int32s (little-endian, zero-padded)."""
-    padded = list(values) + [0] * max(0, count - len(values))
+def _pack_uint8s_to_int32s(values: tuple[int, ...], count: int, pad: int = 0) -> list[int]:
+    """Pack *count* uint8 values into count/4 int32s (little-endian, padded with *pad*)."""
+    padded = list(values) + [pad] * max(0, count - len(values))
     result: list[int] = []
     for i in range(0, count, 4):
         chunk = bytes(padded[i : i + 4])
@@ -45,8 +46,8 @@ def _pack_instruction(inst: Instruction) -> list[int]:
     """Pack a single Instruction into a flat list of 32 int32 values."""
     inst_packed: list[int] = [0] * 32
 
-    # 0 (0-3B): itype
-    inst_packed[0] = inst.itype.value
+    # 0 (0-3B): opcode
+    inst_packed[0] = inst.opcode
 
     # 1-4 (4-19B): src_tensors (16 uint8 -> 4 int32)
     inst_packed[1:5] = _pack_uint8s_to_int32s(inst.src_tensors, MAX_SRC_TENSORS)
@@ -67,8 +68,8 @@ def _pack_instruction(inst: Instruction) -> list[int]:
     )
     inst_packed[23:31] = targets
 
-    # 31 (124-127B): dst_barrier (4 uint8 -> 1 int32)
-    inst_packed[31:32] = _pack_uint8s_to_int32s(inst.dst_barrier, MAX_DST_BARRIERS)
+    # 31 (124-127B): dst_barrier (4 uint8 -> 1 int32, 0xFF means unused)
+    inst_packed[31:32] = _pack_uint8s_to_int32s(inst.dst_barrier, MAX_DST_BARRIERS, pad=0xFF)
 
     return inst_packed
 
@@ -140,6 +141,7 @@ class Dispatcher:
 
     def __init__(
         self,
+        op_metas: list[OpMeta],
         tensor_metas: list[TensorMeta],
         instructions: list[Instruction],
         num_barriers: int,
@@ -185,6 +187,7 @@ class Dispatcher:
                 f"[MegaKittens] All tensor_metas must share the same device, got {devices}"
             )
 
+        self.op_metas = op_metas
         self.device: Device = tensor_metas[0].device  # TODO: handle multi-GPU case
         self.tensor_metas: list[TensorMeta] = tensor_metas
         self.tensors: list[torch.Tensor | None] = [None] * len(tensor_metas)
@@ -282,16 +285,41 @@ class Dispatcher:
         device_index = self.device.index if self.device.index else torch.cuda.current_device()  # TODO: handle multi-GPU case
         initialize_cuda_context(device_index)
         major, minor = get_sm_arch(device_index)  # TODO: Generate config and globals correctly based on instructions
+
+        op_includes = "\n".join(f'#include "{meta.itype.cpp_include}"' for meta in self.op_metas if meta.itype.cpp_include)
+        gl_fields = "\n".join(f"{self.gls[i + 2].cpp_type} tensor_{i};" for i in range(len(self.gls) - 2))
+        gls_body = "\n".join(f"{'if' if i == 0 else 'else if'} constexpr (I == {i}) return tensor_{i};" for i in range(len(self.gls) - 2))
+        dispatch_cases = []
+        for meta in self.op_metas:
+            template = meta.itype.cpp_template
+            if template is None:
+                raise RuntimeError(f"[MegaKittens] IType '{meta.itype.name}' has no cpp_template")
+            tensor_args = ",".join(str(t) for t in meta.src_tensors + meta.dst_tensors)
+            op = template.format(tensors=tensor_args)
+            dispatch_cases.append(f"case {meta.opcode}: return dispatch_op<{op}, worker_type, T>(args...);")
+        dispatch_cases = "\n".join(dispatch_cases)
         source = f"""
             #include "megakittens.cuh"
-            struct MKConfig : megakittens::default_config {{}};
-            struct MKGlobals {{
-                {self.gls[0].cpp_type} instructions;
-                {self.gls[1].cpp_type} barriers;
-            }};
-        """  # TODO: add normal tensors
+            {op_includes}
+            namespace megakittens {{
+                struct MKConfig : default_config {{}};
+                struct MKGlobals {{
+                    {self.gls[0].cpp_type} instructions;
+                    {self.gls[1].cpp_type} barriers;
+                    {gl_fields}
+                    template <int I> __device__ __forceinline__ auto& gls() const {{{gls_body}}}
+                }};
+                template <WorkerType worker_type, typename T, typename Config, typename Globals, typename... Args>
+                __device__ __forceinline__ static T dispatch_op(const int opcode, Args &...args) {{
+                    switch (opcode) {{
+                        {dispatch_cases}
+                        default: asm volatile("{{trap;\\n}}");
+                    }}
+                }}
+            }}
+        """
         cubin, (kernel_name,) = compile_source_to_cubin(
-            source, (b"megakittens::kernel<MKConfig, MKGlobals>",), major, minor,
+            source, (b"megakittens::kernel<megakittens::MKConfig, megakittens::MKGlobals>",), major, minor,
         )
         self._cubin_module = load_cubin_module(cubin)
         self._kernel_fn = get_kernel_from_cubin_module(self._cubin_module, kernel_name)
@@ -301,9 +329,10 @@ class Dispatcher:
         if self._kernel_fn is None:
             self._compile_kernel()
         device_index = self.device.index if self.device.index else torch.cuda.current_device()
-        # TODO: include normal tensors once they are added to MKGlobals
+        # Reset barriers before each launch
+        self.barrier_tensor.zero_()
         _globals_holder, globals_packed = pack_args(
-            [(g.tensor_to_gl(t), g.size, g.align) for g, t in zip(self.gls[:2], self.all_tensors[:2])]
+            [(g.tensor_to_gl(t), g.size, g.align) for g, t in zip(self.gls, self.all_tensors)]
         )
         stream = torch.cuda.current_stream(device_index).cuda_stream
         launch_kernel(

@@ -8,6 +8,7 @@ from .dag import DType, Node, OpType, TensorMeta
 from .instruction import (
     IType,
     Instruction,
+    OpMeta,
     MAX_DST_BARRIERS,
     MAX_DST_TENSORS,
     MAX_INDICES,
@@ -19,33 +20,21 @@ from .instruction import (
 MAX_BARRIERS = 256
 MAX_TENSOR_ALLOCATIONS = 256
 
-# TODO: change
-TILE_SIZE = 4
-
-_OPTYPE_TO_ITYPE: Dict[OpType, IType] = {
-    OpType.matmul: IType.mm_bf16_bf16_fp32_bf16,
-    OpType.add: IType.add,
-    OpType.relu: IType.relu,
+# Auto-built from all IType subclasses in instruction.py
+_OPTYPE_TO_ITYPE: Dict[str, IType] = {
+    cls().op_type: cls() for cls in IType.__subclasses__()
 }
 
 
 def _resolve_itype(node: Node) -> IType:
-    if node.optype == OpType.matmul:
-        # TODO: support many types of matmuls
-        for in_node, slot_idx in node.in_nodes:
-            in_dtype = in_node.out_tensors[slot_idx].dtype
-            if in_dtype != DType.bf16:
-                raise RuntimeError(
-                    f"[MegaKittens] Matmul requires bf16 inputs, got {in_dtype.value}"
-                )
-    if node.optype not in _OPTYPE_TO_ITYPE:
+    if node.optype.value not in _OPTYPE_TO_ITYPE:
         raise RuntimeError(f"[MegaKittens] No IType mapping for OpType {node.optype.value}")
-    return _OPTYPE_TO_ITYPE[node.optype]
+    return _OPTYPE_TO_ITYPE[node.optype.value]
 
 
 def schedule(
     dag_nodes: List[Node],
-) -> Tuple[List[TensorMeta], List[Instruction], int, Tuple[int, ...], Tuple[int, ...]]:
+) -> Tuple[List[OpMeta], List[TensorMeta], List[Instruction], int, Tuple[int, ...], Tuple[int, ...]]:
     """
     Convert a validated DAG into a minimal set of tensors and a flat per-SM instruction list.
     """
@@ -104,9 +93,10 @@ def schedule(
             raise RuntimeError(
                 f"[MegaKittens] Node has {len(node.out_tensors)} dst tensors (max {MAX_DST_TENSORS})"
             )
+        itype = _resolve_itype(node)
         node_inst_count[id(node)] = 1
         for dim in out_shape:
-            node_inst_count[id(node)] *= math.ceil(dim / TILE_SIZE)
+            node_inst_count[id(node)] *= math.ceil(dim / itype.tile_size)
 
     # Phase 3: Barrier assignment
     barrier_counter = 0
@@ -151,6 +141,9 @@ def schedule(
 
     # Phase 4: Instruction generation
     instructions: List[Instruction] = []
+    opcode_counter = 0
+    op_metas: List[OpMeta] = []
+    opcode_map: Dict[Tuple[IType, Tuple[int, ...], Tuple[int, ...]], int] = {}
 
     for node in dag_nodes:
         if node.optype in (OpType.input, OpType.output):
@@ -172,19 +165,27 @@ def schedule(
             for slot in range(len(node.out_tensors))
         )
 
+        key = (itype, src_tensors, dst_tensors)
+        if key not in opcode_map:
+            opcode = opcode_counter
+            opcode_counter += 1
+            opcode_map[key] = opcode
+            op_metas.append(OpMeta(opcode=opcode, itype=itype, src_tensors=src_tensors, dst_tensors=dst_tensors))
+        else:
+            opcode = opcode_map[key]
+
         src_bar_list = node_src_barriers.get(id(node), [])
         src_barriers = tuple(bid for bid, _ in src_bar_list)
         src_barrier_targets = tuple(tgt for _, tgt in src_bar_list)
         dst_barrier = tuple(node_dst_barriers.get(id(node), []))
 
-        # TODO: make op-specific
         out_shape = node.out_tensors[0].shape
-        ranges = [range(math.ceil(dim / TILE_SIZE)) for dim in out_shape]
+        ranges = [range(math.ceil(dim / itype.tile_size)) for dim in out_shape]
         tiles = list(itertools.product(*ranges))
 
         for tile in tiles:
             instructions.append(Instruction(
-                itype=itype,
+                opcode=opcode,
                 src_tensors=src_tensors,
                 dst_tensors=dst_tensors,
                 indices=tile,
@@ -194,6 +195,7 @@ def schedule(
             ))
 
     return (
+        op_metas,
         tensor_metas,
         instructions,
         barrier_counter,

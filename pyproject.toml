@@ -14,3 +14,9 @@ dependencies = [
     "graphviz==0.21.*",
     "tabulate==0.10.*",
 ]
+
+[project.optional-dependencies]
+dev = ["pytest>=9,<10"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

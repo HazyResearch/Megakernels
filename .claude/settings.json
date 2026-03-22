@@ -55,7 +55,8 @@
       "Bash(uptime)",
       "Bash(free:*)",
       "Bash(lscpu)",
-      "Bash(lsb_release:*)"
+      "Bash(lsb_release:*)",
+      "Bash(pytest:*)"
     ]
   }
 }
