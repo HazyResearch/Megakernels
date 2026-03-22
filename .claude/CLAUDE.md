@@ -1,6 +1,6 @@
 # MegaKittens
 
-GPU megakernel compiler that fuses PyTorch operator graphs into a single persistent CUDA kernel, built on top of [ThunderKittens](csrc/ThunderKittens/).
+GPU megakernel runtime that fuses PyTorch operator graphs into a single persistent CUDA kernel, built on top of [ThunderKittens](csrc/ThunderKittens/).
 
 ## Running tests
 
