@@ -70,7 +70,9 @@ def test_simple_gemm():
 
     initialize_cuda_context(device_index)
     major, minor = get_sm_arch(device_index)
-    cubin, (kernel_name,) = compile_source_to_cubin(SIMPLE_GEMM_SOURCE, (b"kernel",), major, minor)
+    cubin, (kernel_name,) = compile_source_to_cubin(
+        SIMPLE_GEMM_SOURCE, (b"kernel",), major, minor, use_file_cache=False
+    )
     module = load_cubin_module(cubin)
     fn = get_kernel_from_cubin_module(module, kernel_name)
 
@@ -380,7 +382,7 @@ def test_optimized_gemm():
     kernel_expr = (f'kernel<config<{optimized_gemm_config["Mb"]}, {optimized_gemm_config["Nb"]}, {optimized_gemm_config["Kb"]}, '
                    f'{optimized_gemm_config["SUPERGROUP_SIZE"]}, {"true" if optimized_gemm_config["OVERLAP_MMA_EPI"] else "false"}, '
                    f'{optimized_gemm_config["LOAD_PIPE_DEPTH"]}, {optimized_gemm_config["EPI_PIPE_DEPTH"]}>>')
-    cubin, (kernel_name,) = compile_source_to_cubin(OPTIMIZED_GEMM_SOURCE, (kernel_expr.encode("utf-8"),), major, minor)
+    cubin, (kernel_name,) = compile_source_to_cubin(OPTIMIZED_GEMM_SOURCE, (kernel_expr.encode("utf-8"),), major, minor, use_file_cache=False)
     module = load_cubin_module(cubin)
     fn = get_kernel_from_cubin_module(module, kernel_name)
     set_kernel_dynamic_smem(fn, optimized_gemm_config["DYNAMIC_SHARED_MEMORY"])

@@ -147,6 +147,7 @@ class Dispatcher:
         num_barriers: int,
         input_tensor_indices: Sequence[int],
         output_tensor_indices: Sequence[int],
+        use_jit_cache: bool = True,
     ) -> None:
         if not tensor_metas:
             raise RuntimeError("[MegaKittens] 'tensor_metas' must not be empty")
@@ -203,6 +204,7 @@ class Dispatcher:
         self._cubin_module: cuda_driver.CUmodule | None = None
         self.all_tensors: list[torch.Tensor | None] = [None] * (2 + len(tensor_metas))
         self.gls: list[gl | None] = [None] * len(self.all_tensors)
+        self.use_jit_cache = use_jit_cache
 
     def __del__(self) -> None:
         if self._cubin_module is not None:
@@ -320,6 +322,7 @@ class Dispatcher:
         """
         cubin, (kernel_name,) = compile_source_to_cubin(
             source, (b"megakittens::kernel<megakittens::MKConfig, megakittens::MKGlobals>",), major, minor,
+            use_file_cache=self.use_jit_cache,
         )
         self._cubin_module = load_cubin_module(cubin)
         self._kernel_fn = get_kernel_from_cubin_module(self._cubin_module, kernel_name)

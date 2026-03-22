@@ -17,6 +17,7 @@ def compile(
     debug: bool = False,
     save_dag: bool = False,
     save_schedule: bool = False,
+    use_jit_cache: bool = True,
 ) -> Callable[..., Any]:
     """Compile a PyTorch function into a MegaKernel."""
     def _compile(_fn: Callable[..., Any]) -> Callable[..., Any]:
@@ -28,6 +29,7 @@ def compile(
                 debug=debug,
                 save_dag=save_dag,
                 save_schedule=save_schedule,
+                use_jit_cache=use_jit_cache,
             ),
             nopython=True, # graph breaks currently not supported (TODO: support it)
             disable=not enable,
