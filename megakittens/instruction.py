@@ -92,6 +92,11 @@ class Add(IType):
             raise RuntimeError(f"[MegaKittens] Add requires 2 source tensors, got {len(src_metas)}")
         if len(dst_metas) != 1:
             raise RuntimeError(f"[MegaKittens] Add requires 1 destination tensor, got {len(dst_metas)}")
+        if src_metas[0].shape != src_metas[1].shape:
+            raise RuntimeError(
+                f"[MegaKittens] Add requires same-shape inputs, got {src_metas[0].shape} and {src_metas[1].shape}. "
+                f"Broadcasting is not supported."
+            )
         dst_shape = dst_metas[0].shape
         for dim in dst_shape:
             if dim % self.tile_size != 0:
