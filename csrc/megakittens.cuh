@@ -46,6 +46,7 @@ void kernel(const __grid_constant__ Globals g) {
         arrive(tensor_finished, Config::NUM_CONSUMER_WARPS);
     }
     kittens::everyone::tma::cluster::sync();
+    kittens::pdl::wait();
 
     // Initiate the main loops
     if (kittens::warpid() < Config::NUM_CONSUMER_WARPS) {
