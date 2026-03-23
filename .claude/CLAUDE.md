@@ -30,6 +30,28 @@ Only two files need to be touched:
 
 - `compile_source_to_cubin` has both an in-memory `@functools.cache` and a file-backed cache (`~/.cache/megakittens/cubin/`). Pass `use_jit_cache=False` to skip file cache; in-memory cache still applies per-process.
 
+## Rules for writing a CUDA instruction type (`csrc/itypes/*.cuh`)
+
+- Every page claimed must be released. The loader must release unused pages ASAP and the consumer/storer must release the pages they used. The next instruction will stall until the pages it needs from the previous instruction are released.
+
+- `lid_release_order` controls next-instruction page availability. Getting this right is essential to pipelining instructions.
+
+- `init_semaphores` must return the count of semaphores initialized. The controller uses this to invalidate them between instructions. Getting this incorrect results in undefined behaviors.
+
+- Use `page_t::as<T>()` to cast page data, not raw `reinterpret_cast`.
+
+- Dependent template calls need `.template` keyword. E.g. `s.pages[pid].template as<tile_t>()`, `g.template gls<SRC0>()`. Forgetting this causes cryptic NVRTC "type name is not allowed" errors.
+
+- `page_finish()` and `tensor_finish()` must be called by only one thread per instruction. The kernel will crash otherwise.
+
+- Barrier wait/arrive are single-thread operations. Call `all_barrier_wait` and `all_barrier_arrive` from one elected thread only (e.g. inside `warp::elect_leader()`).
+
+- Consumer is multiple warps unlike the other workers.
+
+- TMA tile type in C++ must match the Python `TensorSpec.tma_types`. If the C++ `tile_t` is `st<bf16, 128, 128>` (swizzled), the Python side must create `st(dtype=DType.bf16, rows=128, cols=128)` (swizzle=True is default).
+
+- Register tile height = shared tile height / group size. For `group<8>::load(rt, st)` with `st<128, 128>`, the rt must be `rt_bf<16, 128>` (128/8=16). Wrong dimensions cause a static assertion failure.
+
 ## Naming conventions
 
 - "op" / `OpType` = a vertex in the compute graph (DAG level, maps from torch ops)
