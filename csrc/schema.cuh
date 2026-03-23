@@ -84,6 +84,16 @@ struct page_t {
     __device__ __forceinline__ const void *ptr(int byte_offset = 0) const {
         return reinterpret_cast<const void *>(reinterpret_cast<uint64_t>(&data[0])+byte_offset);
     }
+    template <typename T>
+    __device__ __forceinline__ T &as(int byte_offset = 0) {
+        static_assert(sizeof(T) <= Config::PAGE_SIZE, "T exceeds page size"); // only guarantees safety for byte_offset=0
+        return *reinterpret_cast<T*>(reinterpret_cast<uint64_t>(&data[0]) + byte_offset);
+    }
+    template <typename T>
+    __device__ __forceinline__ const T &as(int byte_offset = 0) const {
+        static_assert(sizeof(T) <= Config::PAGE_SIZE, "T exceeds page size"); // only guarantees safety for byte_offset=0
+        return *reinterpret_cast<const T*>(reinterpret_cast<uint64_t>(&data[0]) + byte_offset);
+    }
 };
 
 template <typename Config>
