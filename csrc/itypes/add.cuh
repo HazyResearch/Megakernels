@@ -34,7 +34,7 @@ struct Add {
             if (kittens::laneid() >= NUM_USED_PAGES && kittens::laneid() < Config::NUM_PAGES) {
                 const int pid = s.lid_to_pid(kittens::laneid());
                 s.page_wait(pid);
-                s.page_finish(pid, Config::NUM_CONSUMER_WARPS);
+                s.page_finish(pid);
             }
 
             if (kittens::warp::elect_leader()) {
@@ -57,7 +57,7 @@ struct Add {
     struct launcher {
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
             s.tensor_wait();
-            if (kittens::warp::elect_leader()) s.tensor_finish(Config::NUM_CONSUMER_WARPS);
+            if (kittens::warp::elect_leader()) s.tensor_finish();
         }
     };
 
@@ -78,7 +78,7 @@ struct Add {
 
             if (consumer_group::elect_leader()) {
                 kittens::arrive(output_arrived(s));
-                s.page_finish(s.lid_to_pid(1), Config::NUM_CONSUMER_WARPS);
+                s.page_finish(s.lid_to_pid(1));
             }
         }
     };
@@ -95,7 +95,7 @@ struct Add {
             if (kittens::warp::elect_leader()) {
                 kittens::tma::store_async(c_gl, c_smem, {instruction.indices[0], instruction.indices[1]});
                 kittens::tma::store_async_wait();
-                s.page_finish(s.lid_to_pid(0), Config::NUM_CONSUMER_WARPS);
+                s.page_finish(s.lid_to_pid(0));
                 all_barrier_arrive<Config>(g, instruction);
             }
         }

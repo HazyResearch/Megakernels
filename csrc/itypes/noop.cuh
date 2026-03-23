@@ -21,7 +21,7 @@ struct Noop {
             if (kittens::laneid() < Config::NUM_PAGES) { // release all pages ASAP!
                 int pid = s.lid_to_pid(kittens::laneid());
                 s.page_wait(pid);
-                s.page_finish(pid, Config::NUM_CONSUMER_WARPS);
+                s.page_finish(pid);
             }
         }
     };
@@ -29,7 +29,7 @@ struct Noop {
     struct launcher {
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
             s.tensor_wait();
-            if (kittens::warp::elect_leader()) s.tensor_finish(Config::NUM_CONSUMER_WARPS);
+            if (kittens::warp::elect_leader()) s.tensor_finish();
         }
     };
 

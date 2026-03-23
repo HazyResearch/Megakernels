@@ -39,11 +39,11 @@ void kernel(const __grid_constant__ Globals g) {
     } else if (threadIdx.x < Config::INSTRUCTION_PIPE_STAGES*3) {
         init_semaphore(clc_arrived[threadIdx.x - Config::INSTRUCTION_PIPE_STAGES*2], 1);
     } else if (threadIdx.x < Config::INSTRUCTION_PIPE_STAGES*3 + Config::NUM_PAGES) {
-        init_semaphore(page_finished[threadIdx.x - Config::INSTRUCTION_PIPE_STAGES*3], Config::NUM_CONSUMER_WARPS);
-        arrive(page_finished[threadIdx.x - Config::INSTRUCTION_PIPE_STAGES*3], Config::NUM_CONSUMER_WARPS);
+        init_semaphore(page_finished[threadIdx.x - Config::INSTRUCTION_PIPE_STAGES*3], 1);
+        arrive(page_finished[threadIdx.x - Config::INSTRUCTION_PIPE_STAGES*3], 1);
     } else if (threadIdx.x < Config::INSTRUCTION_PIPE_STAGES*3 + Config::NUM_PAGES + 1) {
-        init_semaphore(tensor_finished, Config::NUM_CONSUMER_WARPS);
-        arrive(tensor_finished, Config::NUM_CONSUMER_WARPS);
+        init_semaphore(tensor_finished, 1);
+        arrive(tensor_finished, 1);
     }
     kittens::everyone::tma::cluster::sync();
     kittens::pdl::wait();

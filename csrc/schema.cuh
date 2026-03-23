@@ -135,14 +135,14 @@ struct state_t {
     __device__ __forceinline__ void page_wait(int pid) {
         kittens::wait(page_finished[pid], iter&0b1);
     }
-    __device__ __forceinline__ void page_finish(int pid, int count) {
-        kittens::arrive(page_finished[pid], count);
+    __device__ __forceinline__ void page_finish(int pid) {
+        kittens::arrive(page_finished[pid]);
     }
     __device__ __forceinline__ void tensor_wait() {
         kittens::wait(tensor_finished, iter&0b1);
     }
-    __device__ __forceinline__ void tensor_finish(int count) {
-        kittens::arrive(tensor_finished, count);
+    __device__ __forceinline__ void tensor_finish() {
+        kittens::arrive(tensor_finished);
     }
 };
 
