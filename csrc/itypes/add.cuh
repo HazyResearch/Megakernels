@@ -28,8 +28,8 @@ struct Add {
     struct loader {
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
             const auto &instruction = s.instruction();
-            const auto &src0 = g.template gls<SRC0>();
-            const auto &src1 = g.template gls<SRC1>();
+            const auto &a_gl = g.template gls<SRC0>();
+            const auto &b_gl = g.template gls<SRC1>();
 
             if (kittens::laneid() >= NUM_USED_PAGES && kittens::laneid() < Config::NUM_PAGES) {
                 const int pid = s.lid_to_pid(kittens::laneid());
@@ -42,21 +42,14 @@ struct Add {
                 for (int i = 0; i < NUM_USED_PAGES; i++)
                     s.page_wait(s.lid_to_pid(i));
 
-                tile_t &p0 = *reinterpret_cast<tile_t*>(s.pages[s.lid_to_pid(0)].data);
-                tile_t &p1 = *reinterpret_cast<tile_t*>(s.pages[s.lid_to_pid(1)].data);
+                tile_t &a_smem = s.pages[s.lid_to_pid(0)].template as<tile_t>();
+                tile_t &b_smem = s.pages[s.lid_to_pid(1)].template as<tile_t>();
                 
-                #pragma unroll
-                for (int i = 0; i < instruction_t::MAX_SRC_BARRIERS; i++) {
-                    const int target = instruction.src_barrier_targets[i];
-                    if (target > 0) {
-                        int bid = instruction.src_barriers[i];
-                        barrier_wait<Config>(&g.barriers.raw_ptr[bid], target);
-                    }
-                }
+                all_barrier_wait<Config>(g, instruction);
 
                 kittens::tma::expect_bytes(inputs_arrived(s), 2*sizeof(tile_t));
-                kittens::tma::load_async(p0, src0, {instruction.indices[0], instruction.indices[1]}, inputs_arrived(s));
-                kittens::tma::load_async(p1, src1, {instruction.indices[0], instruction.indices[1]}, inputs_arrived(s));
+                kittens::tma::load_async(a_smem, a_gl, {instruction.indices[0], instruction.indices[1]}, inputs_arrived(s));
+                kittens::tma::load_async(b_smem, b_gl, {instruction.indices[0], instruction.indices[1]}, inputs_arrived(s));
             }
         }
     };
@@ -73,14 +66,14 @@ struct Add {
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
             kittens::wait(inputs_arrived(s), 0);
 
-            tile_t &p0 = *reinterpret_cast<tile_t*>(s.pages[s.lid_to_pid(0)].data);
-            tile_t &p1 = *reinterpret_cast<tile_t*>(s.pages[s.lid_to_pid(1)].data);
+            tile_t &a_smem = s.pages[s.lid_to_pid(0)].template as<tile_t>();
+            tile_t &b_smem = s.pages[s.lid_to_pid(1)].template as<tile_t>();
 
-            kittens::rt_bf<16, 128> src0_reg, src1_reg;
-            consumer_group::load(src0_reg, p0);
-            consumer_group::load(src1_reg, p1);
-            consumer_group::add(src0_reg, src0_reg, src1_reg);
-            consumer_group::store(p0, src0_reg);
+            kittens::rt_bf<16, 128> a_reg, b_reg;
+            consumer_group::load(a_reg, a_smem);
+            consumer_group::load(b_reg, b_smem);
+            consumer_group::add(a_reg, a_reg, b_reg);
+            consumer_group::store(a_smem, a_reg); // reuse
             consumer_group::sync(1);
 
             if (consumer_group::elect_leader()) {
@@ -93,24 +86,17 @@ struct Add {
     struct storer {
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
             const auto &instruction = s.instruction();
-            auto &dst = g.template gls<DST>();
+            auto &c_gl = g.template gls<DST>();
 
             kittens::wait(output_arrived(s), 0);
 
-            tile_t &result = *reinterpret_cast<tile_t*>(s.pages[s.lid_to_pid(0)].data);
+            tile_t &c_smem = s.pages[s.lid_to_pid(0)].template as<tile_t>();
 
             if (kittens::warp::elect_leader()) {
-                kittens::tma::store_async(dst, result, {instruction.indices[0], instruction.indices[1]});
-                kittens::tma::store_async_read_wait();
+                kittens::tma::store_async(c_gl, c_smem, {instruction.indices[0], instruction.indices[1]});
+                kittens::tma::store_async_wait();
                 s.page_finish(s.lid_to_pid(0), Config::NUM_CONSUMER_WARPS);
-            }
-
-            if (kittens::laneid() == 0) {
-                #pragma unroll
-                for (int i = 0; i < instruction_t::MAX_DST_BARRIERS; i++) {
-                    int bid = instruction.dst_barriers[i];
-                    if (bid != 0xFF) barrier_arrive<Config>(&g.barriers.raw_ptr[bid], 1);
-                }
+                all_barrier_arrive<Config>(g, instruction);
             }
         }
     };
