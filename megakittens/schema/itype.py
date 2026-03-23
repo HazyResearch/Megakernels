@@ -1,0 +1,98 @@
+from abc import ABC, abstractmethod
+from typing import List, Tuple
+
+from .tensor import TensorMeta, TensorSpec
+
+
+class IType(ABC):
+    """Instruction type. Inherit with a subclass to define a new instruction type."""
+
+    @property
+    @abstractmethod
+    def name(self) -> str:
+        ...
+
+    @property
+    @abstractmethod
+    def cpp_template(self) -> str:
+        """
+        C++ template string for JIT codegen.
+        Use ``{tensors}`` as placeholder for the comma-separated tensor indices.
+        Example: ``"Add<MKConfig, MKGlobals, {tensors}>"``
+        """
+        ...
+
+    @property
+    @abstractmethod
+    def cpp_include(self) -> str:
+        """Header to include for this instruction type. Example: ``"itypes/add.cuh"``"""
+        ...
+
+    @property
+    @abstractmethod
+    def op_type(self) -> str:
+        """The OpType value this instruction implements (e.g. ``"add"``, ``"matmul"``)."""
+        ...
+
+    @property
+    @abstractmethod
+    def inputs(self) -> list[TensorSpec]:
+        """Specs for each input tensor."""
+        ...
+
+    @property
+    @abstractmethod
+    def outputs(self) -> list[TensorSpec]:
+        """Specs for each output tensor."""
+        ...
+
+    @abstractmethod
+    def block_indices(self, src_metas: Tuple[TensorMeta, ...], dst_metas: Tuple[TensorMeta, ...]) -> List[Tuple[int, ...]]:
+        """Return instruction coordinate tuples for one node. Each becomes one instruction's indices."""
+        ...
+
+    def num_instructions(self, src_metas: Tuple[TensorMeta, ...], dst_metas: Tuple[TensorMeta, ...]) -> int:
+        """Number of instructions this node generates. Override if computable without building the full list."""
+        return len(self.block_indices(src_metas, dst_metas))
+
+    def validate(self, src_metas: Tuple[TensorMeta, ...], dst_metas: Tuple[TensorMeta, ...]) -> None:
+        """Validate input/output TensorMeta against specs. Override for custom checks."""
+        if len(src_metas) != len(self.inputs):
+            raise RuntimeError(
+                f"[MegaKittens] {self.name} requires {len(self.inputs)} inputs, got {len(src_metas)}"
+            )
+        if len(dst_metas) != len(self.outputs):
+            raise RuntimeError(
+                f"[MegaKittens] {self.name} requires {len(self.outputs)} outputs, got {len(dst_metas)}"
+            )
+        for label, metas, specs in [("input", src_metas, self.inputs), ("output", dst_metas, self.outputs)]:
+            for i, (meta, spec) in enumerate(zip(metas, specs)):
+                if meta.dtype != spec.dtype:
+                    raise RuntimeError(
+                        f"[MegaKittens] {self.name} {label} {i}: expected dtype {spec.dtype.value}, got {meta.dtype.value}"
+                    )
+                for dim, gran in enumerate(spec.granularity):
+                    if meta.shape[dim] % gran != 0:
+                        raise RuntimeError(
+                            f"[MegaKittens] {self.name} {label} {i} dim {dim}: {meta.shape[dim]} not a multiple of {gran}"
+                        )
+
+    _itype_cache: dict[str, "IType"] = {}
+    @classmethod
+    def from_optype(cls, op_type: str) -> "IType":
+        if not cls._itype_cache:
+            for subclass in cls.__subclasses__():  # TODO: in the future, there will exist multiple itypes per optype
+                itype = subclass()
+                cls._itype_cache[itype.op_type] = itype
+        if op_type not in cls._itype_cache:
+            raise ValueError(f"[MegaKittens] No IType for OpType '{op_type}'")
+        return cls._itype_cache[op_type]
+
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}()"
+
+    def __eq__(self, other: object) -> bool:
+        return type(self) is type(other)
+
+    def __hash__(self) -> int:
+        return hash(type(self))

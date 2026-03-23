@@ -7,14 +7,14 @@ import torch
 
 from .c_utils import align_up
 from .cuda_utils import check_cuda
+from ..schema.dtype import DType
 
 
 class st(BaseModel):
     """Slightly modified version of ThunderKittens `st`"""
 
     # Template parameters
-    model_config = {'arbitrary_types_allowed': True}  # TODO: remove dependency on torch.dtype
-    dtype: torch.dtype                                # TODO: remove dependency on torch.dtype
+    dtype: DType
     rows: int = Field(gt=0)
     cols: int = Field(gt=0)
     swizzle: bool = True
@@ -23,7 +23,7 @@ class st(BaseModel):
 
     @model_validator(mode='after')
     def _validate_st(self):
-        dtype_size = self.dtype.itemsize
+        dtype_size = self.dtype.size
         if self.swizzle:
             assert self.rows % 16 == 0, f"rows must be divisible by 16"
             if dtype_size == 1: assert self.cols % 32 == 0, f"cols must be divisible by 32"
@@ -38,13 +38,19 @@ class st(BaseModel):
                 self.swizzle_bytes = 128 if ratio % 2 == 0 else 64
         return self
 
+    @property
+    def cpp_type(self) -> str:
+        """C++ type for use as TMA descriptor parameter in gl template."""
+        swizzle_str = "true" if self.swizzle else "false"
+        st_type = f"kittens::st<{self.dtype.cpp_dtype}, {self.rows}, {self.cols}, {swizzle_str}>"
+        return f"kittens::tma::descriptor<{st_type}, {self.axis}>"
+
 
 class sv(BaseModel):
     """Python mirror of ThunderKittens `sv`"""
 
     # Template parameters
-    model_config = {'arbitrary_types_allowed': True}  # TODO: remove dependency on torch.dtype
-    dtype: torch.dtype                                # TODO: remove dependency on torch.dtype
+    dtype: DType
     length: int = Field(gt=0)
 
     @model_validator(mode='after')
@@ -52,13 +58,18 @@ class sv(BaseModel):
         assert self.length % 16 == 0, "length must be divisible by 16"
         return self
 
+    @property
+    def cpp_type(self) -> str:
+        """C++ type for use as TMA descriptor parameter in gl template."""
+        sv_type = f"kittens::sv<{self.dtype.cpp_dtype}, {self.length}>"
+        return f"kittens::tma::descriptor<{sv_type}, -1>"
+
 
 class gl(BaseModel):
     """Python mirror of ThunderKittens `gl`."""
 
     # Template parameters
-    model_config = {'arbitrary_types_allowed': True}  # TODO: remove dependency on torch.dtype
-    dtype: torch.dtype                                # TODO: remove dependency on torch.dtype
+    dtype: DType
     b: int                                            # >0 compile dim, -1 runtime dim
     d: int
     r: int
@@ -73,14 +84,12 @@ class gl(BaseModel):
 
     @property
     def cpp_type(self) -> str:
-        dtype_str = {  # TODO: remove dependency on torch.dtype
-            torch.float64: "double",
-            torch.float32: "float",
-            torch.bfloat16: "kittens::bf16",
-            torch.float16: "kittens::half",
-            torch.int32: "int",
-        }[self.dtype]
-        return f"kittens::gl<{dtype_str}, {self.b}, {self.d}, {self.r}, {self.c}>"  # TODO: add TMA descs
+        base = f"kittens::gl<{self.dtype.cpp_dtype}, {self.b}, {self.d}, {self.r}, {self.c}"
+        if self.tma_types:
+            tma_args = ", ".join(t.cpp_type for t in self.tma_types)
+            return f"{base}, {tma_args}>"
+        else:
+            return f"{base}>"
 
     @property
     def align(self) -> int:
@@ -118,20 +127,13 @@ class gl(BaseModel):
         return self.memory_layout["total_size"]
 
     def create_tma_descriptor(
-        self, 
+        self,
         data_ptr: int,
         batch: int, depth: int, rows: int, cols: int,
         tma_type: st | sv,
     ) -> bytes:
-        dtype_size = tma_type.dtype.itemsize
-        tma_format = {
-            torch.float32: cuda_driver.CUtensorMapDataType.CU_TENSOR_MAP_DATA_TYPE_FLOAT32,
-            torch.float16: cuda_driver.CUtensorMapDataType.CU_TENSOR_MAP_DATA_TYPE_FLOAT16,
-            torch.bfloat16: cuda_driver.CUtensorMapDataType.CU_TENSOR_MAP_DATA_TYPE_BFLOAT16,
-            torch.float8_e4m3fn: cuda_driver.CUtensorMapDataType.CU_TENSOR_MAP_DATA_TYPE_UINT8,
-            torch.float8_e8m0fnu: cuda_driver.CUtensorMapDataType.CU_TENSOR_MAP_DATA_TYPE_UINT8,
-            torch.float4_e2m1fn_x2: cuda_driver.CUtensorMapDataType.CU_TENSOR_MAP_DATA_TYPE_UINT8,
-        }[tma_type.dtype]
+        dtype_size = tma_type.dtype.size
+        tma_format = tma_type.dtype.tma_dtype
 
         if isinstance(tma_type, sv):
             assert tma_type.length <= 256 or (tma_type.length * dtype_size) % 128 == 0
@@ -158,7 +160,7 @@ class gl(BaseModel):
 
             swizzle_elements = tma_type.swizzle_bytes // dtype_size
             assert tma_type.axis in {0, 1, 2}, "axis must be 0, 1, or 2"
-            if tma_type.dtype == torch.float4_e2m1fn_x2:
+            if tma_type.dtype == DType.fp4e2m1x2:
                 assert tma_type.axis == 2, "Axes 0 and 1 are not yet supported for FP4 type"
 
             if tma_type.swizzle and tma_type.axis == 2:
@@ -218,7 +220,7 @@ class gl(BaseModel):
         assert t.is_cuda, "Tensor must be on CUDA device"
         assert t.is_contiguous(), "Tensor must be contiguous"
         assert t.ndim <= 4, "Expected tensor.ndim <= 4"
-        assert t.dtype == self.dtype, f"dtype mismatch: expected {self.dtype}, got {t.dtype}"
+        assert t.dtype == self.dtype.torch_dtype, f"dtype mismatch: expected {self.dtype}, got {t.dtype}"
 
         shape = [1, 1, 1, 1]
         for i in range(t.ndim):

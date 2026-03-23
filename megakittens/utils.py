@@ -6,8 +6,9 @@ import re
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 
-from .dag import Node, TensorMeta
-from .instruction import Instruction
+from .schema.dag import DAG
+from .schema.tensor import TensorMeta
+from .schema.instruction import Instruction
 
 _LOG_DUMP_COUNTER = itertools.count()
 
@@ -23,13 +24,13 @@ def create_log_base_path(fn: Callable[..., Any]) -> Path:
 
 
 def save_dag_as_png_as_json(
-    nodes: List[Node],
+    dag: DAG,
     base_path: Path,
 ) -> dict[str, Any]:
     """
     Build a DAG JSON payload from node objects.
     """
-    node_index_by_id: Dict[int, int] = {id(node): idx for idx, node in enumerate(nodes)}
+    node_index_by_id: Dict[int, int] = {id(node): idx for idx, node in enumerate(dag.nodes)}
     dag_json = {
         "nodes": [
             {
@@ -53,7 +54,7 @@ def save_dag_as_png_as_json(
                     for tensor in node.out_tensors
                 ],
             }
-            for idx, node in enumerate(nodes)
+            for idx, node in enumerate(dag.nodes)
         ],
     }
 

@@ -55,6 +55,6 @@ Each `benchmarks/benchmark_*.py` is a standalone script.
 python -m benchmarks.benchmark_add
 ```
 
-## Adding a new op
+## Adding a new instruction type
 
-Only two files need to be touched: a new CUDA kernel in `csrc/ops/` and a Python descriptor in `megakittens/instruction.py`. See `add.cuh` and the `Add` class for reference. New ops are auto-discovered by the scheduler.
+Two files need to be added: (1) a CUDA kernel in `csrc/itypes/` and (2) a Python `IType` subclass in `megakittens/itypes/`. See `csrc/itypes/add.cuh` and `megakittens/itypes/add.py` for reference. New instruction types are auto-discovered by the scheduler.

@@ -9,95 +9,25 @@ from torch._dynamo.backends.common import aot_autograd
 from torch.fx.passes.shape_prop import TensorMetadata
 
 from . import utils
-from .dag import DType, Device, Node, OpType, TensorMeta, validate_dag
+from .schema.dag import DAG, Node, OpType
+from .schema.device import Device
+from .schema.dtype import DType
+from .schema.tensor import TensorMeta
 from .dispatcher import Dispatcher
 from .scheduler import schedule
 
 
-_TORCH_DTYPE_TO_MK_DTYPE = {
-    torch.float64: DType.fp64,
-    torch.float32: DType.fp32,
-    torch.bfloat16: DType.bf16,
-    torch.float16: DType.half,
-    torch.float8_e4m3fn: DType.fp8e4m3,
-    torch.float8_e5m2fnuz: DType.fp8e5m2,
-    torch.float8_e8m0fnu: DType.fp8e8m0,
-    torch.float4_e2m1fn_x2: DType.fp4e2m1x2,
-}
-
-_TORCH_CALL_FUNCTION_OP_TO_MK_OPTYPE = {
-    torch.add: OpType.add,
-    torch.matmul: OpType.matmul,
-    torch.mm: OpType.matmul,
-    torch.relu: OpType.relu,
-    operator.add: OpType.add,
-    operator.matmul: OpType.matmul,
-    torch.ops.aten.add: OpType.add,
-    torch.ops.aten.add.default: OpType.add,
-    torch.ops.aten.add.Tensor: OpType.add,
-    torch.ops.aten.mm: OpType.matmul,
-    torch.ops.aten.mm.default: OpType.matmul,
-    torch.ops.aten.matmul: OpType.matmul,
-    torch.ops.aten.matmul.default: OpType.matmul,
-    torch.ops.aten.relu: OpType.relu,
-    torch.ops.aten.relu.default: OpType.relu,
-}
-
-_TORCH_CALL_METHOD_OP_TO_MK_OPTYPE = {
-    "add": OpType.add,
-    "matmul": OpType.matmul,
-    "relu": OpType.relu,
-}
-
-_TORCH_CALL_MODULE_OP_TO_MK_OPTYPE = {
-    torch.nn.ReLU: OpType.relu,
-    torch.nn.ReLU6: OpType.relu,
-}
-
-
-def _torch_dtype_to_mk_dtype(node: torch.fx.Node, dtype: torch.dtype) -> DType:
-    mapped_dtype = _TORCH_DTYPE_TO_MK_DTYPE.get(dtype)
-    if mapped_dtype is None:
-        raise RuntimeError(f"[MegaKittens] Unsupported dtype {dtype} in node '{node.name}'")
-    return mapped_dtype
-
-
-def _torch_device_to_mk_device(value: torch.device) -> Device:
-    if value.type == "cpu":
-        return Device(type="cpu")
-    elif value.type == "cuda":
-        return Device(type=value.type, index=value.index)
-    else:
-        raise RuntimeError(f"[MegaKittens] Unsupported device type '{value.type}'")
-
-
 def _resolve_optype(gm: torch.fx.GraphModule, node: torch.fx.Node) -> OpType:
     if node.op == "call_function":
-        if node.target in _TORCH_CALL_FUNCTION_OP_TO_MK_OPTYPE:
-            return _TORCH_CALL_FUNCTION_OP_TO_MK_OPTYPE[node.target]
-        raise RuntimeError(
-            f"[MegaKittens] Unsupported function op node '{node.name}' target={node.target!r}"
-        )
-
+        return OpType.from_call_function(node.target)
     if node.op == "call_method":
-        if node.target in _TORCH_CALL_METHOD_OP_TO_MK_OPTYPE:
-            return _TORCH_CALL_METHOD_OP_TO_MK_OPTYPE[node.target]
-        raise RuntimeError(
-            f"[MegaKittens] Unsupported method op node '{node.name}' target={node.target!r}"
-        )
-
+        return OpType.from_call_method(node.target)
     if node.op == "call_module":
         try:
             module = gm.get_submodule(node.target)
         except Exception:
             raise RuntimeError(f"[MegaKittens] Invalid call_module node '{node.name}' target={node.target!r}")
-        module_type = type(module)
-        if module_type in _TORCH_CALL_MODULE_OP_TO_MK_OPTYPE:
-            return _TORCH_CALL_MODULE_OP_TO_MK_OPTYPE[module_type]
-        raise RuntimeError(
-            f"[MegaKittens] Unsupported module op node '{node.name}' module={type(module).__name__}"
-        )
-
+        return OpType.from_call_module(type(module))
     raise RuntimeError(f"[MegaKittens] Unsupported node op '{node.op}' for node '{node.name}'")
 
 
@@ -107,8 +37,8 @@ def _tensor_to_mk_tensor(node: torch.fx.Node, value: torch.Tensor) -> TensorMeta
             f"[MegaKittens] Tensor for node '{node.name}' must be contiguous"
         )
     shape = tuple[int, ...](int(dim) for dim in value.shape)
-    dtype = _torch_dtype_to_mk_dtype(node, value.dtype)
-    device = _torch_device_to_mk_device(value.device)
+    dtype = DType.from_torch(value.dtype)
+    device = Device.from_torch(value.device)
     return TensorMeta(dtype=dtype, shape=shape, device=device)
 
 
@@ -139,13 +69,13 @@ def _tensor_meta_to_mk_tensor(
     if tensor_meta.dtype is None:
         raise RuntimeError(f"[MegaKittens] Missing tensor metadata dtype for node '{node.name}'")
     shape = tuple[int, ...](int(dim) for dim in tensor_meta.shape)
-    dtype = _torch_dtype_to_mk_dtype(node, tensor_meta.dtype)
+    dtype = DType.from_torch(tensor_meta.dtype)
     tensor_meta_device = getattr(tensor_meta, "device", None)
     if tensor_meta_device is None:
         tensor_meta_device = fallback_device
     if tensor_meta_device is None:
         raise RuntimeError(f"[MegaKittens] Missing tensor metadata device for node '{node.name}'")
-    device = _torch_device_to_mk_device(tensor_meta_device)
+    device = Device.from_torch(tensor_meta_device)
     return TensorMeta(dtype=dtype, shape=shape, device=device)
 
 
@@ -292,7 +222,7 @@ def _flatten_output_nodes(
 def fx_graph_to_mk_dag(
     gm: torch.fx.GraphModule,
     example_inputs: List[Any],
-) -> List[Node]:
+) -> DAG:
     """
     Convert an FX GraphModule plus example inputs into a MegaKittens node-centric DAG.
 
@@ -431,9 +361,8 @@ def fx_graph_to_mk_dag(
         raise RuntimeError(
             f"[MegaKittens] Number of input nodes is {_input_index}, but len(example_inputs) is {len(example_inputs)}"
         )
-    validate_dag(dag_nodes)
 
-    return dag_nodes
+    return DAG(dag_nodes)
 
 
 def megakittens_backend(
@@ -452,28 +381,28 @@ def megakittens_backend(
             print(f"[MegaKittens] FX graph:")
             gm.graph.print_tabular()
         
-        nodes = fx_graph_to_mk_dag(gm, example_inputs)
+        dag = fx_graph_to_mk_dag(gm, example_inputs)
         (
-            op_metas,
+            instruction_metas,
             tensor_metas,
             instructions,
             num_barriers,
             input_tensor_indices,
             output_tensor_indices,
-        ) = schedule(nodes)
+        ) = schedule(dag)
 
         if save_dag or save_schedule:
             base_path = utils.create_log_base_path(fn=fn)
 
         if save_dag:
-            dag_json = utils.save_dag_as_png_as_json(nodes, base_path)
+            dag_json = utils.save_dag_as_png_as_json(dag, base_path)
             utils.save_dag_as_png(dag_json, base_path)
 
         if save_schedule:
             utils.save_schedule_as_txt(tensor_metas, instructions, num_barriers, base_path)
 
         dispatcher = Dispatcher(
-            op_metas=op_metas,
+            instruction_metas=instruction_metas,
             tensor_metas=tensor_metas,
             instructions=instructions,
             num_barriers=num_barriers,

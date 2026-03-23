@@ -1,14 +1,13 @@
 from __future__ import annotations
 
-import itertools
-import math
 from typing import Dict, List, Tuple
 
-from .dag import DType, Node, OpType, TensorMeta
-from .instruction import (
+from .schema.dag import DAG, Node, OpType
+from .schema.tensor import TensorMeta
+from .schema.instruction import (
     IType,
     Instruction,
-    OpMeta,
+    InstructionMeta,
     MAX_DST_BARRIERS,
     MAX_DST_TENSORS,
     MAX_INDICES,
@@ -20,21 +19,10 @@ from .instruction import (
 MAX_BARRIERS = 256
 MAX_TENSOR_ALLOCATIONS = 256
 
-# Auto-built from all IType subclasses in instruction.py
-_OPTYPE_TO_ITYPE: Dict[str, IType] = {
-    cls().op_type: cls() for cls in IType.__subclasses__()
-}
-
-
-def _resolve_itype(node: Node) -> IType:
-    if node.optype.value not in _OPTYPE_TO_ITYPE:
-        raise RuntimeError(f"[MegaKittens] No IType mapping for OpType {node.optype.value}")
-    return _OPTYPE_TO_ITYPE[node.optype.value]
-
 
 def schedule(
-    dag_nodes: List[Node],
-) -> Tuple[List[OpMeta], List[TensorMeta], List[Instruction], int, Tuple[int, ...], Tuple[int, ...]]:
+    dag: DAG,
+) -> Tuple[List[InstructionMeta], List[TensorMeta], List[Instruction], int, Tuple[int, ...], Tuple[int, ...]]:
     """
     Convert a validated DAG into a minimal set of tensors and a flat per-SM instruction list.
     """
@@ -45,7 +33,7 @@ def schedule(
     output_tensor_indices: List[int] = []
 
     # TODO: reuse allocated tensors
-    for node in dag_nodes:
+    for node in dag.nodes:
         for out_idx, tensor_meta in enumerate(node.out_tensors):
             if len(tensor_metas) >= MAX_TENSOR_ALLOCATIONS:
                 raise RuntimeError(
@@ -71,32 +59,21 @@ def schedule(
         raise RuntimeError("[MegaKittens] Graph has no output tensors")
 
     # Phase 2: Instruction count per node
-    # TODO: make op-specific
     node_inst_count: Dict[int, int] = {}
-    for node in dag_nodes:
+    for node in dag.nodes:
         if node.optype in (OpType.input, OpType.output):
             continue
-        elif node.optype not in _OPTYPE_TO_ITYPE:
-            raise RuntimeError(
-                f"[MegaKittens] Unsupported OpType {node.optype} for instruction counting"
-            )
         if len(node.in_nodes) > MAX_SRC_TENSORS:
             raise RuntimeError(
                 f"[MegaKittens] Node has {len(node.in_nodes)} src tensors (max {MAX_SRC_TENSORS})"
-            )
-        out_shape = node.out_tensors[0].shape # TODO: support multi-output ops
-        if node.optype == OpType.matmul: # TODO: support multi-dimensional matmuls
-            assert len(out_shape) == 2, (
-                f"[MegaKittens] Matmul output must be 2D, got {len(out_shape)}D"
             )
         if len(node.out_tensors) > MAX_DST_TENSORS:
             raise RuntimeError(
                 f"[MegaKittens] Node has {len(node.out_tensors)} dst tensors (max {MAX_DST_TENSORS})"
             )
-        itype = _resolve_itype(node)
-        node_inst_count[id(node)] = 1
-        for dim in out_shape:
-            node_inst_count[id(node)] *= math.ceil(dim / itype.tile_size)
+        itype = IType.from_optype(node.optype.value)
+        src_metas = tuple(in_node.out_tensors[slot_idx] for in_node, slot_idx in node.in_nodes)
+        node_inst_count[id(node)] = itype.num_instructions(src_metas, node.out_tensors)
 
     # Phase 3: Barrier assignment
     barrier_counter = 0
@@ -104,20 +81,12 @@ def schedule(
     node_src_barriers: Dict[int, List[Tuple[int, int]]] = {}
 
     # TODO: reuse barriers
-    for node in dag_nodes:
+    for node in dag.nodes:
         if node.optype in (OpType.input, OpType.output):
             continue
-        elif node.optype not in _OPTYPE_TO_ITYPE:
-            raise RuntimeError(
-                f"[MegaKittens] Unsupported OpType {node.optype} for barrier assignment"
-            )
         for in_node, _slot_idx in node.in_nodes:
             if in_node.optype in (OpType.input, OpType.output):
                 continue
-            elif in_node.optype not in _OPTYPE_TO_ITYPE:
-                raise RuntimeError(
-                    f"[MegaKittens] Unsupported input OpType {in_node.optype} for barrier assignment"
-                )
             if barrier_counter >= MAX_BARRIERS:
                 raise RuntimeError(
                     f"[MegaKittens] Barrier count exceeds {MAX_BARRIERS}"
@@ -141,19 +110,15 @@ def schedule(
 
     # Phase 4: Instruction generation
     instructions: List[Instruction] = []
-    opcode_counter = 0
-    op_metas: List[OpMeta] = []
-    opcode_map: Dict[Tuple[IType, Tuple[int, ...], Tuple[int, ...]], int] = {}
+    icode_counter = 0
+    instruction_metas: List[InstructionMeta] = []
+    icode_map: Dict[Tuple[IType, Tuple[int, ...], Tuple[int, ...]], int] = {}
 
-    for node in dag_nodes:
+    for node in dag.nodes:
         if node.optype in (OpType.input, OpType.output):
             continue
-        elif node.optype not in _OPTYPE_TO_ITYPE:
-            raise RuntimeError(
-                f"[MegaKittens] Unsupported OpType {node.optype} during instruction generation"
-            )
 
-        itype = _resolve_itype(node)
+        itype = IType.from_optype(node.optype.value)
 
         src_tensors = tuple(
             tensor_index[(id(in_node), slot_idx)]
@@ -170,36 +135,32 @@ def schedule(
         itype.validate(src_metas, dst_metas)
 
         key = (itype, src_tensors, dst_tensors)
-        if key not in opcode_map:
-            opcode = opcode_counter
-            opcode_counter += 1
-            opcode_map[key] = opcode
-            op_metas.append(OpMeta(opcode=opcode, itype=itype, src_tensors=src_tensors, dst_tensors=dst_tensors))
+        if key not in icode_map:
+            icode = icode_counter
+            icode_counter += 1
+            icode_map[key] = icode
+            instruction_metas.append(InstructionMeta(icode=icode, itype=itype, src_tensors=src_tensors, dst_tensors=dst_tensors))
         else:
-            opcode = opcode_map[key]
+            icode = icode_map[key]
 
         src_bar_list = node_src_barriers.get(id(node), [])
         src_barriers = tuple(bid for bid, _ in src_bar_list)
         src_barrier_targets = tuple(tgt for _, tgt in src_bar_list)
         dst_barrier = tuple(node_dst_barriers.get(id(node), []))
 
-        out_shape = node.out_tensors[0].shape
-        ranges = [range(math.ceil(dim / itype.tile_size)) for dim in out_shape]
-        tiles = list(itertools.product(*ranges))
-
-        for tile in tiles:
+        for block_index in itype.block_indices(src_metas, node.out_tensors):
             instructions.append(Instruction(
-                opcode=opcode,
+                icode=icode,
                 src_tensors=src_tensors,
                 dst_tensors=dst_tensors,
-                indices=tile,
+                indices=block_index,
                 src_barriers=src_barriers,
                 src_barrier_targets=src_barrier_targets,
                 dst_barrier=dst_barrier,
             ))
 
     return (
-        op_metas,
+        instruction_metas,
         tensor_metas,
         instructions,
         barrier_counter,

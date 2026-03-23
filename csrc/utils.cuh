@@ -2,30 +2,10 @@
 
 #include "kittens.cuh"
 
-#include "no_op.cuh"
-
 namespace megakittens {
 
-enum WorkerType {
-    page_manager = 0,
-    semaphore_manager = 1,
-    loader = 2,
-    launcher = 3,
-    consumer = 4,
-    storer = 5
-};
-
-template <typename Op>
-concept MegaKittensOp = requires {
-    typename Op::controller;
-    typename Op::loader;
-    typename Op::launcher;
-    typename Op::consumer;
-    typename Op::storer;
-};
-
-template <MegaKittensOp Op, WorkerType worker_type, typename T, typename... Args>
-__device__ __forceinline__ static T dispatch_op(Args &...args) {
+template <MegaKittensIType Op, WorkerType worker_type, typename T, typename... Args>
+__device__ __forceinline__ static T dispatch_instruction(Args &...args) {
     if constexpr      (worker_type == WorkerType::page_manager)      return Op::controller::lid_release_order(args...);
     else if constexpr (worker_type == WorkerType::semaphore_manager) return Op::controller::init_semaphores(args...);
     else if constexpr (worker_type == WorkerType::loader)            return Op::loader::run(args...);

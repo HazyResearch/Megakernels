@@ -9,17 +9,11 @@ def add(a, b):
 
 
 def test_add():
-    a = torch.rand(128, 256, dtype=torch.bfloat16, device="cuda")
-    b = torch.rand(128, 256, dtype=torch.bfloat16, device="cuda")
-    check(add, (a, b))
-
-
-def test_add_large():
-    a = torch.rand(256, 512, dtype=torch.bfloat16, device="cuda")
-    b = torch.rand(256, 512, dtype=torch.bfloat16, device="cuda")
-    check(add, (a, b))
+    for M, N in [(128, 256), (256, 512), (512, 1024), (1024, 2048)]:
+        a = torch.rand(M, N, dtype=torch.bfloat16, device="cuda")
+        b = torch.rand(M, N, dtype=torch.bfloat16, device="cuda")
+        check(add, (a, b))
 
 
 if __name__ == "__main__":
     test_add()
-    test_add_large()

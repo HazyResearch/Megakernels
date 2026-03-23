@@ -1,5 +1,6 @@
 import torch
 
+from megakittens.schema.dtype import DType
 from megakittens.jit.c_utils import c_int, pack_args
 from megakittens.jit.cuda_utils import (
     get_kernel_from_cubin_module,
@@ -46,7 +47,7 @@ extern "C" __global__ void kernel(const __grid_constant__ globals g) {
 
 def _launch_simple_gemm(fn, A, B, C, N, stream):
     BLOCK_SIZE = 32
-    global_layout = gl(dtype=torch.float32, b=1, d=1, r=-1, c=-1)
+    global_layout = gl(dtype=DType.fp32, b=1, d=1, r=-1, c=-1)
     _holder, packed = pack_args([
         (global_layout.tensor_to_gl(A), global_layout.size, global_layout.align),
         (global_layout.tensor_to_gl(B), global_layout.size, global_layout.align),
@@ -351,12 +352,12 @@ __global__ void kernel(const __grid_constant__ globals<C> g) {
 
 
 def _launch_optimized_gemm(fn, A, B, D, M, N, K, stream):
-    a_tile = st(dtype=torch.bfloat16, rows=optimized_gemm_config["Mb"]//2, cols=optimized_gemm_config["Kb"])
-    b_tile = st(dtype=torch.bfloat16, rows=optimized_gemm_config["Nb"]//2, cols=optimized_gemm_config["Kb"])
-    d_tile = st(dtype=torch.bfloat16, rows=optimized_gemm_config["Mb"]//2, cols=optimized_gemm_config["Nb"]//optimized_gemm_config["EPI_PIPE_DEPTH"])
-    a_gl = gl(dtype=torch.bfloat16, b=1, d=1, r=-1, c=-1, tma_types=[a_tile])
-    b_gl = gl(dtype=torch.bfloat16, b=1, d=1, r=-1, c=-1, tma_types=[b_tile])
-    d_gl = gl(dtype=torch.bfloat16, b=1, d=1, r=-1, c=-1, tma_types=[d_tile])
+    a_tile = st(dtype=DType.bf16, rows=optimized_gemm_config["Mb"]//2, cols=optimized_gemm_config["Kb"])
+    b_tile = st(dtype=DType.bf16, rows=optimized_gemm_config["Nb"]//2, cols=optimized_gemm_config["Kb"])
+    d_tile = st(dtype=DType.bf16, rows=optimized_gemm_config["Mb"]//2, cols=optimized_gemm_config["Nb"]//optimized_gemm_config["EPI_PIPE_DEPTH"])
+    a_gl = gl(dtype=DType.bf16, b=1, d=1, r=-1, c=-1, tma_types=[a_tile])
+    b_gl = gl(dtype=DType.bf16, b=1, d=1, r=-1, c=-1, tma_types=[b_tile])
+    d_gl = gl(dtype=DType.bf16, b=1, d=1, r=-1, c=-1, tma_types=[d_tile])
     _holder, packed = pack_args([
         (a_gl.tensor_to_gl(A), a_gl.size, a_gl.align),
         (b_gl.tensor_to_gl(B), b_gl.size, b_gl.align),

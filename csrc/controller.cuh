@@ -56,17 +56,17 @@ __device__ __forceinline__ void controller_loop(const Globals &g, megakittens::s
             if (lane_id < Config::NUM_PAGES)
                 s.instruction_states[s.stage].pid_order[lane_id] = lane_id;
         } else {
-            const int last_opcode = s.instruction_states[last_stage].instruction[0];
+            const int last_icode = s.instruction_states[last_stage].instruction[0];
             if (lane_id < Config::NUM_PAGES) {
-                const int lid = dispatch_op<WorkerType::page_manager, int, Config, Globals>(
-                        last_opcode, g, s, lane_id);
+                const int lid = dispatch_instruction<WorkerType::page_manager, int, Config, Globals>(
+                        last_icode, g, s, lane_id);
                 s.instruction_states[s.stage].pid_order[lane_id] = s.instruction_states[last_stage].pid_order[lid];
             }
         }
 
         // Step 4. Initialize dynamic semaphores
-        const int opcode = s.instruction_states[s.stage].instruction[0];
-        num_semaphores[s.stage] = dispatch_op<WorkerType::semaphore_manager, int, Config, Globals>(opcode, g, s);
+        const int icode = s.instruction_states[s.stage].instruction[0];
+        num_semaphores[s.stage] = dispatch_instruction<WorkerType::semaphore_manager, int, Config, Globals>(icode, g, s);
         asm volatile("{fence.proxy.async.shared::cta;\n}" ::: "memory"); // TODO: is this really needed?
 
         // Step 5. Signal other workers that the instruction/pages/semaphores are ready

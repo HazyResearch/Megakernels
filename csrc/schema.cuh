@@ -4,6 +4,24 @@
 
 namespace megakittens {
 
+enum WorkerType {
+    page_manager = 0,
+    semaphore_manager = 1,
+    loader = 2,
+    launcher = 3,
+    consumer = 4,
+    storer = 5
+};
+
+template <typename IType>
+concept MegaKittensIType = requires {
+    typename IType::controller;
+    typename IType::loader;
+    typename IType::launcher;
+    typename IType::consumer;
+    typename IType::storer;
+};
+
 struct default_config {
     static constexpr int INSTRUCTION_PIPE_STAGES = 2; // should not change
     static constexpr int INSTRUCTION_WIDTH = 32; // 128 bytes per instruction

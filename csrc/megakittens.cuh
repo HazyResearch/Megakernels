@@ -3,7 +3,7 @@
 #include "kittens.cuh"
 
 #include "schema.cuh"
-#include "ops/ops.cuh"
+#include "utils.cuh"
 #include "controller.cuh"
 #include "workers.cuh"
 

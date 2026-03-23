@@ -4,14 +4,17 @@
 
 namespace megakittens {
 
-// Element-wise add using shared memory pages.
-//   Page 0: src0 tile (overwritten in-place with result)
-//   Page 1: src1 tile
+// Element-wise add using TMA for global↔shared transfers.
+//   Pages 0,1: src0 tile (upper/lower halves, overwritten with result)
+//   Pages 2,3: src1 tile (upper/lower halves)
+// Each page holds a 64×128 bf16 sub-tile (16KB = 1 page).
+// The scheduler tile is 128×128, split into two 64×128 TMA transfers.
 // Semaphores: [0] inputs_arrived (loader → consumer), [1] output_arrived (consumer → storer)
 template <typename Config, typename Globals, int SRC0, int SRC1, int DST>
 struct Add {
-    static constexpr int TILE = 64;
-    static constexpr int NUM_USED_PAGES = 2;
+    static constexpr int TILE = 128; // must match Python tile_size
+    static constexpr int NUM_USED_PAGES = 4;
+    using tile_t = kittens::st<kittens::bf16, 64, 128, false>; // non-swizzled, 16KB = 1 page
 
     __device__ static inline kittens::semaphore &inputs_arrived(state_t<Config> &s) { return s.semaphores()[0]; }
     __device__ static inline kittens::semaphore &output_arrived(state_t<Config> &s) { return s.semaphores()[1]; }
@@ -36,12 +39,13 @@ struct Add {
             auto &src0 = g.template gls<SRC0>();
             auto &src1 = g.template gls<SRC1>();
 
-            const int pid0 = s.lid_to_pid(0), pid1 = s.lid_to_pid(1);
-            const int tile_rows = min(TILE, (int)src0.rows() - tile_i * TILE);
-            const int tile_cols = min(TILE, (int)src0.cols() - tile_j * TILE);
-            const int total = tile_rows * tile_cols;
+            int pids[NUM_USED_PAGES];
+            #pragma unroll
+            for (int i = 0; i < NUM_USED_PAGES; i++) {
+                pids[i] = s.lid_to_pid(i);
+                s.page_wait(pids[i]);
+            }
 
-            // Wait for cross-SM source barriers before loading
             if (kittens::laneid() == 0) {
                 #pragma unroll
                 for (int i = 0; i < 8; i++) {
@@ -52,25 +56,19 @@ struct Add {
                             asm volatile("nanosleep.u32 %0;\n" :: "r"(20));
                     }
                 }
+
+                tile_t &p0 = *reinterpret_cast<tile_t*>(s.pages[pids[0]].data);
+                tile_t &p1 = *reinterpret_cast<tile_t*>(s.pages[pids[1]].data);
+                tile_t &p2 = *reinterpret_cast<tile_t*>(s.pages[pids[2]].data);
+                tile_t &p3 = *reinterpret_cast<tile_t*>(s.pages[pids[3]].data);
+
+                kittens::tma::expect_bytes(inputs_arrived(s), 4 * sizeof(tile_t));
+                kittens::tma::load_async(p0, src0, {tile_i*2,     tile_j}, inputs_arrived(s));
+                kittens::tma::load_async(p1, src0, {tile_i*2 + 1, tile_j}, inputs_arrived(s));
+                kittens::tma::load_async(p2, src1, {tile_i*2,     tile_j}, inputs_arrived(s));
+                kittens::tma::load_async(p3, src1, {tile_i*2 + 1, tile_j}, inputs_arrived(s));
             }
 
-            // Claim pages and load src tiles from global → smem
-            s.page_wait(pid0);
-            s.page_wait(pid1);
-            kittens::bf16 *smem0 = (kittens::bf16*)s.pages[pid0].data;
-            kittens::bf16 *smem1 = (kittens::bf16*)s.pages[pid1].data;
-            for (int i = kittens::laneid(); i < total; i += kittens::WARP_THREADS) {
-                int r = i / tile_cols, c = i % tile_cols;
-                smem0[i] = src0.raw_ptr[(tile_i * TILE + r) * src0.cols() + tile_j * TILE + c];
-            }
-            for (int i = kittens::laneid(); i < total; i += kittens::WARP_THREADS) {
-                int r = i / tile_cols, c = i % tile_cols;
-                smem1[i] = src1.raw_ptr[(tile_i * TILE + r) * src1.cols() + tile_j * TILE + c];
-            }
-            kittens::warp::sync();
-            if (kittens::laneid() == 0) kittens::arrive(inputs_arrived(s));
-
-            // Release unused pages
             if (kittens::laneid() >= NUM_USED_PAGES && kittens::laneid() < Config::NUM_PAGES) {
                 int pid = s.lid_to_pid(kittens::laneid());
                 s.page_wait(pid);
@@ -88,29 +86,24 @@ struct Add {
 
     struct consumer {
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
-            const auto &inst = s.instruction();
-            const int tile_i = inst[7], tile_j = inst[8];
-            auto &dst = g.template gls<DST>();
-
-            const int tile_rows = min(TILE, (int)dst.rows() - tile_i * TILE);
-            const int tile_cols = min(TILE, (int)dst.cols() - tile_j * TILE);
-            const int total = tile_rows * tile_cols;
-
             kittens::wait(inputs_arrived(s), 0);
 
-            kittens::bf16 *smem0 = (kittens::bf16*)s.pages[s.lid_to_pid(0)].data;
-            kittens::bf16 *smem1 = (kittens::bf16*)s.pages[s.lid_to_pid(1)].data;
+            int gid = kittens::warpgroup::groupid();
+            tile_t &src0_tile = *reinterpret_cast<tile_t*>(s.pages[s.lid_to_pid(gid)].data);
+            tile_t &src1_tile = *reinterpret_cast<tile_t*>(s.pages[s.lid_to_pid(gid + 2)].data);
 
-            // All consumer threads add in-place: smem0[i] = smem0[i] + smem1[i]
-            for (int i = threadIdx.x; i < total; i += Config::NUM_CONSUMER_WARPS * kittens::WARP_THREADS) {
-                smem0[i] = __float2bfloat16(__bfloat162float(smem0[i]) + __bfloat162float(smem1[i]));
-            }
+            kittens::rt_bf<16, 128> src0_reg, src1_reg;
+            kittens::warpgroup::load(src0_reg, src0_tile);
+            kittens::warpgroup::load(src1_reg, src1_tile);
+            kittens::warpgroup::add(src0_reg, src0_reg, src1_reg);
+            kittens::warpgroup::store(src0_tile, src0_reg);
 
-            __syncwarp();
+            kittens::warpgroup::sync(gid);
             if (kittens::warp::elect_leader()) kittens::arrive(output_arrived(s));
-            // Release src1 page
-            if (kittens::warpid() == 0 && kittens::warp::elect_leader())
-                s.page_finish(s.lid_to_pid(1), Config::NUM_CONSUMER_WARPS);
+            if (kittens::warpid() == 0 && kittens::warp::elect_leader()) {
+                s.page_finish(s.lid_to_pid(2), Config::NUM_CONSUMER_WARPS);
+                s.page_finish(s.lid_to_pid(3), Config::NUM_CONSUMER_WARPS);
+            }
         }
     };
 
@@ -120,23 +113,22 @@ struct Add {
             const int tile_i = inst[7], tile_j = inst[8];
             auto &dst = g.template gls<DST>();
 
-            const int tile_rows = min(TILE, (int)dst.rows() - tile_i * TILE);
-            const int tile_cols = min(TILE, (int)dst.cols() - tile_j * TILE);
-            const int total = tile_rows * tile_cols;
-
             kittens::wait(output_arrived(s), 0);
 
-            // Store result from page 0 → global
-            kittens::bf16 *smem0 = (kittens::bf16*)s.pages[s.lid_to_pid(0)].data;
-            for (int i = kittens::laneid(); i < total; i += kittens::WARP_THREADS) {
-                int r = i / tile_cols, c = i % tile_cols;
-                dst.raw_ptr[(tile_i * TILE + r) * dst.cols() + tile_j * TILE + c] = smem0[i];
+            tile_t &result_upper = *reinterpret_cast<tile_t*>(s.pages[s.lid_to_pid(0)].data);
+            tile_t &result_lower = *reinterpret_cast<tile_t*>(s.pages[s.lid_to_pid(1)].data);
+
+            if (kittens::laneid() == 0) {
+                kittens::tma::store_async(dst, result_upper, {tile_i*2,     tile_j});
+                kittens::tma::store_async(dst, result_lower, {tile_i*2 + 1, tile_j});
+                kittens::tma::store_async_wait();
             }
             kittens::warp::sync();
+
             if (kittens::laneid() == 0) {
                 s.page_finish(s.lid_to_pid(0), Config::NUM_CONSUMER_WARPS);
+                s.page_finish(s.lid_to_pid(1), Config::NUM_CONSUMER_WARPS);
 
-                // Signal cross-SM destination barriers (0xFF = unused)
                 __threadfence();
                 #pragma unroll
                 for (int i = 0; i < 4; i++) {
