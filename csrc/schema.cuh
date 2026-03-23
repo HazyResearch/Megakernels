@@ -40,11 +40,10 @@ struct instruction_t {
 static_assert(sizeof(instruction_t) == 128);
 
 struct default_config {
-    static constexpr int INSTRUCTION_PIPE_STAGES = 2; // should not change
-
+    static constexpr int INSTRUCTION_PIPE_STAGES = 2;
     static constexpr int CLUSTER_SIZE = 2;
     static constexpr int MIN_BLOCKS_PER_SM = 1;
-    static_assert(CLUSTER_SIZE == 1 || CLUSTER_SIZE == 2);
+    static_assert(INSTRUCTION_PIPE_STAGES == 2 && CLUSTER_SIZE == 2 && MIN_BLOCKS_PER_SM == 1); // should not change
 
     static constexpr int NUM_CONSUMER_WARPS = 8;
     static constexpr int NUM_WARPS = 4 + NUM_CONSUMER_WARPS;
@@ -104,6 +103,7 @@ struct state_t {
 
     kittens::clc::handle (&clc_handle)[Config::INSTRUCTION_PIPE_STAGES];
     kittens::semaphore (&clc_arrived)[Config::INSTRUCTION_PIPE_STAGES];
+    kittens::semaphore (&clc_finished)[Config::INSTRUCTION_PIPE_STAGES];
 
     instruction_state_t<Config> (&instruction_states)[Config::INSTRUCTION_PIPE_STAGES];
     kittens::semaphore (&instruction_arrived)[Config::INSTRUCTION_PIPE_STAGES];

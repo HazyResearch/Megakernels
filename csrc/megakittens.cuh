@@ -16,6 +16,7 @@ void kernel(const __grid_constant__ Globals g) {
     __shared__ alignas(128) instruction_state_t<Config> instruction_states[Config::INSTRUCTION_PIPE_STAGES];
     __shared__ kittens::clc::handle clc_handle[Config::INSTRUCTION_PIPE_STAGES];
     __shared__ kittens::semaphore clc_arrived[Config::INSTRUCTION_PIPE_STAGES];
+    __shared__ kittens::semaphore clc_finished[Config::INSTRUCTION_PIPE_STAGES];
     __shared__ kittens::semaphore instruction_arrived[Config::INSTRUCTION_PIPE_STAGES];
     __shared__ kittens::semaphore instruction_finished[Config::INSTRUCTION_PIPE_STAGES];
     __shared__ kittens::semaphore page_finished[Config::NUM_PAGES];
@@ -28,7 +29,8 @@ void kernel(const __grid_constant__ Globals g) {
     kittens::tensor_allocator<1, Config::CLUSTER_SIZE> tensor_alloc;
 
     // Instantiate MegaKittens state
-    state_t<Config> s{0, 0, clc_handle, clc_arrived, instruction_states, instruction_arrived, instruction_finished,
+    state_t<Config> s{0, 0, clc_handle, clc_arrived, clc_finished,
+                      instruction_states, instruction_arrived, instruction_finished,
                       pages, page_finished, tensor_finished, tensor_alloc};
 
     // Initialize common semaphores
@@ -38,10 +40,13 @@ void kernel(const __grid_constant__ Globals g) {
         init_semaphore(instruction_finished[threadIdx.x - Config::INSTRUCTION_PIPE_STAGES], Config::NUM_WARPS - 1);
     } else if (threadIdx.x < Config::INSTRUCTION_PIPE_STAGES*3) {
         init_semaphore(clc_arrived[threadIdx.x - Config::INSTRUCTION_PIPE_STAGES*2], 1);
-    } else if (threadIdx.x < Config::INSTRUCTION_PIPE_STAGES*3 + Config::NUM_PAGES) {
-        init_semaphore(page_finished[threadIdx.x - Config::INSTRUCTION_PIPE_STAGES*3], 1);
-        arrive(page_finished[threadIdx.x - Config::INSTRUCTION_PIPE_STAGES*3], 1);
-    } else if (threadIdx.x < Config::INSTRUCTION_PIPE_STAGES*3 + Config::NUM_PAGES + 1) {
+    } else if (threadIdx.x < Config::INSTRUCTION_PIPE_STAGES*4) {
+        init_semaphore(clc_finished[threadIdx.x - Config::INSTRUCTION_PIPE_STAGES*3], Config::CLUSTER_SIZE);
+        arrive(clc_finished[threadIdx.x - Config::INSTRUCTION_PIPE_STAGES*3], Config::CLUSTER_SIZE);
+    } else if (threadIdx.x < Config::INSTRUCTION_PIPE_STAGES*4 + Config::NUM_PAGES) {
+        init_semaphore(page_finished[threadIdx.x - Config::INSTRUCTION_PIPE_STAGES*4], 1);
+        arrive(page_finished[threadIdx.x - Config::INSTRUCTION_PIPE_STAGES*4], 1);
+    } else if (threadIdx.x < Config::INSTRUCTION_PIPE_STAGES*4 + Config::NUM_PAGES + 1) {
         init_semaphore(tensor_finished, 1);
         arrive(tensor_finished, 1);
     }
