@@ -11,13 +11,17 @@ def add(a, b):
 
 
 def benchmark_add():
-    shapes = [(128, 256), (256, 512), (512, 1024), (1024, 2048), (2048, 4096)]
-
     print("Add (bf16)")
-    print(f"{'shape':>14}  {'MK (us)':>10}  {'PT (us)':>10}  {'MK GB/s':>10}  {'PT GB/s':>10}  {'ratio':>7}")
-    print("-" * 72)
+    print(f"{'shape':>20}  {'MK (us)':>10}  {'PT (us)':>10}  {'MK GB/s':>10}  {'PT GB/s':>10}  {'ratio':>7}")
+    print("-" * 78)
 
-    for M, N in shapes:
+    for M, N in [
+        (4096, 4096),
+        (131072, 4096),
+        (4096, 131072),
+        (16384, 16384),
+        (131072, 131072),
+    ]:
         a = torch.rand(M, N, dtype=torch.bfloat16, device="cuda")
         b = torch.rand(M, N, dtype=torch.bfloat16, device="cuda")
 
@@ -27,7 +31,7 @@ def benchmark_add():
         mk_gbps = bytes_moved / mk_ms / 1e6
         pt_gbps = bytes_moved / pt_ms / 1e6
 
-        print(f"  ({M:>4}, {N:>4})  {mk_ms*1000:>10.2f}  {pt_ms*1000:>10.2f}  {mk_gbps:>10.1f}  {pt_gbps:>10.1f}  {pt_ms/mk_ms:>6.2f}x")
+        print(f"  ({M:>5}, {N:>5})  {mk_ms*1000:>10.2f}  {pt_ms*1000:>10.2f}  {mk_gbps:>10.1f}  {pt_gbps:>10.1f}  {pt_ms/mk_ms:>6.2f}x")
 
 
 if __name__ == "__main__":
