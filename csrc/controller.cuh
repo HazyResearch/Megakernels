@@ -35,7 +35,7 @@ __device__ __forceinline__ void controller_loop(const Globals &g, megakittens::s
             kittens::wait(s.clc_arrived[s.stage], phasebit);
             auto schedule = kittens::clc::query(s.clc_handle[s.stage]);
             if (!schedule.success) instruction_index = 0x7FFFFFFF; // signal to stop
-            else                   instruction_index = schedule.x; // we only use 1D grid
+            else                   instruction_index = schedule.x + cta_rank; // we only use 1D grid
         }
 
         // Step 2. Load the specific instruction from global to shared memory
