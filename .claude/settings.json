@@ -56,7 +56,8 @@
       "Bash(free:*)",
       "Bash(lscpu)",
       "Bash(lsb_release:*)",
-      "Bash(pytest:*)"
+      "Bash(pytest:*)",
+      "Bash(python -m benchmarks.*)"
     ],
     "deny": [
       "Bash(git add:*)",
