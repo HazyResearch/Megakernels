@@ -399,7 +399,9 @@ def megakittens_backend(
             utils.save_dag_as_png(dag_json, base_path)
 
         if save_schedule:
-            utils.save_schedule_as_txt(tensor_metas, instructions, num_barriers, base_path)
+            utils.save_schedule_as_txt(
+                tensor_metas, instructions, instruction_metas, num_barriers, base_path
+            )
 
         dispatcher = Dispatcher(
             instruction_metas=instruction_metas,

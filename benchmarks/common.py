@@ -19,7 +19,7 @@ def benchmark(fn, args, warmup=10, iters=100):
     Returns:
         (mk_ms, pt_ms): Average time per call in milliseconds.
     """
-    compiled_fn = megakittens.compile(fn, use_jit_cache=False)
+    compiled_fn = megakittens.compile(fn, use_jit_cache=False, save_dag=True, save_schedule=True)
 
     # Warmup both
     for _ in range(warmup):

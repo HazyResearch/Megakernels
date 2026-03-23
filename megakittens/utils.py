@@ -8,7 +8,7 @@ from typing import Any, Callable, Dict, List
 
 from .schema.dag import DAG
 from .schema.tensor import TensorMeta
-from .schema.instruction import Instruction
+from .schema.instruction import Instruction, InstructionMeta
 
 _LOG_DUMP_COUNTER = itertools.count()
 
@@ -115,6 +115,7 @@ def save_dag_as_png(
 def save_schedule_as_txt(
     tensor_metas: List[TensorMeta],
     instructions: List[Instruction],
+    instruction_metas: List[InstructionMeta],
     num_barriers: int,
     base_path: Path,
 ) -> None:
@@ -151,7 +152,8 @@ def save_schedule_as_txt(
 
     if instructions:
         id_strs = [f"I{idx}" for idx in range(len(instructions))]
-        itype_strs = [inst.itype.name for inst in instructions]
+        icode_to_name = {m.icode: m.itype.name for m in instruction_metas}
+        itype_strs = [icode_to_name.get(inst.icode, f"icode={inst.icode}") for inst in instructions]
         src_strs = [f"src=[{', '.join(f'T{t}' for t in inst.src_tensors)}]" for inst in instructions]
         dst_strs = [f"dst=[{', '.join(f'T{t}' for t in inst.dst_tensors)}]" for inst in instructions]
         idx_strs = [f"idx={list(inst.indices)}" for inst in instructions]

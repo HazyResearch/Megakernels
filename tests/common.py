@@ -18,7 +18,7 @@ def check(fn, args, atol=0.0, rtol=0.0):
     Raises:
         AssertionError if results don't match within tolerance.
     """
-    compiled_fn = megakittens.compile(fn, use_jit_cache=False)
+    compiled_fn = megakittens.compile(fn, use_jit_cache=False, save_dag=True, save_schedule=True)
 
     result = compiled_fn(*args)
     expected = fn(*args)

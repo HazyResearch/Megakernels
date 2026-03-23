@@ -48,8 +48,8 @@ struct default_config {
     static constexpr int NUM_CONSUMER_WARPS = 8;
     static constexpr int NUM_WARPS = 4 + NUM_CONSUMER_WARPS;
     static constexpr int NUM_THREADS = NUM_WARPS * kittens::WARP_THREADS;
-    static constexpr int CONSUMER_REGISTERS = 104;
-    static constexpr int NON_CONSUMER_REGISTERS = 64;
+    static constexpr int CONSUMER_REGISTERS = 224;
+    static constexpr int NON_CONSUMER_REGISTERS = 56;
 
     static constexpr int DYNAMIC_SEMAPHORES = 32;
     static_assert(DYNAMIC_SEMAPHORES <= 32); // for warp parallel processing
