@@ -41,16 +41,16 @@ struct default_config {
     static constexpr int DYNAMIC_SEMAPHORES = 32;
     static_assert(DYNAMIC_SEMAPHORES <= 32); // for warp parallel processing
 
-    static constexpr int SCRATCH_BYTES = 4096;
-    static constexpr int STATIC_SHARED_MEMORY = 512 + INSTRUCTION_PIPE_STAGES *
-        (INSTRUCTION_WIDTH*4 + 128 + DYNAMIC_SEMAPHORES*8 + SCRATCH_BYTES); // sizeof(instruction_state_t)
-    static constexpr int DYNAMIC_SHARED_MEMORY = kittens::MAX_SHARED_MEMORY - STATIC_SHARED_MEMORY;
+    static constexpr int PAGE_SIZE = 32768; // this is the only knob and everything else is derived
+    static constexpr int STATIC_SHARED_MEMORY_BASE = 512 + INSTRUCTION_PIPE_STAGES *
+        (INSTRUCTION_WIDTH*4 + 128 + DYNAMIC_SEMAPHORES*8);
+    static constexpr int NUM_PAGES = (kittens::MAX_SHARED_MEMORY - STATIC_SHARED_MEMORY_BASE) / PAGE_SIZE;
+    static_assert(NUM_PAGES <= 32); // for warp parallel processing and instruction_state_t padding
+    static constexpr int DYNAMIC_SHARED_MEMORY = NUM_PAGES * PAGE_SIZE;
+    static constexpr int SCRATCH_BYTES = (kittens::MAX_SHARED_MEMORY - STATIC_SHARED_MEMORY_BASE - DYNAMIC_SHARED_MEMORY) / INSTRUCTION_PIPE_STAGES;
+    static constexpr int STATIC_SHARED_MEMORY = STATIC_SHARED_MEMORY_BASE + INSTRUCTION_PIPE_STAGES*SCRATCH_BYTES;
 
-    static constexpr int PAGE_SIZE = 16384;
-    static constexpr int NUM_PAGES = DYNAMIC_SHARED_MEMORY / PAGE_SIZE;
-    static_assert(NUM_PAGES <= 32); // for warp parallel processing
-
-    static constexpr bool SPIN_LOOP_SLEEP_NS = 20;
+    static constexpr int SPIN_LOOP_SLEEP_NS = 20;
 };
 
 template <typename Config>
