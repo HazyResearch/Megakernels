@@ -10,9 +10,9 @@ __device__ __forceinline__ void name##_loop(const Globals &g, megakittens::state
     for (s.iter = 0, s.stage = 0; true; ++s.iter) {                                              \
         const int phasebit = (s.iter / Config::INSTRUCTION_PIPE_STAGES) & 0b1;                   \
         kittens::wait(s.instruction_arrived[s.stage], phasebit);                                 \
-        const int icode = s.instruction_states[s.stage].instruction[0];                         \
-        if (icode == -1) break;                                                                 \
-        dispatch_instruction<WorkerType::name, void, Config, Globals>(icode, g, s);                      \
+        const int icode = s.instruction_states[s.stage].instruction.icode;                       \
+        if (icode == -1) break;                                                                  \
+        dispatch_instruction<WorkerType::name, void, Config, Globals>(icode, g, s);              \
         kittens::warp::sync();                                                                   \
         if (kittens::warp::elect_leader())                                                       \
             kittens::arrive(s.instruction_finished[s.stage]);                                    \

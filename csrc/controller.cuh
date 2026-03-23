@@ -41,14 +41,16 @@ __device__ __forceinline__ void controller_loop(const Globals &g, megakittens::s
         // Step 2. Load the specific instruction from global to shared memory
         if (instruction_index >= g.instructions.rows()) {
             if (kittens::warp::elect_leader()) {
-                s.instruction_states[s.stage].instruction[0] = -1; // signal to stop.
+                s.instruction_states[s.stage].instruction.icode = -1; // signal to stop.
                 kittens::arrive(s.instruction_arrived[s.stage], 1);
             }
             break;
         }
-        int *instruction_ptr = &g.instructions[{instruction_index, 0}];
-        if (lane_id < Config::INSTRUCTION_WIDTH)
-            s.instruction_states[s.stage].instruction[lane_id] = instruction_ptr[lane_id];
+        static_assert(sizeof(instruction_t)/sizeof(int) <= 32); // must fit in one warp
+        int *inst_src = &g.instructions[{instruction_index, 0}];
+        int *inst_dst = reinterpret_cast<int*>(&s.instruction_states[s.stage].instruction);
+        if (lane_id < sizeof(instruction_t)/sizeof(int))
+            inst_dst[lane_id] = inst_src[lane_id];
         kittens::warp::sync();
 
         // Step 3. Establish physical page order
@@ -56,7 +58,7 @@ __device__ __forceinline__ void controller_loop(const Globals &g, megakittens::s
             if (lane_id < Config::NUM_PAGES)
                 s.instruction_states[s.stage].pid_order[lane_id] = lane_id;
         } else {
-            const int last_icode = s.instruction_states[last_stage].instruction[0];
+            const int last_icode = s.instruction_states[last_stage].instruction.icode;
             if (lane_id < Config::NUM_PAGES) {
                 const int lid = dispatch_instruction<WorkerType::page_manager, int, Config, Globals>(
                         last_icode, g, s, lane_id);
@@ -65,7 +67,7 @@ __device__ __forceinline__ void controller_loop(const Globals &g, megakittens::s
         }
 
         // Step 4. Initialize dynamic semaphores
-        const int icode = s.instruction_states[s.stage].instruction[0];
+        const int icode = s.instruction_states[s.stage].instruction.icode;
         num_semaphores[s.stage] = dispatch_instruction<WorkerType::semaphore_manager, int, Config, Globals>(icode, g, s);
         asm volatile("{fence.proxy.async.shared::cta;\n}" ::: "memory"); // TODO: is this really needed?
 

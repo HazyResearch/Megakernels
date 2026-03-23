@@ -8,11 +8,6 @@ from .schema.instruction import (
     IType,
     Instruction,
     InstructionMeta,
-    MAX_DST_BARRIERS,
-    MAX_DST_TENSORS,
-    MAX_INDICES,
-    MAX_SRC_BARRIERS,
-    MAX_SRC_TENSORS,
 )
 
 
@@ -63,13 +58,13 @@ def schedule(
     for node in dag.nodes:
         if node.optype in (OpType.input, OpType.output):
             continue
-        if len(node.in_nodes) > MAX_SRC_TENSORS:
+        if len(node.in_nodes) > Instruction.MAX_SRC_TENSORS:
             raise RuntimeError(
-                f"[MegaKittens] Node has {len(node.in_nodes)} src tensors (max {MAX_SRC_TENSORS})"
+                f"[MegaKittens] Node has {len(node.in_nodes)} src tensors (max {Instruction.MAX_SRC_TENSORS})"
             )
-        if len(node.out_tensors) > MAX_DST_TENSORS:
+        if len(node.out_tensors) > Instruction.MAX_DST_TENSORS:
             raise RuntimeError(
-                f"[MegaKittens] Node has {len(node.out_tensors)} dst tensors (max {MAX_DST_TENSORS})"
+                f"[MegaKittens] Node has {len(node.out_tensors)} dst tensors (max {Instruction.MAX_DST_TENSORS})"
             )
         itype = IType.from_optype(node.optype.value)
         src_metas = tuple(in_node.out_tensors[slot_idx] for in_node, slot_idx in node.in_nodes)
@@ -98,14 +93,14 @@ def schedule(
             node_src_barriers.setdefault(id(node), []).append((bid, target))
 
     for nid, barriers in node_dst_barriers.items():
-        if len(barriers) > MAX_DST_BARRIERS:
+        if len(barriers) > Instruction.MAX_DST_BARRIERS:
             raise RuntimeError(
-                f"[MegaKittens] Node has {len(barriers)} dst barriers (max {MAX_DST_BARRIERS})"
+                f"[MegaKittens] Node has {len(barriers)} dst barriers (max {Instruction.MAX_DST_BARRIERS})"
             )
     for nid, barriers in node_src_barriers.items():
-        if len(barriers) > MAX_SRC_BARRIERS:
+        if len(barriers) > Instruction.MAX_SRC_BARRIERS:
             raise RuntimeError(
-                f"[MegaKittens] Node has {len(barriers)} src barriers (max {MAX_SRC_BARRIERS})"
+                f"[MegaKittens] Node has {len(barriers)} src barriers (max {Instruction.MAX_SRC_BARRIERS})"
             )
 
     # Phase 4: Instruction generation

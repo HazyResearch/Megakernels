@@ -9,7 +9,7 @@ import torch  # TODO: completely remove torch dependency and purely rely on CUDA
 from .schema.device import Device
 from .schema.dtype import DType
 from .schema.tensor import TensorMeta
-from .schema.instruction import InstructionMeta
+from .schema.instruction import Instruction, InstructionMeta
 from .jit.c_utils import pack_args
 from .jit.pykittens import gl
 from .jit.cuda_utils import (
@@ -22,15 +22,6 @@ from .jit.cuda_utils import (
     unload_cubin_module,
 )
 from .jit.nvrtc_jit import compile_source_to_cubin
-from .schema.instruction import (
-    Instruction,
-    MAX_DST_BARRIERS,
-    MAX_DST_TENSORS,
-    MAX_INDICES,
-    MAX_SRC_BARRIER_TARGETS,
-    MAX_SRC_BARRIERS,
-    MAX_SRC_TENSORS,
-)
 
 
 def _pack_uint8s_to_int32s(values: tuple[int, ...], count: int, pad: int = 0) -> list[int]:
@@ -52,26 +43,26 @@ def _pack_instruction(inst: Instruction) -> list[int]:
     inst_packed[0] = inst.icode
 
     # 1-4 (4-19B): src_tensors (16 uint8 -> 4 int32)
-    inst_packed[1:5] = _pack_uint8s_to_int32s(inst.src_tensors, MAX_SRC_TENSORS)
+    inst_packed[1:5] = _pack_uint8s_to_int32s(inst.src_tensors, Instruction.MAX_SRC_TENSORS)
 
     # 5-6 (20-27B): dst_tensors (8 uint8 -> 2 int32)
-    inst_packed[5:7] = _pack_uint8s_to_int32s(inst.dst_tensors, MAX_DST_TENSORS)
+    inst_packed[5:7] = _pack_uint8s_to_int32s(inst.dst_tensors, Instruction.MAX_DST_TENSORS)
 
     # 7-20 (28-83B): indices (14 int32, zero-padded)
-    indices = list(inst.indices) + [0] * max(0, MAX_INDICES - len(inst.indices))
+    indices = list(inst.indices) + [0] * max(0, Instruction.MAX_INDICES - len(inst.indices))
     inst_packed[7:21] = indices
 
     # 21-22 (84-91B): src_barriers (8 uint8 -> 2 int32)
-    inst_packed[21:23] = _pack_uint8s_to_int32s(inst.src_barriers, MAX_SRC_BARRIERS)
+    inst_packed[21:23] = _pack_uint8s_to_int32s(inst.src_barriers, Instruction.MAX_SRC_BARRIERS)
 
     # 23-30 (92-123B): src_barrier_targets (8 int32, zero-padded)
     targets = list(inst.src_barrier_targets) + [0] * max(
-        0, MAX_SRC_BARRIER_TARGETS - len(inst.src_barrier_targets)
+        0, Instruction.MAX_SRC_BARRIER_TARGETS - len(inst.src_barrier_targets)
     )
     inst_packed[23:31] = targets
 
     # 31 (124-127B): dst_barrier (4 uint8 -> 1 int32, 0xFF means unused)
-    inst_packed[31:32] = _pack_uint8s_to_int32s(inst.dst_barrier, MAX_DST_BARRIERS, pad=0xFF)
+    inst_packed[31:32] = _pack_uint8s_to_int32s(inst.dst_barrier, Instruction.MAX_DST_BARRIERS, pad=0xFF)
 
     return inst_packed
 
@@ -116,14 +107,13 @@ class Dispatcher:
 
     # Must match default_config in csrc/schema.cuh
     INSTRUCTION_PIPE_STAGES = 2
-    INSTRUCTION_WIDTH = 32
     CLUSTER_SIZE = 2
     NUM_CONSUMER_WARPS = 8
     NUM_WARPS = 4 + NUM_CONSUMER_WARPS
     NUM_THREADS = NUM_WARPS * 32
     DYNAMIC_SEMAPHORES = 32
     PAGE_SIZE = 32768
-    STATIC_SHARED_MEMORY_BASE = 512 + INSTRUCTION_PIPE_STAGES * (INSTRUCTION_WIDTH*4 + 128 + DYNAMIC_SEMAPHORES*8)
+    STATIC_SHARED_MEMORY_BASE = 512 + INSTRUCTION_PIPE_STAGES * (128 + 128 + DYNAMIC_SEMAPHORES*8)
     NUM_PAGES = (227*1024 - STATIC_SHARED_MEMORY_BASE) // PAGE_SIZE
     DYNAMIC_SHARED_MEMORY = NUM_PAGES * PAGE_SIZE
 

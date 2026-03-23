@@ -22,11 +22,25 @@ concept MegaKittensIType = requires {
     typename IType::storer;
 };
 
+struct instruction_t {
+    static constexpr int MAX_SRC_TENSORS = 16;
+    static constexpr int MAX_DST_TENSORS = 8;
+    static constexpr int MAX_INDICES = 14;
+    static constexpr int MAX_SRC_BARRIERS = 8;
+    static constexpr int MAX_DST_BARRIERS = 4;
+
+    int icode;                                 //  4B
+    uint8_t src_tensors[MAX_SRC_TENSORS];      // 16B
+    uint8_t dst_tensors[MAX_DST_TENSORS];      //  8B
+    int indices[MAX_INDICES];                  // 56B
+    uint8_t src_barriers[MAX_SRC_BARRIERS];    //  8B
+    int src_barrier_targets[MAX_SRC_BARRIERS]; // 32B
+    uint8_t dst_barriers[MAX_DST_BARRIERS];    //  4B
+};
+static_assert(sizeof(instruction_t) == 128);
+
 struct default_config {
     static constexpr int INSTRUCTION_PIPE_STAGES = 2; // should not change
-    static constexpr int INSTRUCTION_WIDTH = 32; // 128 bytes per instruction
-    using instruction_t = int[INSTRUCTION_WIDTH];
-    static_assert(INSTRUCTION_WIDTH <= 32); // for warp parallel processing
 
     static constexpr int CLUSTER_SIZE = 2;
     static constexpr int MIN_BLOCKS_PER_SM = 1;
@@ -42,8 +56,7 @@ struct default_config {
     static_assert(DYNAMIC_SEMAPHORES <= 32); // for warp parallel processing
 
     static constexpr int PAGE_SIZE = 32768; // this is the only knob and everything else is derived
-    static constexpr int STATIC_SHARED_MEMORY_BASE = 512 + INSTRUCTION_PIPE_STAGES *
-        (INSTRUCTION_WIDTH*4 + 128 + DYNAMIC_SEMAPHORES*8);
+    static constexpr int STATIC_SHARED_MEMORY_BASE = 512 + INSTRUCTION_PIPE_STAGES*(sizeof(instruction_t) + 128 + DYNAMIC_SEMAPHORES*8);
     static constexpr int NUM_PAGES = (kittens::MAX_SHARED_MEMORY - STATIC_SHARED_MEMORY_BASE) / PAGE_SIZE;
     static_assert(NUM_PAGES <= 32); // for warp parallel processing and instruction_state_t padding
     static constexpr int DYNAMIC_SHARED_MEMORY = NUM_PAGES * PAGE_SIZE;
@@ -55,7 +68,7 @@ struct default_config {
 
 template <typename Config>
 struct __align__(128) instruction_state_t {
-    Config::instruction_t instruction;
+    instruction_t instruction;
     int pid_order[Config::NUM_PAGES];
     int _padding[((Config::NUM_PAGES + 31) & ~31) - Config::NUM_PAGES]; // make pid_order + _padding 128 bytes
     kittens::semaphore semaphores[Config::DYNAMIC_SEMAPHORES];
@@ -91,14 +104,8 @@ struct state_t {
     kittens::semaphore &tensor_finished;
     kittens::tensor_allocator<1, Config::CLUSTER_SIZE> &tensor_alloc;
 
-    __device__ __forceinline__ int (&instruction())[Config::INSTRUCTION_WIDTH] {
+    __device__ __forceinline__ const instruction_t &instruction() const {
         return instruction_states[stage].instruction;
-    }
-    __device__ __forceinline__ const int (&instruction() const)[Config::INSTRUCTION_WIDTH] {
-        return instruction_states[stage].instruction;
-    }
-    __device__ __forceinline__ int (&pid_order())[Config::NUM_PAGES] {
-        return instruction_states[stage].pid_order;
     }
     __device__ __forceinline__ const int (&pid_order() const)[Config::NUM_PAGES] {
         return instruction_states[stage].pid_order;
