@@ -9,7 +9,7 @@ from ..jit.pykittens import st
 
 class Add(IType):
     TILE_SIZE = 128
-    TMA = st(dtype=DType.bf16, rows=128, cols=128, swizzle=False)
+    TMA = st(dtype=DType.bf16, rows=128, cols=128)
 
     @property
     def name(self) -> str:

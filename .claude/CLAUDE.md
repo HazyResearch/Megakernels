@@ -29,3 +29,10 @@ Only two files need to be touched:
 - Cross-SM barriers use global memory atomics. Source barriers check `target > 0` (unused targets are 0). Destination barriers use `0xFF` padding for unused slots.
 
 - `compile_source_to_cubin` has both an in-memory `@functools.cache` and a file-backed cache (`~/.cache/megakittens/cubin/`). Pass `use_jit_cache=False` to skip file cache; in-memory cache still applies per-process.
+
+## Naming conventions
+
+- "op" / `OpType` = a vertex in the compute graph (DAG level, maps from torch ops)
+- "instruction type" / `IType` = how an op executes on the GPU (kernel implementation)
+- "instruction" = one tile's worth of work dispatched to one SM
+- "icode" = integer identifying which instruction type to dispatch (assigned per unique itype+tensor combo)
