@@ -1,5 +1,5 @@
 import torch
-from cuda import cuda as cuda_driver
+import cuda.bindings.driver as cuda_driver
 
 from megakittens.schema.dtype import DType
 from megakittens.jit.c_utils import c_int, pack_args
