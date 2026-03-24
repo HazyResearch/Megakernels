@@ -1,8 +1,17 @@
+from collections.abc import Callable
+
 import torch
+torch.manual_seed(42)
+
 import megakittens
 
 
-def check(fn, args, atol=0.0, rtol=0.0):
+def check(
+    fn: Callable[..., torch.Tensor],
+    args: tuple[torch.Tensor, ...],
+    atol: float = 0.0,
+    rtol: float = 0.0,
+) -> tuple[float, float]:
     """
     Run a function with and without MegaKittens compilation, compare results.
 
@@ -24,8 +33,8 @@ def check(fn, args, atol=0.0, rtol=0.0):
     expected = fn(*args)
 
     diff = (result - expected).abs()
-    max_diff = diff.max().item()
-    mean_diff = diff.mean().item()
+    max_diff: float = diff.max().item()
+    mean_diff: float = diff.mean().item()
 
     if atol == 0.0 and rtol == 0.0:
         assert torch.equal(result, expected), \

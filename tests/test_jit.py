@@ -1,4 +1,5 @@
 import torch
+from cuda import cuda as cuda_driver
 
 from megakittens.schema.dtype import DType
 from megakittens.jit.c_utils import c_int, pack_args
@@ -45,7 +46,14 @@ extern "C" __global__ void kernel(const __grid_constant__ globals g) {
 """
 
 
-def _launch_simple_gemm(fn, A, B, C, N, stream):
+def _launch_simple_gemm(
+    fn: cuda_driver.CUfunction,
+    A: torch.Tensor,
+    B: torch.Tensor,
+    C: torch.Tensor,
+    N: int,
+    stream: int,
+) -> None:
     BLOCK_SIZE = 32
     global_layout = gl(dtype=DType.fp32, b=1, d=1, r=-1, c=-1)
     _holder, packed = pack_args([
@@ -58,14 +66,14 @@ def _launch_simple_gemm(fn, A, B, C, N, stream):
     launch_kernel(
         fn,
         packed,
-        grid=((N + BLOCK_SIZE - 1) // BLOCK_SIZE, (N + BLOCK_SIZE - 1) // BLOCK_SIZE), 
-        block=(BLOCK_SIZE, BLOCK_SIZE), 
-        dynamic_smem_bytes=0, 
+        grid=((N + BLOCK_SIZE - 1) // BLOCK_SIZE, (N + BLOCK_SIZE - 1) // BLOCK_SIZE),
+        block=(BLOCK_SIZE, BLOCK_SIZE),
+        dynamic_smem_bytes=0,
         stream=stream
     )
 
 
-def test_simple_gemm():
+def test_simple_gemm() -> None:
     N = 128
     device_index = 0
 
@@ -95,7 +103,7 @@ def test_simple_gemm():
 # Optimized GEMM
 # ---------------------------------------------------------------------------
 
-optimized_gemm_config = {
+optimized_gemm_config: dict[str, int | bool] = {
     "Mb": 256, "Nb": 256, "Kb": 64,
     "SUPERGROUP_SIZE": 4,
     "OVERLAP_MMA_EPI": False,
@@ -351,7 +359,16 @@ __global__ void kernel(const __grid_constant__ globals<C> g) {
 """
 
 
-def _launch_optimized_gemm(fn, A, B, D, M, N, K, stream):
+def _launch_optimized_gemm(
+    fn: cuda_driver.CUfunction,
+    A: torch.Tensor,
+    B: torch.Tensor,
+    D: torch.Tensor,
+    M: int,
+    N: int,
+    K: int,
+    stream: int,
+) -> None:
     a_tile = st(dtype=DType.bf16, rows=optimized_gemm_config["Mb"]//2, cols=optimized_gemm_config["Kb"])
     b_tile = st(dtype=DType.bf16, rows=optimized_gemm_config["Nb"]//2, cols=optimized_gemm_config["Kb"])
     d_tile = st(dtype=DType.bf16, rows=optimized_gemm_config["Mb"]//2, cols=optimized_gemm_config["Nb"]//optimized_gemm_config["EPI_PIPE_DEPTH"])
@@ -374,7 +391,7 @@ def _launch_optimized_gemm(fn, A, B, D, M, N, K, stream):
     )
 
 
-def test_optimized_gemm():
+def test_optimized_gemm() -> None:
     device_index = 0
     M = N = K = 4096
 
