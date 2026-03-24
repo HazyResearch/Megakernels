@@ -14,8 +14,15 @@ struct Add {
     __device__ static __forceinline__ kittens::semaphore &inputs_arrived(state_t<Config> &s, int i) { return s.semaphores()[i]; }
 
     struct controller {
-        __device__ __forceinline__ static int lid_release_order(const Globals &g, state_t<Config> &s, int lid) {
-            return (lid + (Config::NUM_PAGES - NUM_USED_PAGES)) % Config::NUM_PAGES; // TODO change
+        __device__ __forceinline__ static int lid_release_order(const Globals &g, state_t<Config> &s, int query) {
+            const int num_tiles = s.instruction().indices[2];
+            const int num_unused = Config::NUM_PAGES - num_tiles*2;
+            if (query < num_unused) // Unused pages
+                return num_tiles*2 + query;
+            else if (query < num_unused + num_tiles) // B pages
+                return (query - num_unused)*2 + 1;
+            else // A pages
+                return (query - num_unused - num_tiles)*2;
         }
         __device__ __forceinline__ static int init_semaphores(const Globals &g, state_t<Config> &s) {
             if (kittens::laneid() < TILES_PER_INST)

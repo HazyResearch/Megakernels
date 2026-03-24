@@ -8,8 +8,8 @@ namespace megakittens {
 template <typename Config, typename Globals>
 struct Noop {
     struct controller {
-        __device__ __forceinline__ static int lid_release_order(const Globals &g, state_t<Config> &s, int lid) {
-            return lid;
+        __device__ __forceinline__ static int lid_release_order(const Globals &g, state_t<Config> &s, int query) {
+            return query;
         }
         __device__ __forceinline__ static int init_semaphores(const Globals &g, state_t<Config> &s) {
             return 0;

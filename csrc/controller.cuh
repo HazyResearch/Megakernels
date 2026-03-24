@@ -66,8 +66,10 @@ __device__ __forceinline__ void controller_loop(const Globals &g, megakittens::s
         } else {
             const int last_icode = s.instruction_states[last_stage].instruction.icode;
             if (lane_id < Config::NUM_PAGES) {
-                const int lid = dispatch_instruction<WorkerType::page_manager, int, Config, Globals>(
-                        last_icode, g, s, lane_id);
+                const uint32_t current_stage = s.stage;
+                s.stage = last_stage; // so lid_release_order(...) can use s.instruction()
+                const int lid = dispatch_instruction<WorkerType::page_manager, int, Config, Globals>(last_icode, g, s, lane_id);
+                s.stage = current_stage;
                 s.instruction_states[s.stage].pid_order[lane_id] = s.instruction_states[last_stage].pid_order[lid];
             }
         }

@@ -20,17 +20,26 @@ struct Gemm {
     using d_st_t = kittens::st_bf<Mb/2, Nb/EPI_PIPE_DEPTH>;   // 128×64
     using d_tt_t = kittens::tt<float, Mb/2, Nb>;              // 128×256 TMEM
 
+    static constexpr int A_LIDS[LOAD_PIPE_DEPTH] = {0, 2, 3, 5};
+    static constexpr int B_LIDS[2] = {1, 4};
+
     __device__ static inline kittens::semaphore &inputs_arrived  (state_t<Config> &s, int stage) { return s.semaphores()[stage]; }
     __device__ static inline kittens::semaphore &inputs_finished (state_t<Config> &s, int stage) { return s.semaphores()[LOAD_PIPE_DEPTH+stage]; }
     __device__ static inline kittens::semaphore &outputs_arrived (state_t<Config> &s)            { return s.semaphores()[2*LOAD_PIPE_DEPTH+0]; }
 
-    __device__ static inline a_st_t &a_st(state_t<Config> &s, int stage, int cid) { return s.pages[s.lid_to_pid(stage)].template as<a_st_t>(cid*sizeof(a_st_t)); }
-    __device__ static inline b_st_t &b_st(state_t<Config> &s, int stage)          { return s.pages[s.lid_to_pid(4+stage/2)].template as<b_st_t>((stage%2)*sizeof(b_st_t)); }
+    __device__ static inline a_st_t &a_st(state_t<Config> &s, int stage, int cid) { return s.pages[s.lid_to_pid(A_LIDS[stage])].template as<a_st_t>(cid*sizeof(a_st_t)); }
+    __device__ static inline b_st_t &b_st(state_t<Config> &s, int stage)          { return s.pages[s.lid_to_pid(B_LIDS[stage/2])].template as<b_st_t>((stage%2)*sizeof(b_st_t)); }
     __device__ static inline d_st_t &d_st(state_t<Config> &s, int cid, int slot)  { return s.pages[s.lid_to_pid(0)].template as<d_st_t>((cid*NUM_D_TILES+slot)*sizeof(d_st_t));}
 
     struct controller {
-        __device__ __forceinline__ static int lid_release_order(const Globals &g, state_t<Config> &s, int lid) {
-            return (lid + (Config::NUM_PAGES - NUM_USED_PAGES)) % Config::NUM_PAGES; // TODO really?
+        __device__ __forceinline__ static int lid_release_order(const Globals &g, state_t<Config> &s, int query) {
+            static_assert(Config::NUM_PAGES == 7 && LOAD_PIPE_DEPTH == 4);
+            const int num_iters = g.template gls<SRC_A>().cols() / Kb;
+            switch (num_iters % LOAD_PIPE_DEPTH) {
+                case 0: case 1: { constexpr int order[] = {6, 2, 1, 3, 5, 4, 0}; return order[query]; }
+                case 2:         { constexpr int order[] = {6, 3, 5, 4, 2, 1, 0}; return order[query]; }
+                case 3:         { constexpr int order[] = {6, 5, 4, 2, 1, 3, 0}; return order[query]; }
+            }
         }
         __device__ __forceinline__ static int init_semaphores(const Globals &g, state_t<Config> &s) {
             const int lane_id = kittens::laneid();
@@ -66,8 +75,8 @@ struct Gemm {
                 for (int i = 0; i < num_iters + LOAD_PIPE_DEPTH; i++) {
                     const int stage = i % LOAD_PIPE_DEPTH;
                     if (i < LOAD_PIPE_DEPTH) {
-                        s.page_wait(s.lid_to_pid(stage));
-                        if (stage%2 == 0) s.page_wait(s.lid_to_pid(4+stage/2));
+                        s.page_wait(s.lid_to_pid(A_LIDS[stage]));
+                        if (stage%2 == 0) s.page_wait(s.lid_to_pid(B_LIDS[stage/2]));
                     } else {
                         kittens::wait(inputs_finished(s, stage), ((i+LOAD_PIPE_DEPTH)/LOAD_PIPE_DEPTH)&0b1);
                     }
@@ -77,8 +86,8 @@ struct Gemm {
                             kittens::tma::cluster::load_async(a_st(s, stage, cid), a_gl, {(tile_row*2+cta_rank)*NUM_CONSUMERS+cid, i}, inputs_arrived(s, stage), (uint16_t)(1<<cta_rank), 0);
                         kittens::tma::cluster::load_async(b_st(s, stage), b_gl, {i, tile_col*2+cta_rank}, inputs_arrived(s, stage), (uint16_t)(1<<cta_rank), 0);
                     } else {
-                        if (stage != 0) s.page_finish(s.lid_to_pid(stage));
-                        if (stage%2 == 1) s.page_finish(s.lid_to_pid(4+(stage-1)/2));
+                        if (stage != 0) s.page_finish(s.lid_to_pid(A_LIDS[stage]));
+                        if (stage%2 == 1) s.page_finish(s.lid_to_pid(B_LIDS[(stage-1)/2]));
                     }
                 }
             }
@@ -132,7 +141,7 @@ struct Gemm {
             kittens::tensor_load_wait();
             consumer_group::sync(4);
             if (consumer_group::elect_leader()) s.tensor_finish();
-        
+
             #pragma unroll
             for (int i = 0; i < EPI_PIPE_DEPTH; i++) {
                 kittens::warpgroup::tma::store_async_read_wait<NUM_D_TILES - 1>();
@@ -145,7 +154,7 @@ struct Gemm {
             kittens::warpgroup::tma::store_async_wait(); // wait for all write to complete
             consumer_group::sync(4);
             if (consumer_group::elect_leader()) {
-                s.page_finish(s.lid_to_pid(0));
+                s.page_finish(s.lid_to_pid(A_LIDS[0]));
                 all_barrier_arrive<Config>(g, instruction);
             }
         }
