@@ -4,6 +4,7 @@
 
 namespace megakittens {
 
+#pragma nv_diag_suppress 940
 template <MegaKittensIType Op, WorkerType worker_type, typename T, typename... Args>
 __device__ __forceinline__ static T dispatch_instruction(Args &...args) {
     if constexpr      (worker_type == WorkerType::page_manager)      return Op::controller::lid_release_order(args...);
@@ -12,7 +13,7 @@ __device__ __forceinline__ static T dispatch_instruction(Args &...args) {
     else if constexpr (worker_type == WorkerType::launcher)          return Op::launcher::run(args...);
     else if constexpr (worker_type == WorkerType::consumer)          return Op::consumer::run(args...);
     else if constexpr (worker_type == WorkerType::storer)            return Op::storer::run(args...);
-    else { asm volatile("{trap;\n}"); return T{}; }
+    else static_assert(sizeof(T) == 9999, "Invalid WorkerType");
 }
 
 template <typename Config>
