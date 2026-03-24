@@ -9,10 +9,12 @@ class OpType(str, Enum):
     add = "add"
     gemm = "gemm"
     relu = "relu"
+    rmsnorm = "rmsnorm"
     output = "output"
 
     @classmethod
     def from_call_function(cls, target) -> "OpType":
+        _ensure_custom_ops_registered()
         if target not in _CALL_FUNCTION_MAP:
             raise ValueError(f"[MegaKittens] Unsupported call_function target: {target!r}")
         return _CALL_FUNCTION_MAP[target]
@@ -52,9 +54,24 @@ _CALL_METHOD_MAP: dict[str, OpType] = {
     "add": OpType.add,
     "gemm": OpType.gemm,
     "relu": OpType.relu,
+    "rms_norm": OpType.rmsnorm,
 }
 
 _CALL_MODULE_MAP: dict[type, OpType] = {
     torch.nn.ReLU: OpType.relu,
     torch.nn.ReLU6: OpType.relu,
+    torch.nn.RMSNorm: OpType.rmsnorm,
 }
+
+_custom_ops_registered = False
+def _ensure_custom_ops_registered():
+    """Lazily register custom ops that only exist after megakittens.ops is imported."""
+    global _custom_ops_registered
+    if _custom_ops_registered:
+        return
+    _custom_ops_registered = True
+    try:
+        _CALL_FUNCTION_MAP[torch.ops.megakittens.rms_norm] = OpType.rmsnorm
+        _CALL_FUNCTION_MAP[torch.ops.megakittens.rms_norm.default] = OpType.rmsnorm
+    except AttributeError:
+        pass  # ops not registered yet

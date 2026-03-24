@@ -13,6 +13,31 @@ THUNDERKITTENS_ROOT = MEGAKITTENS_ROOT / "ThunderKittens"
 THUNDERKITTENS_ARCH_DEFINES = {
     10: "-DKITTENS_BLACKWELL", 9: "-DKITTENS_HOPPER", 8: "-DKITTENS_AMPERE"
 }
+def _system_include_dirs() -> tuple[str, ...]:
+    """Get system C/C++ include paths from the compiler (needed by NVRTC)."""
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["gcc", "-v", "-x", "c++", "/dev/null", "-fsyntax-only"],
+            capture_output=True, text=True
+        )
+        lines = result.stderr.split("\n")
+        in_search = False
+        paths = []
+        for line in lines:
+            if "#include <...> search starts here" in line:
+                in_search = True
+                continue
+            if "End of search list" in line:
+                break
+            if in_search and line.strip():
+                paths.append(line.strip())
+        return tuple(paths)
+    except FileNotFoundError:
+        # gcc not available, try common paths
+        return ("/usr/include",)
+
+
 COMMON_NVRTC_FLAGS = (
     "--std=c++20",
     "--use_fast_math",
@@ -25,6 +50,7 @@ COMMON_NVRTC_FLAGS = (
     f"-I{THUNDERKITTENS_ROOT / 'include'}",
     f"-I{THUNDERKITTENS_ROOT / 'prototype'}",
     *(f"-I{d}" for d in cuda_include_dirs()),
+    *(f"-I{d}" for d in _system_include_dirs()),
 )
 
 
