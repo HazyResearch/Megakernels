@@ -1,12 +1,15 @@
-import sys
-from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from collections.abc import Callable
 
 import torch
 import megakittens
 
 
-def benchmark(fn, args, warmup=10, iters=100):
+def benchmark(
+    fn: Callable[..., torch.Tensor],
+    args: tuple[torch.Tensor, ...],
+    warmup: int = 500,
+    iters: int = 100,
+) -> tuple[float, float]:
     """
     Benchmark a function with and without MegaKittens compilation.
 

@@ -1,16 +1,12 @@
-import sys
-from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
 import torch
-from benchmarks.common import benchmark
+from .common import benchmark
 
 
-def add(a, b):
+def add(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     return a + b
 
 
-def benchmark_add():
+def benchmark_add() -> None:
     print("Add (bf16)")
     print(f"{'shape':>20}  {'MK (us)':>10}  {'PT (us)':>10}  {'MK GB/s':>10}  {'PT GB/s':>10}  {'ratio':>7}")
     print("-" * 78)
