@@ -34,9 +34,9 @@ class Instruction(BaseModel):
     MAX_DST_BARRIERS: ClassVar[int] = 4
 
     icode: int
-    src_tensors: Tuple[conint(ge=0, le=255), ...] = Field(..., min_items=0, max_items=16)
-    dst_tensors: Tuple[conint(ge=0, le=255), ...] = Field(..., min_items=0, max_items=8)
-    indices: Tuple[conint(ge=-(2**31), le=2**31 - 1), ...] = Field(..., min_items=0, max_items=14)
-    src_barriers: Tuple[conint(ge=0, le=255), ...] = Field(..., min_items=0, max_items=8)
-    src_barrier_targets: Tuple[conint(ge=-(2**31), le=2**31 - 1), ...] = Field(..., min_items=0, max_items=8)
-    dst_barrier: Tuple[conint(ge=0, le=255), ...] = Field(..., min_items=0, max_items=4)
+    src_tensors: Tuple[conint(ge=0, le=255), ...] = Field(..., min_length=0, max_length=16)
+    dst_tensors: Tuple[conint(ge=0, le=255), ...] = Field(..., min_length=0, max_length=8)
+    indices: Tuple[conint(ge=-(2**31), le=2**31 - 1), ...] = Field(..., min_length=0, max_length=14)
+    src_barriers: Tuple[conint(ge=0, le=255), ...] = Field(..., min_length=0, max_length=8)
+    src_barrier_targets: Tuple[conint(ge=-(2**31), le=2**31 - 1), ...] = Field(..., min_length=0, max_length=8)
+    dst_barrier: Tuple[conint(ge=0, le=255), ...] = Field(..., min_length=0, max_length=4)
