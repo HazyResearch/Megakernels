@@ -31,7 +31,7 @@ class IType(ABC):
     @property
     @abstractmethod
     def op_type(self) -> str:
-        """The OpType value this instruction implements (e.g. ``"add"``, ``"matmul"``)."""
+        """The OpType value this instruction implements (e.g. ``"add"``, ``"gemm"``)."""
         ...
 
     @property

@@ -12,7 +12,7 @@ __device__ __forceinline__ static T dispatch_instruction(Args &...args) {
     else if constexpr (worker_type == WorkerType::launcher)          return Op::launcher::run(args...);
     else if constexpr (worker_type == WorkerType::consumer)          return Op::consumer::run(args...);
     else if constexpr (worker_type == WorkerType::storer)            return Op::storer::run(args...);
-    else asm volatile("{trap;\n}");
+    else { asm volatile("{trap;\n}"); return T{}; }
 }
 
 template <typename Config>

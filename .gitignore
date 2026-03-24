@@ -8,3 +8,4 @@ __pycache__/
 log/
 .vscode/
 temp/
+examples_from_old/

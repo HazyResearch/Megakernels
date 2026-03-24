@@ -7,7 +7,7 @@ import torch
 class OpType(str, Enum):
     input = "input"
     add = "add"
-    matmul = "matmul"
+    gemm = "gemm"
     relu = "relu"
     output = "output"
 
@@ -32,25 +32,25 @@ class OpType(str, Enum):
 
 _CALL_FUNCTION_MAP = {
     torch.add: OpType.add,
-    torch.matmul: OpType.matmul,
-    torch.mm: OpType.matmul,
+    torch.matmul: OpType.gemm,
+    torch.mm: OpType.gemm,
     torch.relu: OpType.relu,
     operator.add: OpType.add,
-    operator.matmul: OpType.matmul,
+    operator.matmul: OpType.gemm,
     torch.ops.aten.add: OpType.add,
     torch.ops.aten.add.default: OpType.add,
     torch.ops.aten.add.Tensor: OpType.add,
-    torch.ops.aten.mm: OpType.matmul,
-    torch.ops.aten.mm.default: OpType.matmul,
-    torch.ops.aten.matmul: OpType.matmul,
-    torch.ops.aten.matmul.default: OpType.matmul,
+    torch.ops.aten.mm: OpType.gemm,
+    torch.ops.aten.mm.default: OpType.gemm,
+    torch.ops.aten.matmul: OpType.gemm,
+    torch.ops.aten.matmul.default: OpType.gemm,
     torch.ops.aten.relu: OpType.relu,
     torch.ops.aten.relu.default: OpType.relu,
 }
 
 _CALL_METHOD_MAP: dict[str, OpType] = {
     "add": OpType.add,
-    "matmul": OpType.matmul,
+    "gemm": OpType.gemm,
     "relu": OpType.relu,
 }
 
