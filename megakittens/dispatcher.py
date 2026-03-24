@@ -243,16 +243,14 @@ class Dispatcher:
                     tensor_tma_types.setdefault(tensor_idx, []).append(tma_type)
 
         # Build gls
-        # TODO: dims should later be adaptively chosen as compile/runtime dim
         self.all_tensors = [self.instruction_tensor, self.barrier_tensor] + self.tensors
         for i, t in enumerate(self.all_tensors):
-            shape = (1,) * (4 - len(t.shape)) + tuple(t.shape)
             mk_dtype = DType.from_torch(t.dtype)
             if i < 2:  # instructions and barriers
-                self.gls[i] = gl(dtype=mk_dtype, b=shape[0], d=shape[1], r=shape[2], c=shape[3])
+                self.gls[i] = gl(dtype=mk_dtype, b=1, d=1, r=-1, c=-1)
             else:
                 tma = tensor_tma_types.get(i - 2, [])
-                self.gls[i] = gl(dtype=mk_dtype, b=shape[0], d=shape[1], r=shape[2], c=shape[3], tma_types=tma)
+                self.gls[i] = gl(dtype=mk_dtype, b=-1, d=-1, r=-1, c=-1, tma_types=tma)
 
         self._materialized = True
 
