@@ -19,6 +19,7 @@ __device__ __forceinline__ void controller_loop(const Globals &g, megakittens::s
             kittens::wait(s.instruction_finished[s.stage], phasebit);
             if (lane_id < num_semaphores[s.stage])
                 invalidate_semaphore(s.instruction_states[s.stage].semaphores[lane_id]);
+            kittens::warp::sync(); // invalidate_semaphore relies on the instruction
         }
 
         // Step 1. Query the CLC scheduler for the next instruction index

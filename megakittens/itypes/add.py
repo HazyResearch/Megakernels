@@ -1,4 +1,3 @@
-import itertools
 from typing import List, Tuple
 
 from ..schema.dtype import DType
@@ -9,6 +8,7 @@ from ..jit.pykittens import st
 
 class Add(IType):
     TILE_SIZE = 128
+    TILES_PER_INST = 3
     TMA = st(dtype=DType.bf16, rows=128, cols=128)
 
     @property
@@ -41,14 +41,19 @@ class Add(IType):
         ]
 
     def block_indices(self, src_metas: Tuple[TensorMeta, ...], dst_metas: Tuple[TensorMeta, ...]) -> List[Tuple[int, ...]]:
-        ranges = [range(dim // self.TILE_SIZE) for dim in dst_metas[0].shape]
-        return list(itertools.product(*ranges))
+        rows = dst_metas[0].shape[0] // self.TILE_SIZE
+        cols = dst_metas[0].shape[1] // self.TILE_SIZE
+        indices = []
+        for row in range(rows):
+            for col in range(0, cols, self.TILES_PER_INST):
+                n = min(self.TILES_PER_INST, cols - col)
+                indices.append((row, col, n))  # up to 3 tiles per inst
+        return indices
 
     def num_instructions(self, src_metas: Tuple[TensorMeta, ...], dst_metas: Tuple[TensorMeta, ...]) -> int:
-        result = 1
-        for dim in dst_metas[0].shape:
-            result *= dim // self.TILE_SIZE
-        return result
+        rows = dst_metas[0].shape[0] // self.TILE_SIZE
+        cols = dst_metas[0].shape[1] // self.TILE_SIZE
+        return rows * ((cols + self.TILES_PER_INST - 1) // self.TILES_PER_INST)
 
     def validate(self, src_metas: Tuple[TensorMeta, ...], dst_metas: Tuple[TensorMeta, ...]) -> None:
         super().validate(src_metas, dst_metas)

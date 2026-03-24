@@ -54,12 +54,13 @@ struct Gemm {
             auto &b_gl = g.template gls<SRC_B>();
             const int num_iters = a_gl.cols() / Kb;
 
+            if (kittens::laneid() >= NUM_USED_PAGES && kittens::laneid() < Config::NUM_PAGES) {
+                const int pid = s.lid_to_pid(kittens::laneid());
+                s.page_wait(pid);
+                s.page_finish(pid);
+            }
+
             if (kittens::warp::elect_leader()) {
-                #pragma unroll
-                for (int i = NUM_USED_PAGES; i < Config::NUM_PAGES; i++) {
-                    s.page_wait(s.lid_to_pid(i));
-                    s.page_finish(s.lid_to_pid(i));
-                }
                 all_barrier_wait<Config>(g, instruction);
 
                 for (int i = 0; i < num_iters + LOAD_PIPE_DEPTH; i++) {
