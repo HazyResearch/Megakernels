@@ -1,1 +1,1 @@
-from . import add, gemm
+from . import add, gemm, rmsnorm

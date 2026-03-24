@@ -9,6 +9,7 @@ class OpType(str, Enum):
     add = "add"
     gemm = "gemm"
     relu = "relu"
+    rmsnorm = "rmsnorm"
     output = "output"
 
     @classmethod
@@ -46,15 +47,19 @@ _CALL_FUNCTION_MAP = {
     torch.ops.aten.matmul.default: OpType.gemm,
     torch.ops.aten.relu: OpType.relu,
     torch.ops.aten.relu.default: OpType.relu,
+    torch.ops.megakittens.rmsnorm: OpType.rmsnorm,
+    torch.ops.megakittens.rmsnorm.default: OpType.rmsnorm,
 }
 
 _CALL_METHOD_MAP: dict[str, OpType] = {
     "add": OpType.add,
     "gemm": OpType.gemm,
     "relu": OpType.relu,
+    "rmsnorm": OpType.rmsnorm,
 }
 
 _CALL_MODULE_MAP: dict[type, OpType] = {
     torch.nn.ReLU: OpType.relu,
     torch.nn.ReLU6: OpType.relu,
+    torch.nn.RMSNorm: OpType.rmsnorm,
 }
