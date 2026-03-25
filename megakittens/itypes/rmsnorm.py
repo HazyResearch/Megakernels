@@ -1,3 +1,4 @@
+
 import math
 from typing import List, Tuple
 
@@ -6,6 +7,7 @@ import torch
 from ..schema.dtype import DType
 from ..schema.itype import IType
 from ..schema.tensor import TensorMeta, TensorSpec
+from ..jit.pykittens import sv
 
 
 @torch.library.custom_op("megakittens::rmsnorm", mutates_args=())
@@ -17,32 +19,32 @@ def _rmsnorm_fake(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Te
     return torch.empty_like(x)
 
 
-# Page size and count must match csrc config (default_config)
 _PAGE_BYTES = 32768  # Config::PAGE_SIZE
-_NUM_PAGES = 7       # approximate Config::NUM_PAGES on Blackwell (228KB smem)
 
 
-def _rows_per_inst(N: int, num_pages: int = _NUM_PAGES) -> int:
-    """How many full rows of width N fit in the page buffer (page-aligned)."""
-    bytes_per_row = N * 2  # bf16
-    if bytes_per_row <= _PAGE_BYTES:
-        # Multiple rows per page
-        rows_per_page = _PAGE_BYTES // bytes_per_row
-        return rows_per_page * num_pages
-    else:
-        # One row spans multiple pages
-        pages_per_row = bytes_per_row // _PAGE_BYTES
-        return max(num_pages // pages_per_row, 1)
+def _sv_sizeof_bytes(n: int) -> int:
+    """sizeof(sv<bf16, N>) on Blackwell -- padded to 128-byte boundary."""
+    raw = n * 2  # bf16 = 2 bytes
+    return ((raw + 127) // 128) * 128
+
+
+def _rows_per_inst(N: int) -> int:
+    """How many full rows of width N fit in one page."""
+    row_bytes = _sv_sizeof_bytes(N)
+    return _PAGE_BYTES // row_bytes
 
 
 class RMSNorm(IType):
+    def __init__(self):
+        self._n = 0
+
     @property
     def name(self) -> str:
         return "rmsnorm"
 
     @property
     def cpp_template(self) -> str:
-        return "RMSNorm<MKConfig, MKGlobals, {tensors}>"
+        return f"RMSNorm<MKConfig, MKGlobals, {self._n}, {{tensors}}>"
 
     @property
     def cpp_include(self) -> str:
@@ -54,18 +56,24 @@ class RMSNorm(IType):
 
     @property
     def inputs(self) -> list[TensorSpec]:
+        if self._n > 0:
+            return [
+                TensorSpec(dtype=DType.bf16, granularity=(1, 16), tma_types=[sv(dtype=DType.bf16, length=self._n)]),
+                TensorSpec(dtype=DType.bf16, granularity=(16,)),
+            ]
         return [
-            # x: (M, N) bf16 — no TMA, loaded via cp.async
-            TensorSpec(dtype=DType.bf16, granularity=(1, 8)),
-            # weight: (N,) bf16 — no TMA, read directly from global
-            TensorSpec(dtype=DType.bf16, granularity=(8,)),
+            TensorSpec(dtype=DType.bf16, granularity=(1, 16)),
+            TensorSpec(dtype=DType.bf16, granularity=(16,)),
         ]
 
     @property
     def outputs(self) -> list[TensorSpec]:
+        if self._n > 0:
+            return [
+                TensorSpec(dtype=DType.bf16, granularity=(1, 16), tma_types=[sv(dtype=DType.bf16, length=self._n)]),
+            ]
         return [
-            # y: (M, N) bf16 — no TMA, stored via raw global writes
-            TensorSpec(dtype=DType.bf16, granularity=(1, 8)),
+            TensorSpec(dtype=DType.bf16, granularity=(1, 16)),
         ]
 
     def block_indices(self, src_metas: Tuple[TensorMeta, ...], dst_metas: Tuple[TensorMeta, ...]) -> List[Tuple[int, ...]]:
@@ -75,8 +83,7 @@ class RMSNorm(IType):
         row = 0
         while row < M:
             rows_this = min(rpi, M - row)
-            # (row_start, N, rows_this_instruction)
-            indices.append((row, N, rows_this))
+            indices.append((row, rows_this))
             row += rows_this
         return indices
 
@@ -86,16 +93,19 @@ class RMSNorm(IType):
         return math.ceil(M / rpi)
 
     def validate(self, src_metas: Tuple[TensorMeta, ...], dst_metas: Tuple[TensorMeta, ...]) -> None:
-        super().validate(src_metas, dst_metas)
         x_meta = src_metas[0]
         w_meta = src_metas[1]
+        N = x_meta.shape[-1]
+
+        # Set N for TMA type generation (used by inputs/outputs/cpp_template)
+        self._n = N
+
+        super().validate(src_metas, dst_metas)
 
         if len(x_meta.shape) < 2:
             raise RuntimeError(
                 f"[MegaKittens] RMSNorm requires x with at least 2 dims, got shape {x_meta.shape}"
             )
-
-        N = x_meta.shape[-1]
 
         if w_meta.shape != (N,):
             raise RuntimeError(
@@ -107,26 +117,22 @@ class RMSNorm(IType):
                 f"[MegaKittens] RMSNorm output shape {dst_metas[0].shape} doesn't match input shape {x_meta.shape}"
             )
 
-        # N must be a multiple of 8 (128 elements per warp iteration = 32 threads * 4)
-        if N % 8 != 0:
+        # sv requires length divisible by 16
+        if N % 16 != 0:
             raise RuntimeError(
-                f"[MegaKittens] RMSNorm requires N divisible by 8, got {N}"
+                f"[MegaKittens] RMSNorm requires N divisible by 16, got {N}"
             )
 
-        # Must fit at least 1 row in pages
-        bytes_per_row = N * 2
-        if bytes_per_row > _NUM_PAGES * _PAGE_BYTES:
+        # TMA sv constraint: length <= 256 OR (length * sizeof(dtype)) % 128 == 0
+        if N > 256 and (N * 2) % 128 != 0:
             raise RuntimeError(
-                f"[MegaKittens] RMSNorm row size {bytes_per_row}B exceeds page buffer "
-                f"{_NUM_PAGES * _PAGE_BYTES}B. N={N} is too large for single-CTA path."
+                f"[MegaKittens] RMSNorm requires N <= 256 or N*2 divisible by 128, got {N}"
             )
 
-        # Rows must not cross page boundaries. This holds when:
-        # - bytes_per_row evenly divides PAGE_BYTES (multiple rows per page), OR
-        # - PAGE_BYTES evenly divides bytes_per_row (one row spans whole pages)
-        if _PAGE_BYTES % bytes_per_row != 0 and bytes_per_row % _PAGE_BYTES != 0:
+        # Row must fit in one page
+        row_bytes = _sv_sizeof_bytes(N)
+        if row_bytes > _PAGE_BYTES:
             raise RuntimeError(
-                f"[MegaKittens] RMSNorm requires row size ({bytes_per_row}B) to be "
-                f"page-aligned (PAGE_SIZE={_PAGE_BYTES}B). N={N} is not supported. "
-                f"Standard LLM dimensions (2048, 4096, 8192, 16384) are all supported."
+                f"[MegaKittens] RMSNorm row size {row_bytes}B exceeds page size "
+                f"{_PAGE_BYTES}B. N={N} is too large for single-page TMA path."
             )
