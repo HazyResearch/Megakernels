@@ -40,12 +40,6 @@ struct Add {
             const int tile_col_start = instruction.indices[1];
             const int num_tiles = instruction.indices[2];
 
-            if (kittens::laneid() >= num_tiles*2 && kittens::laneid() < Config::NUM_PAGES) {
-                const int pid = s.lid_to_pid(kittens::laneid());
-                s.page_wait(pid);
-                s.page_finish(pid);
-            }
-
             if (kittens::warp::elect_leader()) {
                 all_barrier_wait<Config>(g, instruction);
 
@@ -59,6 +53,11 @@ struct Add {
                     kittens::tma::expect_bytes(inputs_arrived(s, i), 2 * sizeof(tile_t));
                     kittens::tma::load_async(a_st, a_gl, {tile_row, tile_col_start + i}, inputs_arrived(s, i));
                     kittens::tma::load_async(b_st, b_gl, {tile_row, tile_col_start + i}, inputs_arrived(s, i));
+                }
+            } else if (kittens::warp::elect_leader_from_active()) {
+                for (int i = num_tiles*2; i < Config::NUM_PAGES; i++) {
+                    s.page_wait(s.lid_to_pid(i));
+                    s.page_finish(s.lid_to_pid(i));
                 }
             }
         }
