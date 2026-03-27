@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from typing import Dict, List, Tuple
 
-from .schema.dag import DAG, Node, OpType
+from .dispatcher import Dispatcher
+from .itypes.noop import Noop
+from .schema.dag import DAG, OpType
 from .schema.tensor import TensorMeta
 from .schema.instruction import (
     IType,
@@ -105,9 +107,10 @@ def schedule(
 
     # Phase 4: Instruction generation
     instructions: List[Instruction] = []
-    icode_counter = 0
-    instruction_metas: List[InstructionMeta] = []
+    icode_counter = 1  # icode 0 is reserved for noop
+    instruction_metas: List[InstructionMeta] = [InstructionMeta(icode=0, itype=Noop(), src_tensors=(), dst_tensors=())]
     icode_map: Dict[Tuple[IType, Tuple[int, ...], Tuple[int, ...]], int] = {}
+    noop = Instruction(icode=0, src_tensors=(), dst_tensors=(), indices=(), src_barriers=(), src_barrier_targets=(), dst_barrier=())
 
     for node in dag.nodes:
         if node.optype in (OpType.input, OpType.output):
@@ -153,6 +156,10 @@ def schedule(
                 src_barrier_targets=src_barrier_targets,
                 dst_barrier=dst_barrier,
             ))
+
+        # Pad to CLUSTER_SIZE with noops so op boundaries are cluster-aligned
+        while len(instructions) % Dispatcher.CLUSTER_SIZE != 0:
+            instructions.append(noop)
 
     return (
         instruction_metas,

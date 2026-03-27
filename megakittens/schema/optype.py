@@ -5,6 +5,7 @@ import torch
 
 
 class OpType(str, Enum):
+    noop = "noop"
     input = "input"
     add = "add"
     gemm = "gemm"
