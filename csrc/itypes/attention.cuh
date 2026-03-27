@@ -96,20 +96,11 @@ struct Attention {
             const int m_tile_base = m_block * NUM_SOFTMAXXERS * Config::CLUSTER_SIZE;
 
             if (kittens::warp::elect_leader()) {
-                // Wait for all used pages from previous instruction
+                all_barrier_wait<Config>(g, instruction);
+
                 #pragma unroll
                 for (int i = 0; i < NUM_SOFTMAXXERS; i++)
                     s.page_wait(s.lid_to_pid(Q_LIDS[i]));
-                #pragma unroll
-                for (int i = 0; i < 2; i++)
-                    s.page_wait(s.lid_to_pid(KV_LIDS[i]));
-                #pragma unroll
-                for (int i = 0; i < NUM_SOFTMAXXERS; i++)
-                    s.page_wait(s.lid_to_pid(O_LIDS[i]));
-
-                all_barrier_wait<Config>(g, instruction);
-
-                // Load Q tiles (one per softmaxxer)
                 #pragma unroll
                 for (int i = 0; i < NUM_SOFTMAXXERS; i++) {
                     kittens::tma::cluster::load_async<kittens::dim::DEPTH, kittens::cache_policy::NORMAL>(
@@ -118,11 +109,12 @@ struct Attention {
                         q_arrived(s, i), (uint16_t)(1 << cta_rank), 0);
                 }
 
-                // K/V pipeline
+                #pragma unroll
+                for (int i = 0; i < 2; i++)
+                    s.page_wait(s.lid_to_pid(KV_LIDS[i]));
                 int kv_idx = 0;
                 int kv_phase = 1;
                 for (int idx = 0; idx < iters_per_task; idx++) {
-                    // Load K
                     kittens::tma::cluster::wait(kv_finished(s, kv_idx), kv_phase);
                     kittens::tma::cluster::load_async<kittens::dim::DEPTH, kittens::cache_policy::NORMAL>(
                         kv_st(s, kv_idx), k_gl,
@@ -130,7 +122,6 @@ struct Attention {
                         kv_arrived(s, kv_idx), (uint16_t)(1 << cta_rank), 0);
                     kv_idx++; if (kv_idx == LOAD_STAGES) { kv_idx = 0; kv_phase ^= 1; }
 
-                    // Load V (reinterpret kv slot as v_tile)
                     kittens::tma::cluster::wait(kv_finished(s, kv_idx), kv_phase);
                     kittens::tma::cluster::load_async<kittens::dim::DEPTH, kittens::cache_policy::NORMAL>(
                         reinterpret_cast<v_tile&>(kv_st(s, kv_idx)), v_gl,
@@ -138,7 +129,6 @@ struct Attention {
                         kv_arrived(s, kv_idx), (uint16_t)(1 << cta_rank), 0);
                     kv_idx++; if (kv_idx == LOAD_STAGES) { kv_idx = 0; kv_phase ^= 1; }
                 }
-                // Pages released by consumer after all computation is done
             } else if (kittens::warp::elect_leader_from_active()) {
                 // Release unused pages
                 #pragma unroll
@@ -170,14 +160,13 @@ struct Attention {
                 int kv_phase = 0;
                 int norm_scores_phase = 0;
 
-                // Wait for Q
                 #pragma unroll
                 for (int qid = 0; qid < NUM_SOFTMAXXERS; qid++) {
                     kittens::tma::cluster::expect_bytes(q_arrived(s, qid), Config::CLUSTER_SIZE * sizeof(q_tile));
                     kittens::tma::cluster::wait(q_arrived(s, qid), 0);
                 }
 
-                // First QK^T
+                // first QK
                 int k_slot = kv_idx;
                 kittens::tma::cluster::expect_bytes(kv_arrived(s, k_slot), Config::CLUSTER_SIZE * sizeof(k_tile));
                 kittens::tma::cluster::wait(kv_arrived(s, k_slot), kv_phase);
@@ -187,7 +176,7 @@ struct Attention {
                 }
                 kv_idx++; if (kv_idx == LOAD_STAGES) { kv_idx = 0; kv_phase ^= 1; }
 
-                // Middle iterations: wait for normalized scores → PV → QK^T
+                // repeat PV then QK
                 for (int idx = 0; idx < iters_per_task - 1; idx++) {
                     int v_slot = kv_idx;
                     kittens::tma::cluster::expect_bytes(kv_arrived(s, v_slot), Config::CLUSTER_SIZE * sizeof(v_tile));
@@ -202,13 +191,11 @@ struct Attention {
 
                     #pragma unroll
                     for (int qid = 0; qid < NUM_SOFTMAXXERS; qid++) {
-                        // Quarter 0: wait for normalized scores
                         kittens::tma::cluster::wait(norm_scores_arrived(s, qid), norm_scores_phase);
                         if (idx == 0)
                             kittens::mm2_AB(tt_outputs[qid], d_tt_scores_bf_1q(tt_scores[qid].addr), *v_q[0]);
                         else
                             kittens::mma2_AB(tt_outputs[qid], d_tt_scores_bf_1q(tt_scores[qid].addr), *v_q[0]);
-                        // Quarters 1-3
                         #pragma unroll
                         for (int q = 1; q < 4; q++) {
                             kittens::tma::cluster::wait(norm_scores_quarter_arrived(s, q-1, qid), norm_scores_phase);
@@ -218,7 +205,6 @@ struct Attention {
                                 kittens::mma2_AB(tt_outputs[qid], d_tt_scores_bf_1q(tt_scores[qid].addr + q * Nb/8), *v_q[q]);
                         }
 
-                        // QK^T for next iteration
                         if (qid == 0) {
                             kittens::tma::cluster::expect_bytes(kv_arrived(s, k_slot), Config::CLUSTER_SIZE * sizeof(k_tile));
                             kittens::tma::cluster::wait(kv_arrived(s, k_slot), kv_phase);
@@ -231,7 +217,7 @@ struct Attention {
                     norm_scores_phase ^= 1;
                 }
 
-                // Last PV
+                // last PV
                 int v_slot = kv_idx;
                 kittens::tma::cluster::expect_bytes(kv_arrived(s, v_slot), Config::CLUSTER_SIZE * sizeof(v_tile));
                 kittens::tma::cluster::wait(kv_arrived(s, v_slot), kv_phase);
@@ -294,7 +280,6 @@ struct Attention {
             for (int idx = 0; idx < iters_per_task; idx++) {
                 float2 scores_reg[Nb / 2];
                 kittens::wait(scores_arrived(s, qid), scores_phase);
-                // Load scores from TMEM into registers
                 #pragma unroll
                 for (int ii = 0; ii < Nb / 32; ii++) {
                     asm volatile("{tcgen05.ld.sync.aligned.32x32b.x32.b32 {%0, %1, %2, %3, %4, %5, %6, %7, %8, %9, %10, %11, %12, %13, %14, %15, %16, %17, %18, %19, %20, %21, %22, %23, %24, %25, %26, %27, %28, %29, %30, %31}, [%32];}"
@@ -305,10 +290,10 @@ struct Attention {
                         : "r"(score_tt_base + ii * 32));
                 }
 
-                constexpr float SCALE_LOG2 = 1.44269504089f * 0.08838834764f; // LOG2E * 1/sqrt(128)
+                const float SCALE_LOG2 = 1.44269504089f / sqrtf(float(Db));  // log2(e) / sqrt(Dqk)
                 float row_max_old = row_max;
 
-                // Row max with 8 accumulators
+                // calculate row max
                 float lm0 = kittens::base_types::constants<float>::neg_infty(), lm1 = kittens::base_types::constants<float>::neg_infty(), lm2 = kittens::base_types::constants<float>::neg_infty(), lm3 = kittens::base_types::constants<float>::neg_infty();
                 float lm4 = kittens::base_types::constants<float>::neg_infty(), lm5 = kittens::base_types::constants<float>::neg_infty(), lm6 = kittens::base_types::constants<float>::neg_infty(), lm7 = kittens::base_types::constants<float>::neg_infty();
                 #pragma unroll
@@ -339,7 +324,6 @@ struct Attention {
                         acc_scale = exp2f(acc_scale_);
                     }
 
-                    // Rescale output accumulator in TMEM
                     bool needs_rescale = __any_sync(0xFFFFFFFF, acc_scale < 1.0f);
                     if (needs_rescale) {
                         float2 corr_2 = {acc_scale, acc_scale};
@@ -367,14 +351,15 @@ struct Attention {
                     }
                 }
 
-                // Scale, exp2, convert to bf16 and store P in 4 quarters
+                // scale, exp2, convert and store P in 4 quarters, signal after each
                 float neg_max_scaled = row_max * (-SCALE_LOG2);
                 float2 neg_max_scaled_2 = {neg_max_scaled, neg_max_scaled};
-                constexpr float2 scale_2 = {SCALE_LOG2, SCALE_LOG2};
+                const float2 scale_2 = {SCALE_LOG2, SCALE_LOG2};
+                constexpr int CONVERT_SIZE = 32;
 
                 #pragma unroll
                 for (int q = 0; q < 4; q++) {
-                    kittens::bf16_2 scores_bf_reg[16];
+                    kittens::bf16_2 scores_bf_reg[CONVERT_SIZE / 2];
                     #pragma unroll
                     for (int jj = 0; jj < 16; jj++) {
                         int i = q * 16 + jj;
@@ -396,7 +381,7 @@ struct Attention {
                         kittens::warp::tma::cluster::arrive(norm_scores_quarter_arrived(s, q-1, qid), 0);
                 }
 
-                // Row sum
+                // row sum
                 float2 ls0 = {0.0f, 0.0f}, ls1 = {0.0f, 0.0f};
                 #pragma unroll
                 for (int ii = 0; ii < Nb / 2; ii += 2) {
@@ -409,11 +394,17 @@ struct Attention {
                 scores_phase ^= 1;
             }
 
-            // Final normalization + store to shared memory + TMA store O
+            if (kittens::warpgroup::warpid() == 0 && kittens::warp::elect_leader())
+                s.page_finish(s.lid_to_pid(Q_LIDS[qid]));
+
+            // final normalization
             bool row_invalid = (row_sum == 0.0f) | (row_sum != row_sum);
             float inv_norm_s;
             asm volatile("rcp.approx.ftz.f32 %0, %1;" : "=f"(inv_norm_s) : "f"(row_invalid ? 1.0f : row_sum));
             float2 inv_norm = {inv_norm_s, inv_norm_s};
+            if (kittens::warpgroup::warpid() == 0 && kittens::warp::elect_leader())
+                s.page_wait(s.lid_to_pid(O_LIDS[qid]));
+            kittens::warpgroup::sync(qid + 1);
             kittens::wait(tile_arrived(s, qid), 0);
 
             constexpr int SUBTILE_COLS = 64;
@@ -444,12 +435,8 @@ struct Attention {
                 {batch, (m_tile_base + cta_rank * NUM_SOFTMAXXERS) + qid, head, 0});
             kittens::warpgroup::tma::store_async_wait();
 
-            // Release pages and signal completion
             consumer_group::sync(4);
             if (consumer_group::elect_leader()) {
-                #pragma unroll
-                for (int i = 0; i < NUM_SOFTMAXXERS; i++)
-                    s.page_finish(s.lid_to_pid(Q_LIDS[i]));
                 #pragma unroll
                 for (int i = 0; i < 2; i++)
                     s.page_finish(s.lid_to_pid(KV_LIDS[i]));
