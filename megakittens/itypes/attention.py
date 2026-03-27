@@ -28,8 +28,11 @@ class Attention(IType):
     Mb = 128  # Q tile rows (seq dim)
     Db = 128  # head dim
 
-    # TMA tile for Q/K/V/O: 128 seq × 128 head_dim, axis=1 (DEPTH) to tile over (seq, head_dim)
-    TILE_TMA = st(dtype=DType.bf16, rows=128, cols=128, axis=1)
+    # TMA tiles (axis=1 = DEPTH, tiling over seq_len × head_dim)
+    Q_TMA = st(dtype=DType.bf16, rows=128, cols=128, axis=1)  # q_tile: st_bf<Mb, Db>
+    K_TMA = st(dtype=DType.bf16, rows=64, cols=128, axis=1)   # k_tile: st_bf<Nb/2, Db>
+    V_TMA = st(dtype=DType.bf16, rows=128, cols=64, axis=1)   # v_tile: st_bf<Nb, Db/2>
+    O_TMA = st(dtype=DType.bf16, rows=128, cols=128, axis=1)  # o_tile: st_bf<Mb, Db>
 
     @property
     def name(self) -> str:
@@ -51,14 +54,16 @@ class Attention(IType):
     def inputs(self) -> list[TensorSpec]:
         # Q, K, V: (batch, seq_len, num_heads, head_dim)
         seq_gran = self.Mb * self.TILES_PER_CLUSTER  # 512
-        spec = TensorSpec(dtype=DType.bf16, granularity=(1, seq_gran, 1, self.Db), tma_types=[self.TILE_TMA])
-        return [spec, spec, spec]
+        q_spec = TensorSpec(dtype=DType.bf16, granularity=(1, seq_gran, 1, self.Db), tma_types=[self.Q_TMA])
+        k_spec = TensorSpec(dtype=DType.bf16, granularity=(1, seq_gran, 1, self.Db), tma_types=[self.K_TMA])
+        v_spec = TensorSpec(dtype=DType.bf16, granularity=(1, seq_gran, 1, self.Db), tma_types=[self.V_TMA])
+        return [q_spec, k_spec, v_spec]
 
     @property
     def outputs(self) -> list[TensorSpec]:
         # O: (batch, seq_len, num_heads, head_dim)
         seq_gran = self.Mb * self.TILES_PER_CLUSTER
-        return [TensorSpec(dtype=DType.bf16, granularity=(1, seq_gran, 1, self.Db), tma_types=[self.TILE_TMA])]
+        return [TensorSpec(dtype=DType.bf16, granularity=(1, seq_gran, 1, self.Db), tma_types=[self.O_TMA])]
 
     TILES_PER_CTA = 2       # consumer warpgroups per CTA
     CLUSTER_SIZE = 2

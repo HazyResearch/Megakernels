@@ -20,7 +20,8 @@ def test_attention() -> None:
         q = torch.randn(batch, seq_len, num_heads, head_dim, dtype=torch.bfloat16, device="cuda")
         k = torch.randn(batch, seq_len, num_heads, head_dim, dtype=torch.bfloat16, device="cuda")
         v = torch.randn(batch, seq_len, num_heads, head_dim, dtype=torch.bfloat16, device="cuda")
-        check(attention, (q, k, v), atol=1e-2, rtol=1e-2)
+        max_diff, mean_diff = check(attention, (q, k, v), atol=1e-2, rtol=1e-2)
+        print(f"  b={batch} s={seq_len} h={num_heads} d={head_dim} | max_diff={max_diff:.6f} mean_diff={mean_diff:.6f}")
 
 
 if __name__ == "__main__":
