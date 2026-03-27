@@ -29,17 +29,11 @@ __device__ __forceinline__ void controller_loop(const Globals &g, megakittens::s
         } else {
             const int phasebit = ((s.iter - 1) / Config::INSTRUCTION_PIPE_STAGES) & 0b1;
             if (kittens::warp::elect_leader()) {
-                if (cta_rank == 0) {
-                    kittens::wait(s.clc_finished[s.stage], phasebit);
-                    kittens::clc::schedule(s.clc_handle[s.stage], s.clc_arrived[s.stage]);
-                }
+                if (cta_rank == 0) kittens::clc::schedule(s.clc_handle[s.stage], s.clc_arrived[s.stage]);
                 kittens::tma::expect_bytes(s.clc_arrived[s.stage], sizeof(s.clc_handle[s.stage]));
             }
             kittens::wait(s.clc_arrived[s.stage], phasebit);
             auto schedule = kittens::clc::query(s.clc_handle[s.stage]);
-            kittens::warp::sync();
-            if (kittens::warp::elect_leader())
-                kittens::tma::cluster::arrive(s.clc_finished[s.stage], 0);
             if (!schedule.success) instruction_index = 0x7FFFFFFF; // signal to stop
             else                   instruction_index = schedule.x + cta_rank; // we only use 1D grid
         }

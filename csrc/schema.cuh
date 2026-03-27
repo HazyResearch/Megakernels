@@ -103,7 +103,6 @@ struct state_t {
 
     kittens::clc::handle (&clc_handle)[Config::INSTRUCTION_PIPE_STAGES];
     kittens::semaphore (&clc_arrived)[Config::INSTRUCTION_PIPE_STAGES];
-    kittens::semaphore (&clc_finished)[Config::INSTRUCTION_PIPE_STAGES];
 
     instruction_state_t<Config> (&instruction_states)[Config::INSTRUCTION_PIPE_STAGES];
     kittens::semaphore (&instruction_arrived)[Config::INSTRUCTION_PIPE_STAGES];
