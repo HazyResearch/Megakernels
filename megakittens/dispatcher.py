@@ -240,7 +240,9 @@ class Dispatcher:
                            list(zip(inst_meta.dst_tensors, inst_meta.itype.outputs))
             for tensor_idx, tensor_spec in tensor_specs:
                 for tma_type in tensor_spec.tma_types:
-                    tensor_tma_types.setdefault(tensor_idx, []).append(tma_type)
+                    tma_list = tensor_tma_types.setdefault(tensor_idx, [])
+                    if tma_type not in tma_list:
+                        tma_list.append(tma_type)
 
         # Build gls
         self.all_tensors = [self.instruction_tensor, self.barrier_tensor] + self.tensors
