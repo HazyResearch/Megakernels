@@ -35,7 +35,7 @@ void kernel(const __grid_constant__ Globals g) {
 
     // Initialize common semaphores
     if (threadIdx.x < Config::INSTRUCTION_PIPE_STAGES) {
-        init_semaphore(instruction_arrived[threadIdx.x], 1);
+        init_semaphore(instruction_arrived[threadIdx.x], Config::CLUSTER_SIZE);
     } else if (threadIdx.x < Config::INSTRUCTION_PIPE_STAGES*2) {
         init_semaphore(instruction_finished[threadIdx.x - Config::INSTRUCTION_PIPE_STAGES], Config::NUM_WARPS - 1);
     } else if (threadIdx.x < Config::INSTRUCTION_PIPE_STAGES*3) {

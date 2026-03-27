@@ -48,7 +48,7 @@ __device__ __forceinline__ void controller_loop(const Globals &g, megakittens::s
         if (instruction_index >= g.instructions.rows()) {
             if (kittens::warp::elect_leader()) {
                 s.instruction_states[s.stage].instruction.icode = -1; // signal to stop.
-                kittens::arrive(s.instruction_arrived[s.stage], 1);
+                kittens::tensor_commit<Config::CLUSTER_SIZE>(s.instruction_arrived[s.stage]); // hack: use tcgen05.commit for mbarrier broadcast
             }
             break;
         }
@@ -82,7 +82,7 @@ __device__ __forceinline__ void controller_loop(const Globals &g, megakittens::s
         // Step 5. Signal other workers that the instruction/pages/semaphores are ready
         kittens::warp::sync();
         if (kittens::warp::elect_leader())
-            kittens::arrive(s.instruction_arrived[s.stage], 1);
+            kittens::tensor_commit<Config::CLUSTER_SIZE>(s.instruction_arrived[s.stage]); // hack: use tcgen05.commit for mbarrier broadcast
 
         // Update bookkeeping variables
         last_stage = s.stage;
