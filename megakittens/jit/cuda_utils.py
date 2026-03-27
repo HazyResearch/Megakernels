@@ -106,6 +106,17 @@ def cuda_include_dirs() -> tuple[str, ...]:
         return (str(cuda_include), str(cuda_include / "cuda" / "std"))
 
 
+@functools.cache
+def get_sm_count(device_index: int = 0) -> int:
+    err, dev = cuda_driver.cuDeviceGet(device_index)
+    check_cuda(err)
+    err, count = cuda_driver.cuDeviceGetAttribute(
+        cuda_driver.CUdevice_attribute.CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT, dev
+    )
+    check_cuda(err)
+    return count
+
+
 def load_cubin_module(cubin: bytes) -> cuda_driver.CUmodule:
     err, module = cuda_driver.cuModuleLoadData(cubin)
     check_cuda(err)
