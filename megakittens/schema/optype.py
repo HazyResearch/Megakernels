@@ -11,6 +11,7 @@ class OpType(str, Enum):
     gemm = "gemm"
     relu = "relu"
     rmsnorm = "rmsnorm"
+    attention = "attention"
     output = "output"
 
     @classmethod
@@ -50,6 +51,8 @@ _CALL_FUNCTION_MAP = {
     torch.ops.aten.relu.default: OpType.relu,
     torch.ops.megakittens.rmsnorm: OpType.rmsnorm,
     torch.ops.megakittens.rmsnorm.default: OpType.rmsnorm,
+    torch.ops.megakittens.attention: OpType.attention,
+    torch.ops.megakittens.attention.default: OpType.attention,
 }
 
 _CALL_METHOD_MAP: dict[str, OpType] = {
@@ -57,6 +60,7 @@ _CALL_METHOD_MAP: dict[str, OpType] = {
     "gemm": OpType.gemm,
     "relu": OpType.relu,
     "rmsnorm": OpType.rmsnorm,
+    "attention": OpType.attention,
 }
 
 _CALL_MODULE_MAP: dict[type, OpType] = {
