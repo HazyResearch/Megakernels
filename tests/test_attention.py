@@ -10,11 +10,11 @@ def attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor
 def test_attention() -> None:
     head_dim = 128
     for batch, seq_len, num_heads in [
-        (1, 512, 1),
-        (1, 1024, 1),
-        (1, 2048, 1),
-        (2, 512, 4),
-        (2, 1024, 8),
+        (16, 1024, 16),
+        (16, 2048, 16),
+        (16, 4096, 16),
+        (16, 8192, 16),
+        (16, 16384, 16),
     ]:
         # BSHD layout: (batch, seq_len, num_heads, head_dim)
         q = torch.randn(batch, seq_len, num_heads, head_dim, dtype=torch.bfloat16, device="cuda")
