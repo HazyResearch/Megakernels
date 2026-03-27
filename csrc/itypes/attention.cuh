@@ -4,8 +4,6 @@
 
 namespace megakittens {
 
-constexpr float NEG_INFTY = std::bit_cast<float>(0xFF800000);
-
 template <typename Config, typename Globals, int SRC_Q, int SRC_K, int SRC_V, int DST_O>
 struct Attention {
     static constexpr int Mb = 128;
@@ -291,7 +289,7 @@ struct Attention {
             uint32_t score_bf_base = tt_scores_bf_handle.addr + ((kittens::warpgroup::warpid() * 32) << 16);
             uint32_t output_tt_base = tt_output.addr + ((kittens::warpgroup::warpid() * 32) << 16);
             float row_sum = 0.0f;
-            float row_max = NEG_INFTY;
+            float row_max = kittens::base_types::constants<float>::neg_infty();
 
             for (int idx = 0; idx < iters_per_task; idx++) {
                 float2 scores_reg[Nb / 2];
@@ -311,8 +309,8 @@ struct Attention {
                 float row_max_old = row_max;
 
                 // Row max with 8 accumulators
-                float lm0 = NEG_INFTY, lm1 = NEG_INFTY, lm2 = NEG_INFTY, lm3 = NEG_INFTY;
-                float lm4 = NEG_INFTY, lm5 = NEG_INFTY, lm6 = NEG_INFTY, lm7 = NEG_INFTY;
+                float lm0 = kittens::base_types::constants<float>::neg_infty(), lm1 = kittens::base_types::constants<float>::neg_infty(), lm2 = kittens::base_types::constants<float>::neg_infty(), lm3 = kittens::base_types::constants<float>::neg_infty();
+                float lm4 = kittens::base_types::constants<float>::neg_infty(), lm5 = kittens::base_types::constants<float>::neg_infty(), lm6 = kittens::base_types::constants<float>::neg_infty(), lm7 = kittens::base_types::constants<float>::neg_infty();
                 #pragma unroll
                 for (int j = 0; j < Nb / 2; j += 8) {
                     asm volatile("{max.f32 %0, %1, %2, %3;}" : "=f"(lm0) : "f"(lm0), "f"(scores_reg[j+0].x), "f"(scores_reg[j+0].y));
@@ -367,7 +365,6 @@ struct Attention {
                         }
                         kittens::tensor_store_wait();
                     }
-                    kittens::warpgroup::sync(qid + 1);
                 }
 
                 // Scale, exp2, convert to bf16 and store P in 4 quarters
@@ -418,8 +415,6 @@ struct Attention {
             asm volatile("rcp.approx.ftz.f32 %0, %1;" : "=f"(inv_norm_s) : "f"(row_invalid ? 1.0f : row_sum));
             float2 inv_norm = {inv_norm_s, inv_norm_s};
             kittens::wait(tile_arrived(s, qid), 0);
-            kittens::warpgroup::tma::store_async_read_wait<0>();
-            kittens::warpgroup::sync(qid + 1);
 
             constexpr int SUBTILE_COLS = 64;
             uint32_t base_addr = __cvta_generic_to_shared(&o_st(s, qid).data[0]);
