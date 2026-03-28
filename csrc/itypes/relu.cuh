@@ -38,7 +38,7 @@ struct Relu {
             const int num_tiles = instruction.indices[2];
 
             if (kittens::warp::elect_leader()) {
-                all_barrier_wait<Config>(g, instruction);
+                all_input_barrier_wait<Config>(g, instruction);
 
                 for (int i = 0; i < num_tiles; i++) {
                     const int pid = s.lid_to_pid(i);
@@ -83,8 +83,10 @@ struct Relu {
                 consumer_group::store(src_smem, src_reg);
                 consumer_group::sync(1);
 
-                if (consumer_group::elect_leader())
+                if (consumer_group::elect_leader()) {
+                    if (t == 0) all_reuse_barrier_wait<Config>(g, instruction);
                     kittens::tma::store_async(dst_gl, src_smem, {tile_row, tile_col_start + t});
+                }
             }
 
             if (consumer_group::elect_leader()) {

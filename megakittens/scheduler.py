@@ -104,8 +104,11 @@ def schedule(
     barrier_counter = 0
     node_dst_barriers: Dict[int, List[int]] = {}
     node_src_barriers: Dict[int, List[Tuple[int, int]]] = {}
+    node_num_input_barriers: Dict[int, int] = {}
+    node_num_reuse_barriers: Dict[int, int] = {}
 
     # TODO: reuse barriers
+    # Input dependency barriers
     for node in dag.nodes:
         if node.optype in (OpType.input, OpType.output):
             continue
@@ -119,7 +122,9 @@ def schedule(
             node_dst_barriers.setdefault(id(in_node), []).append(bid)
             target = node_inst_count[id(in_node)]
             node_src_barriers.setdefault(id(node), []).append((bid, target))
+            node_num_input_barriers[id(node)] = node_num_input_barriers.get(id(node), 0) + 1
 
+    # Tensor reuse barriers
     for consumer_node_ids, num_consumer_insts, reuser_id in release_barriers:
         if barrier_counter >= MAX_BARRIERS:
             raise RuntimeError(f"[MegaKittens] Barrier count exceeds {MAX_BARRIERS}")
@@ -128,6 +133,7 @@ def schedule(
         for nid in consumer_node_ids:
             node_dst_barriers.setdefault(nid, []).append(bid)
         node_src_barriers.setdefault(reuser_id, []).append((bid, num_consumer_insts))
+        node_num_reuse_barriers[reuser_id] = node_num_reuse_barriers.get(reuser_id, 0) + 1
 
     for nid, barriers in node_dst_barriers.items():
         if len(barriers) > Instruction.MAX_DST_BARRIERS:
@@ -145,7 +151,7 @@ def schedule(
     icode_counter = 1  # icode 0 is reserved for noop
     instruction_metas: List[InstructionMeta] = [InstructionMeta(icode=0, itype=Noop(), src_tensors=(), dst_tensors=())]
     icode_map: Dict[Tuple[IType, Tuple[int, ...], Tuple[int, ...]], int] = {}
-    noop = Instruction(icode=0, src_tensors=(), dst_tensors=(), indices=(), src_barriers=(), src_barrier_targets=(), dst_barrier=())
+    noop = Instruction(icode=0, src_tensors=(), dst_tensors=(), indices=(), src_barriers=(), src_barrier_targets=(), num_input_barriers=0, num_reuse_barriers=0, dst_barriers=())
 
     for node in dag.nodes:
         if node.optype in (OpType.input, OpType.output):
@@ -179,7 +185,9 @@ def schedule(
         src_bar_list = node_src_barriers.get(id(node), [])
         src_barriers = tuple(bid for bid, _ in src_bar_list)
         src_barrier_targets = tuple(tgt for _, tgt in src_bar_list)
-        dst_barrier = tuple(node_dst_barriers.get(id(node), []))
+        dst_barriers = tuple(node_dst_barriers.get(id(node), []))
+        num_input_barriers = node_num_input_barriers.get(id(node), 0)
+        num_reuse_barriers = node_num_reuse_barriers.get(id(node), 0)
 
         for block_index in itype.block_indices(src_metas, node.out_tensors):
             instructions.append(Instruction(
@@ -189,7 +197,9 @@ def schedule(
                 indices=block_index,
                 src_barriers=src_barriers,
                 src_barrier_targets=src_barrier_targets,
-                dst_barrier=dst_barrier,
+                num_input_barriers=num_input_barriers,
+                num_reuse_barriers=num_reuse_barriers,
+                dst_barriers=dst_barriers,
             ))
 
         # Pad to CLUSTER_SIZE with noops so op boundaries are cluster-aligned

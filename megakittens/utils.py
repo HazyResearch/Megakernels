@@ -159,7 +159,7 @@ def save_schedule_as_txt(
         idx_strs = [f"idx={list(inst.indices)}" for inst in instructions]
         src_bar_strs = [f"src_bar={list(inst.src_barriers)}" for inst in instructions]
         src_bar_tgt_strs = [f"src_bar_tgt={list(inst.src_barrier_targets)}" for inst in instructions]
-        dst_bar_strs = [f"dst_bar={list(inst.dst_barrier)}" for inst in instructions]
+        dst_bar_strs = [f"dst_bar={list(inst.dst_barriers)}" for inst in instructions]
 
         w_id = max(len(s) for s in id_strs)
         w_itype = max(len(s) for s in itype_strs)

@@ -41,7 +41,7 @@ struct Add {
             const int num_tiles = instruction.indices[2];
 
             if (kittens::warp::elect_leader()) {
-                all_barrier_wait<Config>(g, instruction);
+                all_input_barrier_wait<Config>(g, instruction);
 
                 for (int i = 0; i < num_tiles; i++) {
                     const int a_pid = s.lid_to_pid(i*2);
@@ -94,6 +94,7 @@ struct Add {
 
                 if (consumer_group::elect_leader()) {
                     s.page_finish(s.lid_to_pid(t*2 + 1)); // release B page
+                    if (t == 0) all_reuse_barrier_wait<Config>(g, instruction);
                     kittens::tma::store_async(c_gl, a_st, {tile_row, tile_col_start + t});
                 }
             }

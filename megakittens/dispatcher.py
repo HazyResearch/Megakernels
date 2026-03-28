@@ -48,21 +48,22 @@ def _pack_instruction(inst: Instruction) -> list[int]:
     # 5-6 (20-27B): dst_tensors (8 uint8 -> 2 int32)
     inst_packed[5:7] = _pack_uint8s_to_int32s(inst.dst_tensors, Instruction.MAX_DST_TENSORS)
 
-    # 7-20 (28-83B): indices (14 int32, zero-padded)
-    indices = list(inst.indices) + [0] * max(0, Instruction.MAX_INDICES - len(inst.indices))
-    inst_packed[7:21] = indices
+    # 7-19 (28-79B): indices (13 int32, zero-padded)
+    _bytes = list(inst.indices) + [0] * max(0, Instruction.MAX_INDICES - len(inst.indices))
+    inst_packed[7:20] = _bytes
 
-    # 21-22 (84-91B): src_barriers (8 uint8 -> 2 int32)
-    inst_packed[21:23] = _pack_uint8s_to_int32s(inst.src_barriers, Instruction.MAX_SRC_BARRIERS)
+    # 20-21 (80-87B): src_barriers (8 uint8 -> 2 int32)
+    inst_packed[20:22] = _pack_uint8s_to_int32s(inst.src_barriers, Instruction.MAX_SRC_BARRIERS)
 
-    # 23-30 (92-123B): src_barrier_targets (8 int32, zero-padded)
+    # 22-29 (88-119B): src_barrier_targets (8 int32, zero-padded)
     targets = list(inst.src_barrier_targets) + [0] * max(
         0, Instruction.MAX_SRC_BARRIER_TARGETS - len(inst.src_barrier_targets)
     )
-    inst_packed[23:31] = targets
+    inst_packed[22:30] = targets
 
-    # 31 (124-127B): dst_barrier (4 uint8 -> 1 int32, 0xFF means unused)
-    inst_packed[31:32] = _pack_uint8s_to_int32s(inst.dst_barrier, Instruction.MAX_DST_BARRIERS, pad=0xFF)
+    # 30-31 (120-127B): num_input_barriers(1B) + num_reuse_barriers(1B) + dst_barriers(6B, 0xFF means unused)
+    _bytes = [inst.num_input_barriers, inst.num_reuse_barriers] + list(inst.dst_barriers) + [0xFF] * max(0, Instruction.MAX_DST_BARRIERS - len(inst.dst_barriers))
+    inst_packed[30:32] = _pack_uint8s_to_int32s(tuple(_bytes), 8)
 
     return inst_packed
 

@@ -64,7 +64,7 @@ struct Gemm {
             const int num_iters = a_gl.cols() / Kb;
 
             if (kittens::warp::elect_leader()) {
-                all_barrier_wait<Config>(g, instruction);
+                all_input_barrier_wait<Config>(g, instruction);
 
                 for (int i = 0; i < num_iters + LOAD_PIPE_DEPTH; i++) {
                     const int stage = i % LOAD_PIPE_DEPTH;
@@ -139,6 +139,7 @@ struct Gemm {
             for (int i = 0; i < EPI_PIPE_DEPTH; i++)
                 kittens::warpgroup::load_async(d_reg[i], d_tt.template subtile<kittens::tt<float, Mb/2, Nb/EPI_PIPE_DEPTH>>(0, (Nb/EPI_PIPE_DEPTH)*i));
             kittens::tensor_load_wait();
+            if (consumer_group::elect_leader()) all_reuse_barrier_wait<Config>(g, instruction);
             consumer_group::sync(4);
             if (consumer_group::elect_leader()) s.tensor_finish();
 

@@ -77,7 +77,7 @@ struct RMSNorm {
             const int num_rows  = instruction.indices[1];
 
             if (kittens::warp::elect_leader()) {
-                all_barrier_wait<Config>(g, instruction);
+                all_input_barrier_wait<Config>(g, instruction);
                 const int pid = s.lid_to_pid(0);
                 s.page_wait(pid);
 
@@ -180,6 +180,7 @@ struct RMSNorm {
 
             if (consumer_group::elect_leader()) {
                 auto &y_gl = g.template gls<DST>();
+                all_reuse_barrier_wait<Config>(g, instruction);
                 for (int i = 0; i < num_rows; i++) {
                     kittens::tma::store_async(y_gl, rows[i], {row_start + i, 0});
                 }

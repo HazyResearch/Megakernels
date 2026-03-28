@@ -25,17 +25,19 @@ concept MegaKittensIType = requires {
 struct instruction_t {
     static constexpr int MAX_SRC_TENSORS = 16;
     static constexpr int MAX_DST_TENSORS = 8;
-    static constexpr int MAX_INDICES = 14;
+    static constexpr int MAX_INDICES = 13;
     static constexpr int MAX_SRC_BARRIERS = 8;
-    static constexpr int MAX_DST_BARRIERS = 4;
+    static constexpr int MAX_DST_BARRIERS = 6;
 
     int icode;                                 //  4B
     uint8_t src_tensors[MAX_SRC_TENSORS];      // 16B
     uint8_t dst_tensors[MAX_DST_TENSORS];      //  8B
-    int indices[MAX_INDICES];                  // 56B
+    int indices[MAX_INDICES];                  // 52B
     uint8_t src_barriers[MAX_SRC_BARRIERS];    //  8B
     int src_barrier_targets[MAX_SRC_BARRIERS]; // 32B
-    uint8_t dst_barriers[MAX_DST_BARRIERS];    //  4B
+    uint8_t num_input_barriers;                //  1B
+    uint8_t num_reuse_barriers;                //  1B
+    uint8_t dst_barriers[MAX_DST_BARRIERS];    //  6B
 };
 static_assert(sizeof(instruction_t) == 128);
 
