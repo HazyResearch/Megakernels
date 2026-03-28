@@ -429,7 +429,7 @@ struct Attention {
                     asm volatile("st.shared.b32 [%0], %1;" :: "r"(addr ^ (((addr & 0x380) >> 7) << 4)), "r"(*(uint32_t*)&tmp));
                 }
             }
-            if (warpgroup::elect_leader()) all_reuse_barrier_wait<Config>(g, instruction);
+            if (kittens::warpgroup::elect_leader()) all_reuse_barrier_wait<Config>(g, instruction);
             kittens::warpgroup::sync(qid + 1);
             kittens::warpgroup::tma::store_async<kittens::dim::DEPTH, kittens::cache_policy::EVICT_FIRST>(
                 o_gl, o_st(s, qid),
