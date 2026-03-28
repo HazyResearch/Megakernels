@@ -7,7 +7,7 @@ from .dtype import DType
 from ..jit.pykittens import st, sv
 
 
-class TensorMeta(BaseModel):
+class TensorMeta(BaseModel, frozen=True):  # frozen=True needed to be hashable
     dtype: DType
     shape: Tuple[NonNegativeInt, ...]  # TODO: support dynamic shapes
     device: Device

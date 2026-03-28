@@ -4,6 +4,7 @@ from typing import Dict, List, Tuple
 
 from .dispatcher import Dispatcher
 from .itypes.noop import Noop
+from .jit.cuda_utils import get_sm_count
 from .schema.dag import DAG, OpType
 from .schema.tensor import TensorMeta
 from .schema.instruction import (
@@ -23,21 +24,65 @@ def schedule(
     """
     Convert a validated DAG into a minimal set of tensors and a flat per-SM instruction list.
     """
-    # Phase 1: Tensor metadata collection
+    # Phase 1: Instruction count per node
+    node_inst_count: Dict[int, int] = {}
+    node_inst_offset: Dict[int, int] = {}
+    cumulative_offset = 0
+    for node in dag.nodes:
+        if node.optype in (OpType.input, OpType.output):
+            continue
+        if len(node.in_nodes) > Instruction.MAX_SRC_TENSORS:
+            raise RuntimeError(
+                f"[MegaKittens] Node has {len(node.in_nodes)} src tensors (max {Instruction.MAX_SRC_TENSORS})"
+            )
+        if len(node.out_tensors) > Instruction.MAX_DST_TENSORS:
+            raise RuntimeError(
+                f"[MegaKittens] Node has {len(node.out_tensors)} dst tensors (max {Instruction.MAX_DST_TENSORS})"
+            )
+        itype = IType.from_optype(node.optype.value)
+        src_metas = tuple(in_node.out_tensors[slot_idx] for in_node, slot_idx in node.in_nodes)
+        count = itype.num_instructions(src_metas, node.out_tensors)
+        node_inst_count[id(node)] = count
+        node_inst_offset[id(node)] = cumulative_offset
+        cumulative_offset += count + (-count) % Dispatcher.CLUSTER_SIZE
+
+    # Phase 2: Tensor metadata collection
     tensor_metas: List[TensorMeta] = []
     tensor_index: Dict[Tuple[int, int], int] = {}
     input_tensor_indices: List[int] = []
     output_tensor_indices: List[int] = []
+    tensor_pool: Dict[TensorMeta, List[Tuple[List[int], int, int, int]]] = {}
+    release_barriers: List[Tuple[List[int], int, int]] = []
 
-    # TODO: reuse allocated tensors
     for node in dag.nodes:
         for out_idx, tensor_meta in enumerate(node.out_tensors):
-            if len(tensor_metas) >= MAX_TENSOR_ALLOCATIONS:
-                raise RuntimeError(
-                    f"[MegaKittens] The given compute graph requires tensor count exceeding {MAX_TENSOR_ALLOCATIONS}."
-                )
-            tensor_index[(id(node), out_idx)] = len(tensor_metas)
-            tensor_metas.append(tensor_meta)
+            reused = False
+            if node.optype != OpType.input and node.optype != OpType.output:
+                free_tensors = tensor_pool.get(tensor_meta, [])
+                for i, (consumer_node_ids, last_consumer_inst, num_consumer_insts, tid) in enumerate(free_tensors):
+                    if node_inst_offset[id(node)] - last_consumer_inst >= get_sm_count():
+                        tensor_index[(id(node), out_idx)] = tid
+                        free_tensors.pop(i)
+                        release_barriers.append((consumer_node_ids, num_consumer_insts, id(node)))
+                        reused = True
+                        break
+
+            if not reused:
+                if len(tensor_metas) >= MAX_TENSOR_ALLOCATIONS:
+                    raise RuntimeError(
+                        f"[MegaKittens] The given compute graph requires tensor count exceeding {MAX_TENSOR_ALLOCATIONS}."
+                    )
+                tensor_index[(id(node), out_idx)] = len(tensor_metas)
+                tensor_metas.append(tensor_meta)
+
+            consumer_nodes = [node] + node.out_nodes[out_idx]
+            if node.optype == OpType.input or any(c.optype == OpType.output for c in consumer_nodes):
+                continue
+            consumer_node_ids = [id(c) for c in consumer_nodes]
+            num_consumer_insts = sum(node_inst_count[cid] for cid in consumer_node_ids)
+            last_consumer_inst = max(node_inst_offset[id(c)] + node_inst_count[id(c)] + (-node_inst_count[id(c)]) % Dispatcher.CLUSTER_SIZE for c in consumer_nodes)
+            tensor_pool.setdefault(tensor_meta, []).append((consumer_node_ids, last_consumer_inst, num_consumer_insts, tensor_index[(id(node), out_idx)]))
+
         if node.optype == OpType.input:
             if len(node.out_tensors) != 1:
                 raise RuntimeError(
@@ -55,23 +100,6 @@ def schedule(
     if not output_tensor_indices:
         raise RuntimeError("[MegaKittens] Graph has no output tensors")
 
-    # Phase 2: Instruction count per node
-    node_inst_count: Dict[int, int] = {}
-    for node in dag.nodes:
-        if node.optype in (OpType.input, OpType.output):
-            continue
-        if len(node.in_nodes) > Instruction.MAX_SRC_TENSORS:
-            raise RuntimeError(
-                f"[MegaKittens] Node has {len(node.in_nodes)} src tensors (max {Instruction.MAX_SRC_TENSORS})"
-            )
-        if len(node.out_tensors) > Instruction.MAX_DST_TENSORS:
-            raise RuntimeError(
-                f"[MegaKittens] Node has {len(node.out_tensors)} dst tensors (max {Instruction.MAX_DST_TENSORS})"
-            )
-        itype = IType.from_optype(node.optype.value)
-        src_metas = tuple(in_node.out_tensors[slot_idx] for in_node, slot_idx in node.in_nodes)
-        node_inst_count[id(node)] = itype.num_instructions(src_metas, node.out_tensors)
-
     # Phase 3: Barrier assignment
     barrier_counter = 0
     node_dst_barriers: Dict[int, List[int]] = {}
@@ -85,14 +113,21 @@ def schedule(
             if in_node.optype in (OpType.input, OpType.output):
                 continue
             if barrier_counter >= MAX_BARRIERS:
-                raise RuntimeError(
-                    f"[MegaKittens] Barrier count exceeds {MAX_BARRIERS}"
-                )
+                raise RuntimeError(f"[MegaKittens] Barrier count exceeds {MAX_BARRIERS}")
             bid = barrier_counter
             barrier_counter += 1
             node_dst_barriers.setdefault(id(in_node), []).append(bid)
             target = node_inst_count[id(in_node)]
             node_src_barriers.setdefault(id(node), []).append((bid, target))
+
+    for consumer_node_ids, num_consumer_insts, reuser_id in release_barriers:
+        if barrier_counter >= MAX_BARRIERS:
+            raise RuntimeError(f"[MegaKittens] Barrier count exceeds {MAX_BARRIERS}")
+        bid = barrier_counter
+        barrier_counter += 1
+        for nid in consumer_node_ids:
+            node_dst_barriers.setdefault(nid, []).append(bid)
+        node_src_barriers.setdefault(reuser_id, []).append((bid, num_consumer_insts))
 
     for nid, barriers in node_dst_barriers.items():
         if len(barriers) > Instruction.MAX_DST_BARRIERS:
