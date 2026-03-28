@@ -14,7 +14,8 @@ from .schema.instruction import (
 )
 
 
-MAX_BARRIERS = 256
+# Derived from the instruction struct
+MAX_BARRIERS = 2**32 - 1
 MAX_TENSOR_ALLOCATIONS = 256
 
 
@@ -151,7 +152,7 @@ def schedule(
     icode_counter = 1  # icode 0 is reserved for noop
     instruction_metas: List[InstructionMeta] = [InstructionMeta(icode=0, itype=Noop(), src_tensors=(), dst_tensors=())]
     icode_map: Dict[Tuple[IType, Tuple[int, ...], Tuple[int, ...]], int] = {}
-    noop = Instruction(icode=0, src_tensors=(), dst_tensors=(), indices=(), src_barriers=(), src_barrier_targets=(), num_input_barriers=0, num_reuse_barriers=0, dst_barriers=())
+    noop = Instruction(icode=0, src_tensors=(), dst_tensors=(), indices=(), src_barriers=(), src_barrier_targets=(), num_input_barriers=0, num_reuse_barriers=0, num_dst_barriers=0, dst_barriers=())
 
     for node in dag.nodes:
         if node.optype in (OpType.input, OpType.output):
@@ -199,6 +200,7 @@ def schedule(
                 src_barrier_targets=src_barrier_targets,
                 num_input_barriers=num_input_barriers,
                 num_reuse_barriers=num_reuse_barriers,
+                num_dst_barriers=len(dst_barriers),
                 dst_barriers=dst_barriers,
             ))
 

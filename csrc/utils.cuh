@@ -40,25 +40,20 @@ __device__ __forceinline__ void barrier_arrive(int* barrier_addr, const int val)
 
 template <typename Config, typename Globals>
 __device__ __forceinline__ void all_input_barrier_wait(const Globals &g, const instruction_t &inst) {
-    for (int i = 0; i < inst.num_input_barriers; i++) {
+    for (int i = 0; i < inst.num_input_barriers; i++)
         barrier_wait<Config>(&g.barriers.raw_ptr[inst.src_barriers[i]], inst.src_barrier_targets[i]);
-    }
 }
 
 template <typename Config, typename Globals>
 __device__ __forceinline__ void all_reuse_barrier_wait(const Globals &g, const instruction_t &inst) {
-    for (int i = inst.num_input_barriers; i < inst.num_input_barriers + inst.num_reuse_barriers; i++) {
+    for (int i = inst.num_input_barriers; i < inst.num_input_barriers + inst.num_reuse_barriers; i++)
         barrier_wait<Config>(&g.barriers.raw_ptr[inst.src_barriers[i]], inst.src_barrier_targets[i]);
-    }
 }
 
 template <typename Config, typename Globals>
 __device__ __forceinline__ void all_barrier_arrive(const Globals &g, const instruction_t &inst) {
-    #pragma unroll
-    for (int i = 0; i < instruction_t::MAX_DST_BARRIERS; i++) {
-        int bid = inst.dst_barriers[i];
-        if (bid != 0xFF) barrier_arrive<Config>(&g.barriers.raw_ptr[bid], 1);
-    }
+    for (int i = 0; i < inst.num_dst_barriers; i++)
+        barrier_arrive<Config>(&g.barriers.raw_ptr[inst.dst_barriers[i]], 1);
 }
 
 } // namespace megakittens

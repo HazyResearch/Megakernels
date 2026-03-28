@@ -36,40 +36,38 @@ def _pack_uint8s_to_int32s(values: tuple[int, ...], count: int, pad: int = 0) ->
 
 
 def _pack_instruction(inst: Instruction) -> list[int]:
-    """Pack a single Instruction into a flat list of 32 int32 values."""
-    inst_packed: list[int] = [0] * 32
+    """Pack a single Instruction into a flat list of 64 int32 values (256B)."""
+    inst_packed: list[int] = [0] * 64
 
-    # 0 (0-3B): icode
+    # [0] (0-3B): icode
     inst_packed[0] = inst.icode
 
-    # 1-4 (4-19B): src_tensors (16 uint8 -> 4 int32)
+    # [1:5] (4-19B): src_tensors (16 uint8 -> 4 int32)
     inst_packed[1:5] = _pack_uint8s_to_int32s(inst.src_tensors, Instruction.MAX_SRC_TENSORS)
 
-    # 5-6 (20-27B): dst_tensors (8 uint8 -> 2 int32)
+    # [5:7] (20-27B): dst_tensors (8 uint8 -> 2 int32)
     inst_packed[5:7] = _pack_uint8s_to_int32s(inst.dst_tensors, Instruction.MAX_DST_TENSORS)
 
-    # 7-19 (28-79B): indices (13 int32, zero-padded)
-    _bytes = list(inst.indices) + [0] * max(0, Instruction.MAX_INDICES - len(inst.indices))
-    inst_packed[7:20] = _bytes
+    # [7:23] (28-91B): indices (16 int32, zero-padded)
+    inst_packed[7:23] = list(inst.indices) + [0] * max(0, Instruction.MAX_INDICES - len(inst.indices))
 
-    # 20-21 (80-87B): src_barriers (8 uint8 -> 2 int32)
-    inst_packed[20:22] = _pack_uint8s_to_int32s(inst.src_barriers, Instruction.MAX_SRC_BARRIERS)
+    # [23:39] (92-155B): src_barriers (16 uint32 = 16 int32, zero-padded)
+    inst_packed[23:39] = list(inst.src_barriers) + [0] * max(0, Instruction.MAX_SRC_BARRIERS - len(inst.src_barriers))
 
-    # 22-29 (88-119B): src_barrier_targets (8 int32, zero-padded)
-    targets = list(inst.src_barrier_targets) + [0] * max(
-        0, Instruction.MAX_SRC_BARRIER_TARGETS - len(inst.src_barrier_targets)
-    )
-    inst_packed[22:30] = targets
+    # [39:55] (156-219B): src_barrier_targets (16 int32, zero-padded)
+    inst_packed[39:55] = list(inst.src_barrier_targets) + [0] * max(0, Instruction.MAX_SRC_BARRIER_TARGETS - len(inst.src_barrier_targets))
 
-    # 30-31 (120-127B): num_input_barriers(1B) + num_reuse_barriers(1B) + dst_barriers(6B, 0xFF means unused)
-    _bytes = [inst.num_input_barriers, inst.num_reuse_barriers] + list(inst.dst_barriers) + [0xFF] * max(0, Instruction.MAX_DST_BARRIERS - len(inst.dst_barriers))
-    inst_packed[30:32] = _pack_uint8s_to_int32s(tuple(_bytes), 8)
+    # [55] (220-223B): num_input_barriers(1B) + num_reuse_barriers(1B) + num_dst_barriers(1B) + pad(1B)
+    inst_packed[55] = inst.num_input_barriers | (inst.num_reuse_barriers << 8) | (len(inst.dst_barriers) << 16)
+
+    # [56:64] (224-255B): dst_barriers (8 uint32 = 8 int32, zero-padded)
+    inst_packed[56:64] = list(inst.dst_barriers) + [0] * max(0, Instruction.MAX_DST_BARRIERS - len(inst.dst_barriers))
 
     return inst_packed
 
 
 def _pack_instructions(instructions: list[Instruction], *, device: str) -> torch.Tensor:
-    """Pack a list of Instruction objects into an (N, 32) int32 tensor."""
+    """Pack a list of Instruction objects into an (N, 64) int32 tensor."""
     buf = [_pack_instruction(inst) for inst in instructions]
     return torch.tensor(buf, dtype=torch.int32, device=device)
 
@@ -114,7 +112,7 @@ class Dispatcher:
     NUM_THREADS = NUM_WARPS * 32
     DYNAMIC_SEMAPHORES = 32
     PAGE_SIZE = 32768
-    STATIC_SHARED_MEMORY_BASE = 512 + INSTRUCTION_PIPE_STAGES * (128 + 128 + DYNAMIC_SEMAPHORES*8)
+    STATIC_SHARED_MEMORY_BASE = 512 + INSTRUCTION_PIPE_STAGES * (256 + 128 + DYNAMIC_SEMAPHORES*8)
     DYNAMIC_SHARED_MEMORY_ALIGN = 1024
     NUM_PAGES = (227*1024 - STATIC_SHARED_MEMORY_BASE - DYNAMIC_SHARED_MEMORY_ALIGN) // PAGE_SIZE
     DYNAMIC_SHARED_MEMORY = NUM_PAGES*PAGE_SIZE + DYNAMIC_SHARED_MEMORY_ALIGN

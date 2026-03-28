@@ -46,11 +46,11 @@ __device__ __forceinline__ void controller_loop(const Globals &g, megakittens::s
             }
             break;
         }
-        static_assert(sizeof(instruction_t)/sizeof(int) <= 32); // must fit in one warp
+        static_assert(sizeof(instruction_t)/sizeof(int) == 64); // 2 warp-wide loads
         int *inst_src = &g.instructions[{instruction_index, 0}];
         int *inst_dst = reinterpret_cast<int*>(&s.instruction_states[s.stage].instruction);
-        if (lane_id < sizeof(instruction_t)/sizeof(int))
-            inst_dst[lane_id] = inst_src[lane_id];
+        inst_dst[lane_id + 0]  = inst_src[lane_id + 0];
+        inst_dst[lane_id + 32] = inst_src[lane_id + 32];
         kittens::warp::sync();
 
         // Step 3. Establish physical page order
