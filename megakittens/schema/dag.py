@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 from typing import List, Tuple
 
 from pydantic import BaseModel, NonNegativeInt
@@ -21,6 +22,11 @@ class Node(BaseModel):
     input_index: int | None # None if not an input
     # TODO: support default values
 
+    # Unique identifier for this node
+    id: int = 0
+    def model_post_init(self, _) -> None:
+        self.id = builtins.id(self)
+
 
 class DAG:
     """Directed acyclic graph of compute nodes."""
@@ -30,10 +36,10 @@ class DAG:
         self.validate()
 
     def _validate_topological(self) -> None:
-        node_index: dict[int, int] = {id(node): idx for idx, node in enumerate(self.nodes)}
+        node_index: dict[int, int] = {node.id: idx for idx, node in enumerate(self.nodes)}
         for node_idx, node in enumerate(self.nodes):
             for in_node, input_idx in node.in_nodes:
-                parent_index = node_index.get(id(in_node))
+                parent_index = node_index.get(in_node.id)
                 if parent_index is None:
                     raise RuntimeError(
                         f"[MegaKittens] Invalid DAG connectivity: node at index {node_idx} has missing parent"
@@ -46,7 +52,7 @@ class DAG:
                     raise RuntimeError(
                         f"[MegaKittens] Invalid DAG connectivity: node index {node_idx} uses invalid source output slot {input_idx}"
                     )
-                if not any(id(n) == id(node) for n in in_node.out_nodes[input_idx]):
+                if not any(n.id == node.id for n in in_node.out_nodes[input_idx]):
                     raise RuntimeError(
                         f"[MegaKittens] Invalid DAG connectivity: edge from node index {parent_index}"
                         f" output slot {input_idx} to node index {node_idx} is missing"
@@ -54,14 +60,14 @@ class DAG:
 
             for out_idx, out_nodes in enumerate(node.out_nodes):
                 for out_node in out_nodes:
-                    out_node_idx = node_index.get(id(out_node))
+                    out_node_idx = node_index.get(out_node.id)
                     if out_node_idx is None:
                         raise RuntimeError(
                             f"[MegaKittens] Invalid DAG connectivity: edge from node index {node_idx}"
                             f" to unknown node (output slot {out_idx})"
                         )
                     if not any(
-                        id(in_node) == id(node) and input_idx == out_idx
+                        in_node.id == node.id and input_idx == out_idx
                         for in_node, input_idx in out_node.in_nodes
                     ):
                         raise RuntimeError(

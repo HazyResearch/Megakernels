@@ -43,8 +43,8 @@ def schedule(
         itype = IType.from_optype(node.optype.value)
         src_metas = tuple(in_node.out_tensors[slot_idx] for in_node, slot_idx in node.in_nodes)
         count = itype.num_instructions(src_metas, node.out_tensors)
-        node_inst_count[id(node)] = count
-        node_inst_offset[id(node)] = cumulative_offset
+        node_inst_count[node.id] = count
+        node_inst_offset[node.id] = cumulative_offset
         cumulative_offset += count + (-count) % Dispatcher.CLUSTER_SIZE
 
     # Phase 2: Tensor metadata collection
@@ -61,10 +61,10 @@ def schedule(
             if node.optype != OpType.input and node.optype != OpType.output:
                 free_tensors = tensor_pool.get(tensor_meta, [])
                 for i, (consumer_node_ids, last_consumer_inst, num_consumer_insts, tid) in enumerate(free_tensors):
-                    if node_inst_offset[id(node)] - last_consumer_inst >= get_sm_count():
-                        tensor_index[(id(node), out_idx)] = tid
+                    if node_inst_offset[node.id] - last_consumer_inst >= get_sm_count():
+                        tensor_index[(node.id, out_idx)] = tid
                         free_tensors.pop(i)
-                        release_barriers.append((consumer_node_ids, num_consumer_insts, id(node)))
+                        release_barriers.append((consumer_node_ids, num_consumer_insts, node.id))
                         reused = True
                         break
 
@@ -73,28 +73,28 @@ def schedule(
                     raise RuntimeError(
                         f"[MegaKittens] The given compute graph requires tensor count exceeding {MAX_TENSOR_ALLOCATIONS}."
                     )
-                tensor_index[(id(node), out_idx)] = len(tensor_metas)
+                tensor_index[(node.id, out_idx)] = len(tensor_metas)
                 tensor_metas.append(tensor_meta)
 
             consumer_nodes = [node] + node.out_nodes[out_idx]
             if node.optype == OpType.input or any(c.optype == OpType.output for c in consumer_nodes):
                 continue
-            consumer_node_ids = [id(c) for c in consumer_nodes]
+            consumer_node_ids = [c.id for c in consumer_nodes]
             num_consumer_insts = sum(node_inst_count[cid] for cid in consumer_node_ids)
-            last_consumer_inst = max(node_inst_offset[id(c)] + node_inst_count[id(c)] + (-node_inst_count[id(c)]) % Dispatcher.CLUSTER_SIZE for c in consumer_nodes)
-            tensor_pool.setdefault(tensor_meta, []).append((consumer_node_ids, last_consumer_inst, num_consumer_insts, tensor_index[(id(node), out_idx)]))
+            last_consumer_inst = max(node_inst_offset[c.id] + node_inst_count[c.id] + (-node_inst_count[c.id]) % Dispatcher.CLUSTER_SIZE for c in consumer_nodes)
+            tensor_pool.setdefault(tensor_meta, []).append((consumer_node_ids, last_consumer_inst, num_consumer_insts, tensor_index[(node.id, out_idx)]))
 
         if node.optype == OpType.input:
             if len(node.out_tensors) != 1:
                 raise RuntimeError(
                     f"[MegaKittens] Input node has {len(node.out_tensors)} outputs (expected 1)"
                 )
-            input_tensor_indices.append(tensor_index[(id(node), 0)])
+            input_tensor_indices.append(tensor_index[(node.id, 0)])
         elif node.optype == OpType.output:
             if len(output_tensor_indices) != 0:
                 raise RuntimeError("[MegaKittens] Expected 1 output node")
             output_tensor_indices.extend(
-                tensor_index[(id(in_node), slot_idx)] for in_node, slot_idx in node.in_nodes
+                tensor_index[(in_node.id, slot_idx)] for in_node, slot_idx in node.in_nodes
             )
     if not input_tensor_indices:
         raise RuntimeError("[MegaKittens] Graph has no input tensors")
@@ -120,10 +120,10 @@ def schedule(
                 raise RuntimeError(f"[MegaKittens] Barrier count exceeds {MAX_BARRIERS}")
             bid = barrier_counter
             barrier_counter += 1
-            node_dst_barriers.setdefault(id(in_node), []).append(bid)
-            target = node_inst_count[id(in_node)]
-            node_src_barriers.setdefault(id(node), []).append((bid, target))
-            node_num_input_barriers[id(node)] = node_num_input_barriers.get(id(node), 0) + 1
+            node_dst_barriers.setdefault(in_node.id, []).append(bid)
+            target = node_inst_count[in_node.id]
+            node_src_barriers.setdefault(node.id, []).append((bid, target))
+            node_num_input_barriers[node.id] = node_num_input_barriers.get(node.id, 0) + 1
 
     # Tensor reuse barriers
     for consumer_node_ids, num_consumer_insts, reuser_id in release_barriers:
@@ -161,12 +161,12 @@ def schedule(
         itype = IType.from_optype(node.optype.value)
 
         src_tensors = tuple(
-            tensor_index[(id(in_node), slot_idx)]
+            tensor_index[(in_node.id, slot_idx)]
             for in_node, slot_idx in node.in_nodes
         )
 
         dst_tensors = tuple(
-            tensor_index[(id(node), slot)]
+            tensor_index[(node.id, slot)]
             for slot in range(len(node.out_tensors))
         )
 
@@ -183,12 +183,12 @@ def schedule(
         else:
             icode = icode_map[key]
 
-        src_bar_list = node_src_barriers.get(id(node), [])
+        src_bar_list = node_src_barriers.get(node.id, [])
         src_barriers = tuple(bid for bid, _ in src_bar_list)
         src_barrier_targets = tuple(tgt for _, tgt in src_bar_list)
-        dst_barriers = tuple(node_dst_barriers.get(id(node), []))
-        num_input_barriers = node_num_input_barriers.get(id(node), 0)
-        num_reuse_barriers = node_num_reuse_barriers.get(id(node), 0)
+        dst_barriers = tuple(node_dst_barriers.get(node.id, []))
+        num_input_barriers = node_num_input_barriers.get(node.id, 0)
+        num_reuse_barriers = node_num_reuse_barriers.get(node.id, 0)
 
         for block_index in itype.block_indices(src_metas, node.out_tensors):
             instructions.append(Instruction(

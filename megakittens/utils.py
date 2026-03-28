@@ -30,7 +30,7 @@ def save_dag_as_png_as_json(
     """
     Build a DAG JSON payload from node objects.
     """
-    node_index_by_id: Dict[int, int] = {id(node): idx for idx, node in enumerate(dag.nodes)}
+    node_index_by_id: Dict[int, int] = {node.id: idx for idx, node in enumerate(dag.nodes)}
     dag_json = {
         "nodes": [
             {
@@ -38,11 +38,11 @@ def save_dag_as_png_as_json(
                 "optype": node.optype.value,
                 "input_index": node.input_index,
                 "in_nodes": [
-                    [node_index_by_id[id(in_node)], input_slot]
+                    [node_index_by_id[in_node.id], input_slot]
                     for in_node, input_slot in node.in_nodes
                 ],
                 "out_nodes": [
-                    [node_index_by_id[id(out_node)] for out_node in out_nodes]
+                    [node_index_by_id[out_node.id] for out_node in out_nodes]
                     for out_nodes in node.out_nodes
                 ],
                 "out_tensors": [
