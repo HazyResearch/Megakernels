@@ -58,7 +58,7 @@ def _pack_instruction(inst: Instruction) -> list[int]:
     inst_packed[39:55] = list(inst.src_barrier_targets) + [0] * max(0, Instruction.MAX_SRC_BARRIER_TARGETS - len(inst.src_barrier_targets))
 
     # [55] (220-223B): num_input_barriers(1B) + num_reuse_barriers(1B) + num_dst_barriers(1B) + pad(1B)
-    inst_packed[55] = inst.num_input_barriers | (inst.num_reuse_barriers << 8) | (len(inst.dst_barriers) << 16)
+    inst_packed[55] = inst.num_input_barriers | (inst.num_reuse_barriers << 8) | (inst.num_dst_barriers << 16)
 
     # [56:64] (224-255B): dst_barriers (8 uint32 = 8 int32, zero-padded)
     inst_packed[56:64] = list(inst.dst_barriers) + [0] * max(0, Instruction.MAX_DST_BARRIERS - len(inst.dst_barriers))
