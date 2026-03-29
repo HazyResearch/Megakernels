@@ -9,22 +9,22 @@ from ..schema.tensor import TensorMeta, TensorSpec
 from ..jit.pykittens import st
 
 
-@torch.library.custom_op("megakittens::attention", mutates_args=())
-def attention_op(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+@torch.library.custom_op("megakittens::causal_attention", mutates_args=())
+def causal_attention_op(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
     # q, k, v: (batch, seq_len, num_heads, head_dim) — BSHD layout
     q2 = q.transpose(1, 2)  # → (batch, num_heads, seq_len, head_dim)
     k2 = k.transpose(1, 2)
     v2 = v.transpose(1, 2)
-    o = F.scaled_dot_product_attention(q2, k2, v2)
+    o = F.scaled_dot_product_attention(q2, k2, v2, is_causal=True)
     return o.transpose(1, 2).contiguous()
 
 
-@attention_op.register_fake
-def _attention_fake(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+@causal_attention_op.register_fake
+def _causal_attention_fake(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
     return torch.empty_like(q)
 
 
-class Attention(IType):
+class CausalAttention(IType):
     Mb = 128  # Q tile rows (seq dim)
     Db = 128  # head dim
 
@@ -36,11 +36,11 @@ class Attention(IType):
 
     @property
     def name(self) -> str:
-        return "attention"
+        return "causal_attention"
 
     @property
     def cpp_template(self) -> str:
-        return "Attention<MKConfig, MKGlobals, {tensors}, false>"
+        return "Attention<MKConfig, MKGlobals, {tensors}, true>"
 
     @property
     def cpp_include(self) -> str:
@@ -48,7 +48,7 @@ class Attention(IType):
 
     @property
     def op_type(self) -> str:
-        return "attention"
+        return "causal_attention"
 
     @property
     def inputs(self) -> list[TensorSpec]:
@@ -70,14 +70,46 @@ class Attention(IType):
     TILES_PER_CLUSTER = TILES_PER_CTA * CLUSTER_SIZE  # 4
 
     def block_indices(self, src_metas: Tuple[TensorMeta, ...], dst_metas: Tuple[TensorMeta, ...]) -> List[Tuple[int, ...]]:
+        """L2 swizzle + LPT ordering."""
         batch, seq_len, num_heads, _ = src_metas[0].shape
-        m_blocks = seq_len // (self.Mb * self.TILES_PER_CLUSTER)
+        num_block = seq_len // (self.Mb * self.TILES_PER_CLUSTER)  # clusters_m
+        total_clusters = batch * num_heads * num_block
+
+        # swizzle = floor_pow2(L2 / kv_per_head)
+        size_one_head = seq_len * (self.Db + self.Db) * 2  # K+V in bf16
+        size_l2 = 50 * 1024 * 1024
+        swizzle = 1
+        if size_l2 >= size_one_head:
+            swizzle = 1 << ((size_l2 // size_one_head).bit_length() - 1)
+
+        num_hb = num_heads * batch
+        num_hb_quotient = num_hb // swizzle
+        num_hb_remainder = num_hb - num_hb_quotient * swizzle
+        l2_major = swizzle * num_block
+
         indices = []
-        for b in range(batch):
-            for h in range(num_heads):
-                for m in range(m_blocks):
-                    indices.append((b, m, h))
-                    indices.append((b, m, h))  # duplicate for CTA 1
+        for cluster_linear in range(total_clusters):
+            bidhb = cluster_linear // l2_major
+            l2_mod = cluster_linear - bidhb * l2_major
+
+            if bidhb < num_hb_quotient:
+                m_cluster = l2_mod // swizzle
+                bidhb_residual = l2_mod - m_cluster * swizzle
+            else:
+                divisor = num_hb_remainder if num_hb_remainder > 0 else 1
+                m_cluster = l2_mod // divisor
+                bidhb_residual = l2_mod - m_cluster * divisor
+
+            bidhb_actual = bidhb * swizzle + bidhb_residual
+            b = bidhb_actual // num_heads
+            h = bidhb_actual - b * num_heads
+
+            # LPT: heavy causal tiles first
+            m_cluster = num_block - 1 - m_cluster
+
+            indices.append((b, m_cluster, h))
+            indices.append((b, m_cluster, h))  # duplicate for CTA 1
+
         return indices
 
     def num_instructions(self, src_metas: Tuple[TensorMeta, ...], dst_metas: Tuple[TensorMeta, ...]) -> int:
@@ -91,18 +123,18 @@ class Attention(IType):
         o = dst_metas[0]
 
         if len(q.shape) != 4:
-            raise RuntimeError(f"[MegaKittens] Attention requires 4D tensors (BSHD), got {len(q.shape)}D")
+            raise RuntimeError(f"[MegaKittens] CausalAttention requires 4D tensors (BSHD), got {len(q.shape)}D")
 
         batch, seq_len, num_heads, head_dim = q.shape
 
         if head_dim != self.Db:
-            raise RuntimeError(f"[MegaKittens] Attention requires head_dim={self.Db}, got {head_dim}")
+            raise RuntimeError(f"[MegaKittens] CausalAttention requires head_dim={self.Db}, got {head_dim}")
 
         if k.shape != q.shape:
-            raise RuntimeError(f"[MegaKittens] Attention requires Q and K same shape, got Q={q.shape} K={k.shape}")
+            raise RuntimeError(f"[MegaKittens] CausalAttention requires Q and K same shape, got Q={q.shape} K={k.shape}")
 
         if v.shape != q.shape:
-            raise RuntimeError(f"[MegaKittens] Attention requires Q and V same shape, got Q={q.shape} V={v.shape}")
+            raise RuntimeError(f"[MegaKittens] CausalAttention requires Q and V same shape, got Q={q.shape} V={v.shape}")
 
         if o.shape != q.shape:
-            raise RuntimeError(f"[MegaKittens] Attention output shape mismatch: expected {q.shape}, got {o.shape}")
+            raise RuntimeError(f"[MegaKittens] CausalAttention output shape mismatch: expected {q.shape}, got {o.shape}")

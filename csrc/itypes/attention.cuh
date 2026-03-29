@@ -4,7 +4,7 @@
 
 namespace megakittens {
 
-template <typename Config, typename Globals, int SRC_Q, int SRC_K, int SRC_V, int DST_O>
+template <typename Config, typename Globals, int SRC_Q, int SRC_K, int SRC_V, int DST_O, bool CAUSAL = false>
 struct Attention {
     static constexpr int Mb = 128;
     static constexpr int Nb = 128;
@@ -92,8 +92,10 @@ struct Attention {
             auto &q_gl = g.template gls<SRC_Q>();
             auto &k_gl = g.template gls<SRC_K>();
             auto &v_gl = g.template gls<SRC_V>();
-            const int iters_per_task = k_gl.depth() / Nb;
             const int m_tile_base = m_block * NUM_SOFTMAXXERS * Config::CLUSTER_SIZE;
+            int iters_per_task;
+            if constexpr (CAUSAL) iters_per_task = m_tile_base + NUM_SOFTMAXXERS * Config::CLUSTER_SIZE;
+            else                  iters_per_task = k_gl.depth() / Nb;
 
             if (kittens::warp::elect_leader()) {
                 all_input_barrier_wait<Config>(g, instruction);
@@ -144,7 +146,13 @@ struct Attention {
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
             const int cta_rank = kittens::cluster_ctarank();
             auto &k_gl = g.template gls<SRC_K>();
-            const int iters_per_task = k_gl.depth() / Nb;
+            int iters_per_task;
+            if constexpr (CAUSAL) {
+                const int m_block = s.instruction().indices[1];
+                iters_per_task = m_block * NUM_SOFTMAXXERS * Config::CLUSTER_SIZE + NUM_SOFTMAXXERS * Config::CLUSTER_SIZE;
+            } else {
+                iters_per_task = k_gl.depth() / Nb;
+            }
 
             if (cta_rank == 0 && kittens::warp::elect_leader()) {
                 d_tt_scores tt_scores[NUM_SOFTMAXXERS];
@@ -260,8 +268,10 @@ struct Attention {
             const int cta_rank = kittens::cluster_ctarank();
             auto &o_gl = g.template gls<DST_O>();
             auto &k_gl = g.template gls<SRC_K>();
-            const int iters_per_task = k_gl.depth() / Nb;
             const int m_tile_base = m_block * NUM_SOFTMAXXERS * Config::CLUSTER_SIZE;
+            int iters_per_task;
+            if constexpr (CAUSAL) iters_per_task = m_tile_base + NUM_SOFTMAXXERS * Config::CLUSTER_SIZE;
+            else                  iters_per_task = k_gl.depth() / Nb;
             const int qid = kittens::warpgroup::groupid();
 
             static constexpr int CORR_TILE = 16;
@@ -276,6 +286,249 @@ struct Attention {
             uint32_t output_tt_base = tt_output.addr + ((kittens::warpgroup::warpid() * 32) << 16);
             float row_sum = 0.0f;
             float row_max = kittens::base_types::constants<float>::neg_infty();
+
+            if constexpr (CAUSAL) {
+            const int m_tile = m_tile_base + cta_rank * NUM_SOFTMAXXERS + qid;
+
+            // Phase 1: unmasked tiles (idx < m_tile) — no causal masking needed
+            for (int idx = 0; idx < m_tile; idx++) {
+                float2 scores_reg[Nb / 2];
+                kittens::wait(scores_arrived(s, qid), scores_phase);
+                #pragma unroll
+                for (int ii = 0; ii < Nb / 32; ii++) {
+                    asm volatile("{tcgen05.ld.sync.aligned.32x32b.x32.b32 {%0, %1, %2, %3, %4, %5, %6, %7, %8, %9, %10, %11, %12, %13, %14, %15, %16, %17, %18, %19, %20, %21, %22, %23, %24, %25, %26, %27, %28, %29, %30, %31}, [%32];}"
+                        : "=f"(scores_reg[ii*16+0].x), "=f"(scores_reg[ii*16+0].y), "=f"(scores_reg[ii*16+1].x), "=f"(scores_reg[ii*16+1].y), "=f"(scores_reg[ii*16+2].x), "=f"(scores_reg[ii*16+2].y), "=f"(scores_reg[ii*16+3].x), "=f"(scores_reg[ii*16+3].y),
+                          "=f"(scores_reg[ii*16+4].x), "=f"(scores_reg[ii*16+4].y), "=f"(scores_reg[ii*16+5].x), "=f"(scores_reg[ii*16+5].y), "=f"(scores_reg[ii*16+6].x), "=f"(scores_reg[ii*16+6].y), "=f"(scores_reg[ii*16+7].x), "=f"(scores_reg[ii*16+7].y),
+                          "=f"(scores_reg[ii*16+8].x), "=f"(scores_reg[ii*16+8].y), "=f"(scores_reg[ii*16+9].x), "=f"(scores_reg[ii*16+9].y), "=f"(scores_reg[ii*16+10].x), "=f"(scores_reg[ii*16+10].y), "=f"(scores_reg[ii*16+11].x), "=f"(scores_reg[ii*16+11].y),
+                          "=f"(scores_reg[ii*16+12].x), "=f"(scores_reg[ii*16+12].y), "=f"(scores_reg[ii*16+13].x), "=f"(scores_reg[ii*16+13].y), "=f"(scores_reg[ii*16+14].x), "=f"(scores_reg[ii*16+14].y), "=f"(scores_reg[ii*16+15].x), "=f"(scores_reg[ii*16+15].y)
+                        : "r"(score_tt_base + ii * 32));
+                }
+
+                const float SCALE_LOG2 = 1.44269504089f / sqrtf(float(Db));
+                float row_max_old = row_max;
+
+                float lm0 = kittens::base_types::constants<float>::neg_infty(), lm1 = kittens::base_types::constants<float>::neg_infty(), lm2 = kittens::base_types::constants<float>::neg_infty(), lm3 = kittens::base_types::constants<float>::neg_infty();
+                float lm4 = kittens::base_types::constants<float>::neg_infty(), lm5 = kittens::base_types::constants<float>::neg_infty(), lm6 = kittens::base_types::constants<float>::neg_infty(), lm7 = kittens::base_types::constants<float>::neg_infty();
+                #pragma unroll
+                for (int j = 0; j < Nb / 2; j += 8) {
+                    asm volatile("{max.f32 %0, %1, %2, %3;}" : "=f"(lm0) : "f"(lm0), "f"(scores_reg[j+0].x), "f"(scores_reg[j+0].y));
+                    asm volatile("{max.f32 %0, %1, %2, %3;}" : "=f"(lm1) : "f"(lm1), "f"(scores_reg[j+1].x), "f"(scores_reg[j+1].y));
+                    asm volatile("{max.f32 %0, %1, %2, %3;}" : "=f"(lm2) : "f"(lm2), "f"(scores_reg[j+2].x), "f"(scores_reg[j+2].y));
+                    asm volatile("{max.f32 %0, %1, %2, %3;}" : "=f"(lm3) : "f"(lm3), "f"(scores_reg[j+3].x), "f"(scores_reg[j+3].y));
+                    asm volatile("{max.f32 %0, %1, %2, %3;}" : "=f"(lm4) : "f"(lm4), "f"(scores_reg[j+4].x), "f"(scores_reg[j+4].y));
+                    asm volatile("{max.f32 %0, %1, %2, %3;}" : "=f"(lm5) : "f"(lm5), "f"(scores_reg[j+5].x), "f"(scores_reg[j+5].y));
+                    asm volatile("{max.f32 %0, %1, %2, %3;}" : "=f"(lm6) : "f"(lm6), "f"(scores_reg[j+6].x), "f"(scores_reg[j+6].y));
+                    asm volatile("{max.f32 %0, %1, %2, %3;}" : "=f"(lm7) : "f"(lm7), "f"(scores_reg[j+7].x), "f"(scores_reg[j+7].y));
+                }
+                asm volatile("{max.f32 %0, %1, %2, %3;}" : "=f"(lm0) : "f"(lm0), "f"(lm1), "f"(lm2));
+                asm volatile("{max.f32 %0, %1, %2, %3;}" : "=f"(lm4) : "f"(lm4), "f"(lm5), "f"(lm6));
+                asm volatile("{max.f32 %0, %1, %2, %3;}" : "=f"(lm0) : "f"(lm0), "f"(lm3), "f"(lm4));
+                asm volatile("{max.f32 %0, %1, %2, %3;}" : "=f"(row_max) : "f"(row_max), "f"(lm0), "f"(lm7));
+
+                float acc_scale = 1.0f;
+
+                if (idx > 0) {
+                    constexpr float rescale_threshold = 8.f;
+                    float acc_scale_ = (row_max_old - row_max) * SCALE_LOG2;
+                    if (acc_scale_ >= -rescale_threshold) {
+                        row_max = row_max_old;
+                        acc_scale = 1.0f;
+                    } else {
+                        acc_scale = exp2f(acc_scale_);
+                    }
+
+                    bool needs_rescale = __any_sync(0xFFFFFFFF, acc_scale < 1.0f);
+                    if (needs_rescale) {
+                        float2 corr_2 = {acc_scale, acc_scale};
+                        #pragma unroll
+                        for (int col = 0; col < Db; col += CORR_TILE) {
+                            float2 o_reg[CORR_TILE / 2];
+                            asm volatile("{tcgen05.ld.sync.aligned.32x32b.x16.b32 {%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15}, [%16];}"
+                                : "=f"(o_reg[0].x), "=f"(o_reg[0].y), "=f"(o_reg[1].x), "=f"(o_reg[1].y),
+                                  "=f"(o_reg[2].x), "=f"(o_reg[2].y), "=f"(o_reg[3].x), "=f"(o_reg[3].y),
+                                  "=f"(o_reg[4].x), "=f"(o_reg[4].y), "=f"(o_reg[5].x), "=f"(o_reg[5].y),
+                                  "=f"(o_reg[6].x), "=f"(o_reg[6].y), "=f"(o_reg[7].x), "=f"(o_reg[7].y)
+                                : "r"(output_tt_base + col));
+                            kittens::tensor_load_wait();
+                            #pragma unroll
+                            for (int ii = 0; ii < CORR_TILE / 2; ii++)
+                                o_reg[ii] = __fmul2_rn(o_reg[ii], corr_2);
+                            asm volatile("{tcgen05.st.sync.aligned.32x32b.x16.b32 [%16], {%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15};}"
+                                :: "f"(o_reg[0].x), "f"(o_reg[0].y), "f"(o_reg[1].x), "f"(o_reg[1].y),
+                                   "f"(o_reg[2].x), "f"(o_reg[2].y), "f"(o_reg[3].x), "f"(o_reg[3].y),
+                                   "f"(o_reg[4].x), "f"(o_reg[4].y), "f"(o_reg[5].x), "f"(o_reg[5].y),
+                                   "f"(o_reg[6].x), "f"(o_reg[6].y), "f"(o_reg[7].x), "f"(o_reg[7].y),
+                                   "r"(output_tt_base + col));
+                        }
+                        kittens::tensor_store_wait();
+                    }
+                }
+
+                float neg_max_scaled = row_max * (-SCALE_LOG2);
+                float2 neg_max_scaled_2 = {neg_max_scaled, neg_max_scaled};
+                const float2 scale_2 = {SCALE_LOG2, SCALE_LOG2};
+                constexpr int CONVERT_SIZE = 32;
+
+                #pragma unroll
+                for (int q = 0; q < 4; q++) {
+                    kittens::bf16_2 scores_bf_reg[CONVERT_SIZE / 2];
+                    #pragma unroll
+                    for (int jj = 0; jj < 16; jj++) {
+                        int i = q * 16 + jj;
+                        scores_reg[i] = __ffma2_rn(scores_reg[i], scale_2, neg_max_scaled_2);
+                        scores_reg[i].x = exp2f(scores_reg[i].x);
+                        scores_reg[i].y = exp2f(scores_reg[i].y);
+                        scores_bf_reg[jj] = __float22bfloat162_rn(scores_reg[i]);
+                    }
+                    asm volatile("{tcgen05.st.sync.aligned.32x32b.x16.b32 [%16], {%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15};}"
+                        :: "r"(*(uint32_t*)&scores_bf_reg[0]), "r"(*(uint32_t*)&scores_bf_reg[1]), "r"(*(uint32_t*)&scores_bf_reg[2]), "r"(*(uint32_t*)&scores_bf_reg[3]),
+                           "r"(*(uint32_t*)&scores_bf_reg[4]), "r"(*(uint32_t*)&scores_bf_reg[5]), "r"(*(uint32_t*)&scores_bf_reg[6]), "r"(*(uint32_t*)&scores_bf_reg[7]),
+                           "r"(*(uint32_t*)&scores_bf_reg[8]), "r"(*(uint32_t*)&scores_bf_reg[9]), "r"(*(uint32_t*)&scores_bf_reg[10]), "r"(*(uint32_t*)&scores_bf_reg[11]),
+                           "r"(*(uint32_t*)&scores_bf_reg[12]), "r"(*(uint32_t*)&scores_bf_reg[13]), "r"(*(uint32_t*)&scores_bf_reg[14]), "r"(*(uint32_t*)&scores_bf_reg[15]),
+                           "r"(score_bf_base + q * 16));
+                    kittens::tensor_store_wait();
+                    if (q == 0)
+                        kittens::warp::tma::cluster::arrive(norm_scores_arrived(s, qid), 0);
+                    else
+                        kittens::warp::tma::cluster::arrive(norm_scores_quarter_arrived(s, q-1, qid), 0);
+                }
+
+                float2 ls0 = {0.0f, 0.0f}, ls1 = {0.0f, 0.0f};
+                #pragma unroll
+                for (int ii = 0; ii < Nb / 2; ii += 2) {
+                    ls0 = __fadd2_rn(ls0, scores_reg[ii]);
+                    ls1 = __fadd2_rn(ls1, scores_reg[ii + 1]);
+                }
+                ls0 = __fadd2_rn(ls0, ls1);
+                row_sum = row_sum * acc_scale + ls0.x + ls0.y;
+
+                scores_phase ^= 1;
+            }
+
+            // Phase 2: masked tiles (diagonal + fully masked) — causal masking applied
+            for (int idx = m_tile; idx < iters_per_task; idx++) {
+                float2 scores_reg[Nb / 2];
+                kittens::wait(scores_arrived(s, qid), scores_phase);
+                #pragma unroll
+                for (int ii = 0; ii < Nb / 32; ii++) {
+                    asm volatile("{tcgen05.ld.sync.aligned.32x32b.x32.b32 {%0, %1, %2, %3, %4, %5, %6, %7, %8, %9, %10, %11, %12, %13, %14, %15, %16, %17, %18, %19, %20, %21, %22, %23, %24, %25, %26, %27, %28, %29, %30, %31}, [%32];}"
+                        : "=f"(scores_reg[ii*16+0].x), "=f"(scores_reg[ii*16+0].y), "=f"(scores_reg[ii*16+1].x), "=f"(scores_reg[ii*16+1].y), "=f"(scores_reg[ii*16+2].x), "=f"(scores_reg[ii*16+2].y), "=f"(scores_reg[ii*16+3].x), "=f"(scores_reg[ii*16+3].y),
+                          "=f"(scores_reg[ii*16+4].x), "=f"(scores_reg[ii*16+4].y), "=f"(scores_reg[ii*16+5].x), "=f"(scores_reg[ii*16+5].y), "=f"(scores_reg[ii*16+6].x), "=f"(scores_reg[ii*16+6].y), "=f"(scores_reg[ii*16+7].x), "=f"(scores_reg[ii*16+7].y),
+                          "=f"(scores_reg[ii*16+8].x), "=f"(scores_reg[ii*16+8].y), "=f"(scores_reg[ii*16+9].x), "=f"(scores_reg[ii*16+9].y), "=f"(scores_reg[ii*16+10].x), "=f"(scores_reg[ii*16+10].y), "=f"(scores_reg[ii*16+11].x), "=f"(scores_reg[ii*16+11].y),
+                          "=f"(scores_reg[ii*16+12].x), "=f"(scores_reg[ii*16+12].y), "=f"(scores_reg[ii*16+13].x), "=f"(scores_reg[ii*16+13].y), "=f"(scores_reg[ii*16+14].x), "=f"(scores_reg[ii*16+14].y), "=f"(scores_reg[ii*16+15].x), "=f"(scores_reg[ii*16+15].y)
+                        : "r"(score_tt_base + ii * 32));
+                }
+
+                // causal masking
+                const float NEG_INFTY = kittens::base_types::constants<float>::neg_infty();
+                int causal_col = (idx > m_tile) ? -1 : (int)kittens::warpgroup::laneid();
+                #pragma unroll
+                for (int k = 0; k < Nb / 2; k++) {
+                    if (k * 2     > causal_col) scores_reg[k].x = NEG_INFTY;
+                    if (k * 2 + 1 > causal_col) scores_reg[k].y = NEG_INFTY;
+                }
+
+                const float SCALE_LOG2 = 1.44269504089f / sqrtf(float(Db));
+                float row_max_old = row_max;
+
+                float lm0 = kittens::base_types::constants<float>::neg_infty(), lm1 = kittens::base_types::constants<float>::neg_infty(), lm2 = kittens::base_types::constants<float>::neg_infty(), lm3 = kittens::base_types::constants<float>::neg_infty();
+                float lm4 = kittens::base_types::constants<float>::neg_infty(), lm5 = kittens::base_types::constants<float>::neg_infty(), lm6 = kittens::base_types::constants<float>::neg_infty(), lm7 = kittens::base_types::constants<float>::neg_infty();
+                #pragma unroll
+                for (int j = 0; j < Nb / 2; j += 8) {
+                    asm volatile("{max.f32 %0, %1, %2, %3;}" : "=f"(lm0) : "f"(lm0), "f"(scores_reg[j+0].x), "f"(scores_reg[j+0].y));
+                    asm volatile("{max.f32 %0, %1, %2, %3;}" : "=f"(lm1) : "f"(lm1), "f"(scores_reg[j+1].x), "f"(scores_reg[j+1].y));
+                    asm volatile("{max.f32 %0, %1, %2, %3;}" : "=f"(lm2) : "f"(lm2), "f"(scores_reg[j+2].x), "f"(scores_reg[j+2].y));
+                    asm volatile("{max.f32 %0, %1, %2, %3;}" : "=f"(lm3) : "f"(lm3), "f"(scores_reg[j+3].x), "f"(scores_reg[j+3].y));
+                    asm volatile("{max.f32 %0, %1, %2, %3;}" : "=f"(lm4) : "f"(lm4), "f"(scores_reg[j+4].x), "f"(scores_reg[j+4].y));
+                    asm volatile("{max.f32 %0, %1, %2, %3;}" : "=f"(lm5) : "f"(lm5), "f"(scores_reg[j+5].x), "f"(scores_reg[j+5].y));
+                    asm volatile("{max.f32 %0, %1, %2, %3;}" : "=f"(lm6) : "f"(lm6), "f"(scores_reg[j+6].x), "f"(scores_reg[j+6].y));
+                    asm volatile("{max.f32 %0, %1, %2, %3;}" : "=f"(lm7) : "f"(lm7), "f"(scores_reg[j+7].x), "f"(scores_reg[j+7].y));
+                }
+                asm volatile("{max.f32 %0, %1, %2, %3;}" : "=f"(lm0) : "f"(lm0), "f"(lm1), "f"(lm2));
+                asm volatile("{max.f32 %0, %1, %2, %3;}" : "=f"(lm4) : "f"(lm4), "f"(lm5), "f"(lm6));
+                asm volatile("{max.f32 %0, %1, %2, %3;}" : "=f"(lm0) : "f"(lm0), "f"(lm3), "f"(lm4));
+                asm volatile("{max.f32 %0, %1, %2, %3;}" : "=f"(row_max) : "f"(row_max), "f"(lm0), "f"(lm7));
+
+                float acc_scale = 1.0f;
+                {
+                    constexpr float rescale_threshold = 8.f;
+                    float acc_scale_ = (row_max_old - row_max) * SCALE_LOG2;
+                    if (acc_scale_ >= -rescale_threshold) {
+                        row_max = row_max_old;
+                        acc_scale = 1.0f;
+                    } else {
+                        acc_scale = exp2f(acc_scale_);
+                    }
+
+                    bool needs_rescale = __any_sync(0xFFFFFFFF, acc_scale < 1.0f);
+                    if (needs_rescale) {
+                        float2 corr_2 = {acc_scale, acc_scale};
+                        #pragma unroll
+                        for (int col = 0; col < Db; col += CORR_TILE) {
+                            float2 o_reg[CORR_TILE / 2];
+                            asm volatile("{tcgen05.ld.sync.aligned.32x32b.x16.b32 {%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15}, [%16];}"
+                                : "=f"(o_reg[0].x), "=f"(o_reg[0].y), "=f"(o_reg[1].x), "=f"(o_reg[1].y),
+                                  "=f"(o_reg[2].x), "=f"(o_reg[2].y), "=f"(o_reg[3].x), "=f"(o_reg[3].y),
+                                  "=f"(o_reg[4].x), "=f"(o_reg[4].y), "=f"(o_reg[5].x), "=f"(o_reg[5].y),
+                                  "=f"(o_reg[6].x), "=f"(o_reg[6].y), "=f"(o_reg[7].x), "=f"(o_reg[7].y)
+                                : "r"(output_tt_base + col));
+                            kittens::tensor_load_wait();
+                            #pragma unroll
+                            for (int ii = 0; ii < CORR_TILE / 2; ii++)
+                                o_reg[ii] = __fmul2_rn(o_reg[ii], corr_2);
+                            asm volatile("{tcgen05.st.sync.aligned.32x32b.x16.b32 [%16], {%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15};}"
+                                :: "f"(o_reg[0].x), "f"(o_reg[0].y), "f"(o_reg[1].x), "f"(o_reg[1].y),
+                                   "f"(o_reg[2].x), "f"(o_reg[2].y), "f"(o_reg[3].x), "f"(o_reg[3].y),
+                                   "f"(o_reg[4].x), "f"(o_reg[4].y), "f"(o_reg[5].x), "f"(o_reg[5].y),
+                                   "f"(o_reg[6].x), "f"(o_reg[6].y), "f"(o_reg[7].x), "f"(o_reg[7].y),
+                                   "r"(output_tt_base + col));
+                        }
+                        kittens::tensor_store_wait();
+                    }
+                }
+
+                float neg_max_scaled = row_max * (-SCALE_LOG2);
+                float2 neg_max_scaled_2 = {neg_max_scaled, neg_max_scaled};
+                const float2 scale_2 = {SCALE_LOG2, SCALE_LOG2};
+                constexpr int CONVERT_SIZE = 32;
+
+                #pragma unroll
+                for (int q = 0; q < 4; q++) {
+                    kittens::bf16_2 scores_bf_reg[CONVERT_SIZE / 2];
+                    #pragma unroll
+                    for (int jj = 0; jj < 16; jj++) {
+                        int i = q * 16 + jj;
+                        scores_reg[i] = __ffma2_rn(scores_reg[i], scale_2, neg_max_scaled_2);
+                        scores_reg[i].x = exp2f(scores_reg[i].x);
+                        scores_reg[i].y = exp2f(scores_reg[i].y);
+                        scores_bf_reg[jj] = __float22bfloat162_rn(scores_reg[i]);
+                    }
+                    asm volatile("{tcgen05.st.sync.aligned.32x32b.x16.b32 [%16], {%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15};}"
+                        :: "r"(*(uint32_t*)&scores_bf_reg[0]), "r"(*(uint32_t*)&scores_bf_reg[1]), "r"(*(uint32_t*)&scores_bf_reg[2]), "r"(*(uint32_t*)&scores_bf_reg[3]),
+                           "r"(*(uint32_t*)&scores_bf_reg[4]), "r"(*(uint32_t*)&scores_bf_reg[5]), "r"(*(uint32_t*)&scores_bf_reg[6]), "r"(*(uint32_t*)&scores_bf_reg[7]),
+                           "r"(*(uint32_t*)&scores_bf_reg[8]), "r"(*(uint32_t*)&scores_bf_reg[9]), "r"(*(uint32_t*)&scores_bf_reg[10]), "r"(*(uint32_t*)&scores_bf_reg[11]),
+                           "r"(*(uint32_t*)&scores_bf_reg[12]), "r"(*(uint32_t*)&scores_bf_reg[13]), "r"(*(uint32_t*)&scores_bf_reg[14]), "r"(*(uint32_t*)&scores_bf_reg[15]),
+                           "r"(score_bf_base + q * 16));
+                    kittens::tensor_store_wait();
+                    if (q == 0)
+                        kittens::warp::tma::cluster::arrive(norm_scores_arrived(s, qid), 0);
+                    else
+                        kittens::warp::tma::cluster::arrive(norm_scores_quarter_arrived(s, q-1, qid), 0);
+                }
+
+                float2 ls0 = {0.0f, 0.0f}, ls1 = {0.0f, 0.0f};
+                #pragma unroll
+                for (int ii = 0; ii < Nb / 2; ii += 2) {
+                    ls0 = __fadd2_rn(ls0, scores_reg[ii]);
+                    ls1 = __fadd2_rn(ls1, scores_reg[ii + 1]);
+                }
+                ls0 = __fadd2_rn(ls0, ls1);
+                row_sum = row_sum * acc_scale + ls0.x + ls0.y;
+
+                scores_phase ^= 1;
+            }
+
+            } else {
 
             for (int idx = 0; idx < iters_per_task; idx++) {
                 float2 scores_reg[Nb / 2];
@@ -393,6 +646,8 @@ struct Attention {
 
                 scores_phase ^= 1;
             }
+
+            } // end if constexpr (CAUSAL)
 
             if (kittens::warpgroup::warpid() == 0 && kittens::warp::elect_leader())
                 s.page_finish(s.lid_to_pid(Q_LIDS[qid]));
