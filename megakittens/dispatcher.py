@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import struct
+from dataclasses import dataclass
 from typing import Any, Sequence
 
 import cuda.bindings.driver as cuda_driver
@@ -10,8 +11,29 @@ from .schema.device import Device
 from .schema.dtype import DType
 from .schema.tensor import TensorMeta
 from .schema.instruction import Instruction, InstructionMeta
-from .jit.c_utils import pack_args
+from .jit.c_utils import c_int, c_float, pack_args
 from .jit.pykittens import gl
+
+
+@dataclass
+class ScalarField:
+    """A scalar field appended to MKGlobals."""
+    name: str
+    cpp_type: str   # "unsigned int", "float", "bool"
+    size: int       # sizeof in bytes
+    align: int      # alignof in bytes
+
+    def pack(self, value: Any) -> bytes:
+        if self.cpp_type == "float":
+            return c_float(value)
+        elif self.cpp_type in ("unsigned int", "int"):
+            return c_int(int(value))
+        elif self.cpp_type == "bool":
+            return c_int(int(bool(value)))
+        else:
+            raise ValueError(f"Unknown scalar cpp_type: {self.cpp_type}")
+
+
 from .jit.cuda_utils import (
     get_kernel_from_cubin_module,
     get_sm_arch,
@@ -126,6 +148,7 @@ class Dispatcher:
         input_tensor_indices: Sequence[int],
         output_tensor_indices: Sequence[int],
         use_jit_cache: bool = True,
+        scalar_fields: list[ScalarField] | None = None,
     ) -> None:
         if not tensor_metas:
             raise RuntimeError("[MegaKittens] 'tensor_metas' must not be empty")
@@ -183,6 +206,8 @@ class Dispatcher:
         self.all_tensors: list[torch.Tensor | None] = [None] * (2 + len(tensor_metas))
         self.gls: list[gl | None] = [None] * len(self.all_tensors)
         self.use_jit_cache = use_jit_cache
+        self.scalar_fields: list[ScalarField] = scalar_fields or []
+        self.scalars: dict[str, Any] = {sf.name: 0 for sf in self.scalar_fields}
 
     def __del__(self) -> None:
         if self._cubin_module is not None:
@@ -197,16 +222,25 @@ class Dispatcher:
         if kwargs:
             raise RuntimeError("[MegaKittens] Dispatcher does not support keyword arguments")
 
-        if len(args) != len(self.input_tensor_indices):
+        num_tensors = len(self.input_tensor_indices)
+        num_scalars = len(self.scalar_fields)
+        expected = num_tensors + num_scalars
+        if len(args) != expected:
             raise RuntimeError(
-                f"[MegaKittens] Dispatcher input count mismatch: expected {len(self.input_tensor_indices)} "
-                f"but got {len(args)}"
+                f"[MegaKittens] Dispatcher arg count mismatch: expected {num_tensors} tensors + "
+                f"{num_scalars} scalars = {expected}, but got {len(args)}"
             )
 
+        tensor_args = args[:num_tensors]
+        scalar_args = args[num_tensors:]
+
         if not self._materialized:
-            self._materialize(args)
+            self._materialize(tensor_args)
         else:
-            self._materialize_inputs(args)
+            self._materialize_inputs(tensor_args)
+
+        for sf, val in zip(self.scalar_fields, scalar_args):
+            self.scalars[sf.name] = val
 
         self._launch()
 
@@ -277,6 +311,7 @@ class Dispatcher:
 
         itype_includes = "\n".join(f'#include "{inst_meta.itype.cpp_include}"' for inst_meta in self.instruction_metas if inst_meta.itype.cpp_include)
         gl_fields = "\n".join(f"{self.gls[i + 2].cpp_type} tensor_{i};" for i in range(len(self.gls) - 2))
+        scalar_fields_str = "\n".join(f"{sf.cpp_type} {sf.name};" for sf in self.scalar_fields)
         gls_body = "\n".join(f"{'if' if i == 0 else 'else if'} constexpr (I == {i}) return tensor_{i};" for i in range(len(self.gls) - 2))
         dispatch_cases = []
         for inst_meta in self.instruction_metas:
@@ -296,6 +331,7 @@ class Dispatcher:
                     {self.gls[0].cpp_type} instructions;
                     {self.gls[1].cpp_type} barriers;
                     {gl_fields}
+                    {scalar_fields_str}
                     template <int I> __device__ __forceinline__ auto& gls() const {{{gls_body}}}
                 }};
                 template <WorkerType worker_type, typename T, typename Config, typename Globals, typename... Args>
@@ -322,9 +358,10 @@ class Dispatcher:
         # Reset barriers before each launch
         if self.num_barriers > 0:
             self.barrier_tensor.zero_()
-        _globals_holder, globals_packed = pack_args(
-            [(g.tensor_to_gl(t), g.size, g.align) for g, t in zip(self.gls, self.all_tensors)]
-        )
+        fields = [(g.tensor_to_gl(t), g.size, g.align) for g, t in zip(self.gls, self.all_tensors)]
+        for sf in self.scalar_fields:
+            fields.append((sf.pack(self.scalars[sf.name]), sf.size, sf.align))
+        _globals_holder, globals_packed = pack_args(fields)
         stream = torch.cuda.current_stream(device_index).cuda_stream
         launch_kernel(
             self._kernel_fn,
