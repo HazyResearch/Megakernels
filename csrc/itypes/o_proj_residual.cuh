@@ -22,8 +22,7 @@ struct OProjResidual {
 
     struct controller {
         __device__ __forceinline__ static int lid_release_order(const Globals &g, state_t<Config> &s, int lid) {
-            if (lid < Config::NUM_PAGES - 1) return lid + 1;
-            return 0;
+            return lid;
         }
         __device__ __forceinline__ static int init_semaphores(const Globals &g, state_t<Config> &s) {
             return 0;
