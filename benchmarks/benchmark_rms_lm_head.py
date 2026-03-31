@@ -11,7 +11,7 @@ def rms_lm_head(
     norm_weight: torch.Tensor,
     lm_head: torch.Tensor,
 ) -> torch.Tensor:
-    return torch.ops.megakittens.rms_lm_head(x, norm_weight, lm_head, 1e-6)
+    return torch.ops.megakittens.rms_lm_head(x, norm_weight, lm_head, 1e-5)
 
 
 def rms_lm_head_unfused(
@@ -19,7 +19,7 @@ def rms_lm_head_unfused(
     norm_weight: torch.Tensor,
     lm_head: torch.Tensor,
 ) -> torch.Tensor:
-    h = torch.rms_norm(x, [x.shape[-1]], norm_weight, 1e-6)
+    h = torch.rms_norm(x, [x.shape[-1]], norm_weight, 1e-5)
     return h @ lm_head.T
 
 
@@ -52,19 +52,23 @@ def _bench_unfused(
     return start.elapsed_time(end) / iters * 1000
 
 
+M_LABELS = {1: "decode", 32: "prefill-32", 128: "prefill-128"}
+
+
 def benchmark_rms_lm_head() -> None:
     n_hidden = 2048
     vocab = 128_256
     batches = (1, 32, 128)
 
-    print("RMSNorm + LM head (bf16), Llama 1B-like (N=2048, V=128256)")
+    print("Llama 3.2 1B rms_lm_head benchmark (bf16)")
+    print("Instruction 7: RMSNorm + LM head  —  rms_norm(x(M,2048)) @ embed(128256,2048).T -> logits(M,128256)")
     print(f"B300 theoretical peak bandwidth: {B300_BW_BYTES_PER_SEC / 1e12:.0f} TB/s")
     print()
     print(
-        f"{'(M, N, V)':>24}  {'MK (us)':>10}  {'PT fused (us)':>14}  "
+        f"{'M':>5}  {'use case':>12}  {'(M, N, V)':>24}  {'MK (us)':>10}  {'PT fused (us)':>14}  "
         f"{'unfused (us)':>13}  {'roofline (us)':>14}  {'MK/roof':>8}"
     )
-    print("-" * 96)
+    print("-" * 115)
 
     for M in batches:
         x = torch.randn(M, n_hidden, dtype=torch.bfloat16, device="cuda")
@@ -77,9 +81,10 @@ def benchmark_rms_lm_head() -> None:
         unfused_us = _bench_unfused(x, nw, lh)
         roof_us = _roofline_us(M, n_hidden, vocab)
 
-        label = f"({M}, {n_hidden}, {vocab})"
+        shape = f"({M}, {n_hidden}, {vocab})"
+        use = M_LABELS.get(M, f"M={M}")
         print(
-            f"{label:>24}  {mk_us:>10.2f}  {pt_us:>14.2f}  "
+            f"{M:>5}  {use:>12}  {shape:>24}  {mk_us:>10.2f}  {pt_us:>14.2f}  "
             f"{unfused_us:>13.2f}  {roof_us:>14.2f}  {mk_us / roof_us:>7.1f}x"
         )
 

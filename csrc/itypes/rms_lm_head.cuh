@@ -7,7 +7,7 @@ namespace megakittens {
 template <typename Config, typename Globals, int N, int SRC0, int SRC1, int SRC2, int DST>
 struct RmsLmHead {
     static constexpr int PAGE_BYTES = Config::PAGE_SIZE;
-    static constexpr float EPS = 1e-6f;
+    static constexpr float EPS = 1e-5f;
 
     using row_vec = kittens::sv_bf<N>;
     static constexpr int ROW_BYTES = sizeof(row_vec);
