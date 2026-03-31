@@ -4,69 +4,41 @@
 
 namespace megakittens {
 
-template <typename Config, typename Globals, int I, int SRC0, int SRC1, int SRC2, int DST>
+// Projection + residual add for decode.
+// Computes: output[row] += dot(weights[layer][row], input) for each row in [start_block*16, end_block*16).
+//
+// Works for both o_proj (square: 2048x2048) and down_proj (rectangular: 2048x8192).
+//
+// indices[0] = layer_idx
+// indices[1] = start_block (in units of 16 output rows)
+// indices[2] = end_block
+//
+// SRC0 = input        [reduction_dim]                         bf16  (e.g. attn_out or silu_out)
+// SRC1 = weights      [NUM_LAYERS, output_dim, reduction_dim] bf16
+// DST  = output       [output_dim]                            bf16  (read-modify-write)
+
+template <typename Config, typename Globals, int SRC0, int SRC1, int DST>
 struct ProjResidual {
-    static constexpr int PAGE_BYTES = Config::PAGE_SIZE;
-
-    using row_vec = kittens::sv_bf<I>;
-    static constexpr int ROW_BYTES = sizeof(row_vec);
-    static constexpr int ROWS_PER_PAGE = PAGE_BYTES / ROW_BYTES;
-
-    __device__ static __forceinline__ float warp_reduce_sum(float val) {
-        #pragma unroll
-        for (int offset = kittens::WARP_THREADS / 2; offset > 0; offset >>= 1)
-            val += __shfl_xor_sync(0xFFFFFFFF, val, offset);
-        return val;
-    }
-
-    __device__ static __forceinline__ void unpack_x4(uint64_t packed, float &a, float &b, float &c, float &d) {
-        uint32_t lo = static_cast<uint32_t>(packed);
-        uint32_t hi = static_cast<uint32_t>(packed >> 32);
-        a = __bfloat162float(__ushort_as_bfloat16(static_cast<uint16_t>(lo)));
-        b = __bfloat162float(__ushort_as_bfloat16(static_cast<uint16_t>(lo >> 16)));
-        c = __bfloat162float(__ushort_as_bfloat16(static_cast<uint16_t>(hi)));
-        d = __bfloat162float(__ushort_as_bfloat16(static_cast<uint16_t>(hi >> 16)));
-    }
-
-    __device__ static __forceinline__ kittens::semaphore &inputs_arrived(state_t<Config> &s) { return s.semaphores()[0]; }
+    static constexpr int BLOCK_SIZE = 16;
 
     struct controller {
         __device__ __forceinline__ static int lid_release_order(const Globals &g, state_t<Config> &s, int lid) {
-            if (lid < Config::NUM_PAGES - 1)
-                return lid + 1;
+            if (lid < Config::NUM_PAGES - 1) return lid + 1;
             return 0;
         }
         __device__ __forceinline__ static int init_semaphores(const Globals &g, state_t<Config> &s) {
-            if (kittens::warp::elect_leader()) {
-                kittens::init_semaphore(inputs_arrived(s), 1);
-            }
-            return 1;
+            return 0;
         }
     };
 
     struct loader {
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
-            const auto &instruction = s.instruction();
-            const int row_start  = instruction.indices[0];
-            const int total_rows = instruction.indices[1];
-            const int first_batch = min(total_rows, (int)ROWS_PER_PAGE);
-
             if (kittens::warp::elect_leader()) {
-                all_input_barrier_wait<Config>(g, instruction);
-                const int pid = s.lid_to_pid(0);
-                s.page_wait(pid);
-
-                const auto &x_gl = g.template gls<SRC0>();
-                row_vec *rows = reinterpret_cast<row_vec*>(s.pages[pid].data);
-
-                kittens::tma::expect_bytes(inputs_arrived(s), first_batch * sizeof(row_vec));
-                for (int i = 0; i < first_batch; i++) {
-                    kittens::tma::load_async(rows[i], x_gl, {row_start + i, 0}, inputs_arrived(s));
-                }
-            } else if (kittens::warp::elect_leader_from_active()) {
-                for (int i = 1; i < Config::NUM_PAGES; i++) {
-                    s.page_wait(s.lid_to_pid(i));
-                    s.page_finish(s.lid_to_pid(i));
+                all_input_barrier_wait<Config>(g, s.instruction());
+                for (int i = 0; i < Config::NUM_PAGES; i++) {
+                    int pid = s.lid_to_pid(i);
+                    s.page_wait(pid);
+                    s.page_finish(pid);
                 }
             }
         }
@@ -80,104 +52,76 @@ struct ProjResidual {
     };
 
     struct consumer {
-        using consumer_group = kittens::group<Config::NUM_CONSUMER_WARPS>;
+        __device__ __forceinline__ static float warp_reduce_sum(float val) {
+            #pragma unroll
+            for (int offset = kittens::WARP_THREADS / 2; offset > 0; offset >>= 1)
+                val += __shfl_xor_sync(0xFFFFFFFF, val, offset);
+            return val;
+        }
+
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
-            kittens::wait(inputs_arrived(s), 0);
-
-            const auto &instruction = s.instruction();
-            const int row_start   = instruction.indices[0];
-            const int total_rows  = instruction.indices[1];
-            const int out_start   = instruction.indices[2];
-            const int out_count   = instruction.indices[3];
-            const int out_total   = instruction.indices[4];
-            const int lane        = kittens::laneid();
+            const auto &inst = s.instruction();
+            const int layer_idx   = inst.indices[0];
+            const int start_block = inst.indices[1];
+            const int end_block   = inst.indices[2];
+            const int num_rows    = (end_block - start_block) * BLOCK_SIZE;
+            const int row_base    = start_block * BLOCK_SIZE;
             const int warp_id     = kittens::warpid();
+            const int lane        = kittens::laneid();
 
-            const int pid = s.lid_to_pid(0);
-            row_vec *rows = reinterpret_cast<row_vec*>(s.pages[pid].data);
+            // Tensor pointers
+            const kittens::bf16 *input   = reinterpret_cast<const kittens::bf16 *>(g.template gls<SRC0>().raw_ptr);
+            const kittens::bf16 *weights = reinterpret_cast<const kittens::bf16 *>(g.template gls<SRC1>().raw_ptr);
+            kittens::bf16 *output        = reinterpret_cast<kittens::bf16 *>(g.template gls<DST>().raw_ptr);
 
-            const kittens::bf16 *W = reinterpret_cast<const kittens::bf16 *>(
-                g.template gls<SRC1>().raw_ptr);
-            const kittens::bf16 *residual = reinterpret_cast<const kittens::bf16 *>(
-                g.template gls<SRC2>().raw_ptr);
-            kittens::bf16 *output = (kittens::bf16 *)g.template gls<DST>().raw_ptr;
-            const auto &x_gl = g.template gls<SRC0>();
+            // reduction_dim = length of input vector (2048 for o_proj, 8192 for down_proj)
+            const int reduction_dim = g.template gls<SRC0>().cols();
+            // output_dim = length of output vector (2048 for both)
+            const int output_dim = g.template gls<DST>().cols();
 
-            const int elems_per_iter = kittens::WARP_THREADS * 4;
+            // Weights layout: [num_layers, output_dim, reduction_dim]
+            const int layer_offset = layer_idx * output_dim * reduction_dim;
 
-            const int opw = (out_count + Config::NUM_CONSUMER_WARPS - 1) / Config::NUM_CONSUMER_WARPS;
-            const int o0  = warp_id * opw;
-            const int o1  = min(o0 + opw, out_count);
+            // Distribute rows across consumer warps
+            const int rows_per_warp = (num_rows + Config::NUM_CONSUMER_WARPS - 1) / Config::NUM_CONSUMER_WARPS;
+            const int my_row_start  = warp_id * rows_per_warp;
+            const int my_row_end    = min(my_row_start + rows_per_warp, num_rows);
 
-            if (consumer_group::elect_leader()) {
-                all_reuse_barrier_wait<Config>(g, instruction);
-            }
-            consumer_group::sync(1);
+            // Elements per thread for the dot product
+            const int elems_per_thread = (reduction_dim + kittens::WARP_THREADS - 1) / kittens::WARP_THREADS;
 
-            int sem_phase = 1;
-            for (int batch_start = 0; batch_start < total_rows; batch_start += ROWS_PER_PAGE) {
-                const int batch_rows = min((int)ROWS_PER_PAGE, total_rows - batch_start);
+            for (int local_row = my_row_start; local_row < my_row_end; local_row++) {
+                const int global_row = row_base + local_row;
+                const kittens::bf16 *w_row = weights + layer_offset + global_row * reduction_dim;
 
-                if (batch_start > 0) {
-                    consumer_group::sync(2);
-
-                    if (consumer_group::elect_leader()) {
-                        kittens::tma::expect_bytes(inputs_arrived(s), batch_rows * sizeof(row_vec));
-                        for (int i = 0; i < batch_rows; i++) {
-                            kittens::tma::load_async(rows[i], x_gl, {row_start + batch_start + i, 0}, inputs_arrived(s));
-                        }
+                // Dot product: w_row @ input
+                float acc = 0.0f;
+                for (int i = 0; i < elems_per_thread; i++) {
+                    int col = lane + i * kittens::WARP_THREADS;
+                    if (col < reduction_dim) {
+                        acc += __bfloat162float(w_row[col]) * __bfloat162float(input[col]);
                     }
-                    kittens::wait(inputs_arrived(s), sem_phase);
-                    sem_phase ^= 1;
                 }
+                acc = warp_reduce_sum(acc);
 
-                for (int r = 0; r < batch_rows; r++) {
-                    const kittens::bf16 *xd = rows[r].data;
-                    const int global_row = row_start + batch_start + r;
-
-                    for (int oi = o0; oi < o1; oi++) {
-                        const int col = out_start + oi;
-                        const kittens::bf16 *w_row = W + static_cast<int64_t>(col) * I;
-
-                        float dot = 0.0f;
-                        for (int cb = 0; cb < I; cb += elems_per_iter) {
-                            const int c = cb + lane * 4;
-                            if (c + 3 < I) {
-                                uint64_t xp = *reinterpret_cast<const uint64_t *>(&xd[c]);
-                                float xa, xb, xc, xd2;
-                                unpack_x4(xp, xa, xb, xc, xd2);
-
-                                uint64_t wp = *reinterpret_cast<const uint64_t *>(&w_row[c]);
-                                float wa, wb, wc, wd;
-                                unpack_x4(wp, wa, wb, wc, wd);
-
-                                dot += xa * wa + xb * wb + xc * wc + xd2 * wd;
-                            }
-                        }
-                        dot = warp_reduce_sum(dot);
-
-                        if (lane == 0) {
-                            float res = __bfloat162float(
-                                residual[static_cast<int64_t>(global_row) * out_total + col]);
-                            output[static_cast<int64_t>(global_row) * out_total + col]
-                                = __float2bfloat16(dot + res);
-                        }
-                    }
+                // Add to output (one thread writes)
+                if (lane == 0) {
+                    float old_val = __bfloat162float(output[global_row]);
+                    output[global_row] = __float2bfloat16(old_val + acc);
                 }
             }
 
-            __threadfence();
-            consumer_group::sync(3);
-
-            if (consumer_group::elect_leader()) {
-                s.page_finish(pid);
-                all_barrier_arrive<Config>(g, instruction);
+            // Barrier arrive
+            kittens::group<Config::NUM_CONSUMER_WARPS>::sync(1);
+            if (kittens::group<Config::NUM_CONSUMER_WARPS>::elect_leader()) {
+                __threadfence();
+                all_barrier_arrive<Config>(g, s.instruction());
             }
         }
     };
 
     struct storer {
-        __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) { }
+        __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {}
     };
 };
 

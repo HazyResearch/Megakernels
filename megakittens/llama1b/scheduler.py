@@ -8,6 +8,7 @@ matching the megakittens Instruction/InstructionMeta format.
 from __future__ import annotations
 
 from ..itypes.noop import Noop
+from ..itypes.proj_residual import ProjResidual
 from ..schema.device import Device
 from ..schema.dtype import DType
 from ..schema.instruction import Instruction, InstructionMeta
@@ -340,8 +341,17 @@ def schedule_decode(
     icode_lmhead = 0 if noop else ICODE_LM_HEAD
 
     # Instruction metas (drive JIT codegen)
-    instruction_metas = [_noop_inst_meta]
-    # TODO: add real InstructionMeta entries when we have real IType classes
+    _proj_residual_itype = ProjResidual()
+    instruction_metas = [
+        _noop_inst_meta,
+        # TODO: add QKV, attention, upgate, lm_head InstructionMeta entries
+        InstructionMeta(icode=ICODE_O_PROJ, itype=_proj_residual_itype,
+                        src_tensors=(T.ATTN_OUT, T.O_WEIGHTS),
+                        dst_tensors=(T.HIDDEN_STATES,)),
+        InstructionMeta(icode=ICODE_DOWNPROJ, itype=_proj_residual_itype,
+                        src_tensors=(T.SILU_OUT, T.DOWN_WEIGHTS),
+                        dst_tensors=(T.HIDDEN_STATES,)),
+    ]
 
     instructions: list[Instruction] = []
     barrier_counter = 0
