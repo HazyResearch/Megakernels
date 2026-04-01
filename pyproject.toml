@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "megakittens"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "torch>=2.9,<3",
+    "cuda-python[all]>=13.0,<14",
+    "numpy>=2.4,<3",
+    "pydantic==2.12.*",
+    "graphviz==0.21.*",
+    "tabulate==0.10.*",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=9,<10"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

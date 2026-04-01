@@ -1,0 +1,104 @@
+from __future__ import annotations
+
+import builtins
+from typing import List, Tuple
+
+from pydantic import BaseModel, NonNegativeInt
+
+from .optype import OpType
+from .tensor import TensorMeta
+
+
+class Node(BaseModel):
+    """
+    Graph vertex for the DAG. This schema is node-centric (no separate Edge objects).
+    """
+    optype: OpType
+    in_nodes: Tuple[Tuple[Node, NonNegativeInt], ...]
+    out_tensors: Tuple[TensorMeta, ...]
+    out_nodes: Tuple[List[Node], ...]
+
+    # Op-specific fields
+    input_index: int | None # None if not an input
+    # TODO: support default values
+
+    # Unique identifier for this node
+    id: int = 0
+    def model_post_init(self, _) -> None:
+        self.id = builtins.id(self)
+
+
+class DAG:
+    """Directed acyclic graph of compute nodes."""
+
+    def __init__(self, nodes: List[Node]) -> None:
+        self.nodes = nodes
+        self.validate()
+
+    def _validate_topological(self) -> None:
+        node_index: dict[int, int] = {node.id: idx for idx, node in enumerate(self.nodes)}
+        for node_idx, node in enumerate(self.nodes):
+            for in_node, input_idx in node.in_nodes:
+                parent_index = node_index.get(in_node.id)
+                if parent_index is None:
+                    raise RuntimeError(
+                        f"[MegaKittens] Invalid DAG connectivity: node at index {node_idx} has missing parent"
+                    )
+                if parent_index >= node_idx:
+                    raise RuntimeError(
+                        f"[MegaKittens] Invalid DAG topology at index {node_idx}: parent node appears after child"
+                    )
+                if input_idx >= len(in_node.out_nodes):
+                    raise RuntimeError(
+                        f"[MegaKittens] Invalid DAG connectivity: node index {node_idx} uses invalid source output slot {input_idx}"
+                    )
+                if not any(n.id == node.id for n in in_node.out_nodes[input_idx]):
+                    raise RuntimeError(
+                        f"[MegaKittens] Invalid DAG connectivity: edge from node index {parent_index}"
+                        f" output slot {input_idx} to node index {node_idx} is missing"
+                    )
+
+            for out_idx, out_nodes in enumerate(node.out_nodes):
+                for out_node in out_nodes:
+                    out_node_idx = node_index.get(out_node.id)
+                    if out_node_idx is None:
+                        raise RuntimeError(
+                            f"[MegaKittens] Invalid DAG connectivity: edge from node index {node_idx}"
+                            f" to unknown node (output slot {out_idx})"
+                        )
+                    if not any(
+                        in_node.id == node.id and input_idx == out_idx
+                        for in_node, input_idx in out_node.in_nodes
+                    ):
+                        raise RuntimeError(
+                            f"[MegaKittens] Invalid DAG connectivity: node index {node_idx}"
+                            f" is not registered as input to node index {out_node_idx}"
+                        )
+
+    def validate(self) -> None:
+        if not isinstance(self.nodes, list):
+            raise RuntimeError("[MegaKittens] DAG payload is not a list")
+
+        for node in self.nodes:
+            if not isinstance(node, Node):
+                raise RuntimeError("[MegaKittens] DAG payload contains non-Node entry")
+            if len(node.out_nodes) != len(node.out_tensors):
+                raise RuntimeError(
+                    f"[MegaKittens] Node arity mismatch: out_nodes={len(node.out_nodes)} out_tensors={len(node.out_tensors)}"
+                )
+
+        input_nodes = [node for node in self.nodes if node.optype == OpType.input]
+        output_nodes = [node for node in self.nodes if node.optype == OpType.output]
+
+        for node in input_nodes:
+            if len(node.in_nodes) != 0:
+                raise RuntimeError("[MegaKittens] Input node has inbound edges")
+
+        for node in output_nodes:
+            if any(len(dst_nodes) != 0 for dst_nodes in node.out_nodes):
+                raise RuntimeError("[MegaKittens] Output node has outbound edges")
+
+        if len(output_nodes) != 1:
+            raise RuntimeError(f"[MegaKittens] Number of output nodes is {len(output_nodes)}")
+
+        self._validate_topological()

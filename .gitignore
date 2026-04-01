@@ -1,0 +1,11 @@
+.DS_Store
+__pycache__/
+*.egg-info/
+*.so
+*.ptx
+*.cubin
+*.fatbin
+log/
+.vscode/
+temp/
+examples_from_old/

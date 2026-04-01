@@ -1,0 +1,4 @@
+[submodule "ThunderKittens"]
+	path = csrc/ThunderKittens
+	url = https://github.com/HazyResearch/ThunderKittens.git
+	branch = main
