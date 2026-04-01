@@ -102,23 +102,17 @@ struct RmsUpgateSilu {
 
     struct loader {
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
-            const auto &instruction = s.instruction();
-            const int row_start  = instruction.indices[0];
-            const int total_rows = instruction.indices[1];
-            const int first_batch = min(total_rows, (int)ROWS_PER_PAGE);
-
             if (kittens::warp::elect_leader()) {
-                all_input_barrier_wait<Config>(g, instruction);
+                all_input_barrier_wait<Config>(g, s.instruction());
                 const int pid = s.lid_to_pid(0);
                 s.page_wait(pid);
 
                 const auto &x_gl = g.template gls<SRC0>();
                 row_vec *rows = reinterpret_cast<row_vec*>(s.pages[pid].data);
 
-                kittens::tma::expect_bytes(inputs_arrived(s), first_batch * sizeof(row_vec));
-                for (int i = 0; i < first_batch; i++) {
-                    kittens::tma::load_async(rows[i], x_gl, {row_start + i, 0}, inputs_arrived(s));
-                }
+                // Decode: always load 1 row at position 0
+                kittens::tma::expect_bytes(inputs_arrived(s), sizeof(row_vec));
+                kittens::tma::load_async(rows[0], x_gl, {0, 0}, inputs_arrived(s));
             } else if (kittens::warp::elect_leader_from_active()) {
                 for (int i = 1; i < Config::NUM_PAGES; i++) {
                     s.page_wait(s.lid_to_pid(i));
@@ -137,27 +131,35 @@ struct RmsUpgateSilu {
 
     struct consumer {
         using consumer_group = kittens::group<Config::NUM_CONSUMER_WARPS>;
+        static constexpr int BLOCK_SIZE = 16;
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
             kittens::wait(inputs_arrived(s), 0);
 
             const auto &instruction = s.instruction();
-            const int row_start    = instruction.indices[0];
-            const int total_rows   = instruction.indices[1];
-            const int inter_start  = instruction.indices[2];
-            const int inter_count  = instruction.indices[3];
-            const int inter_total  = instruction.indices[4];
-            const int lane         = kittens::laneid();
-            const int warp_id      = kittens::warpid();
+            // indices: (layer_idx, start_block, end_block)
+            const int layer_idx   = instruction.indices[0];
+            const int start_block = instruction.indices[1];
+            const int end_block   = instruction.indices[2];
+            const int inter_start = start_block * BLOCK_SIZE;
+            const int inter_count = (end_block - start_block) * BLOCK_SIZE;
+            const int lane        = kittens::laneid();
+            const int warp_id     = kittens::warpid();
 
             const int pid = s.lid_to_pid(0);
             row_vec *rows = reinterpret_cast<row_vec*>(s.pages[pid].data);
 
-            const kittens::bf16 *norm_weight = reinterpret_cast<const kittens::bf16 *>(
+            // norm_weight: [NUM_LAYERS, N] — offset by layer
+            const kittens::bf16 *norm_weight_base = reinterpret_cast<const kittens::bf16 *>(
                 g.template gls<SRC1>().raw_ptr);
+            const kittens::bf16 *norm_weight = norm_weight_base + static_cast<int64_t>(layer_idx) * N;
+
+            // up/gate weights: [NUM_LAYERS, inter_dim, N] — offset by layer
+            const int inter_dim = g.template gls<DST>().cols();
+            const int64_t layer_offset = static_cast<int64_t>(layer_idx) * inter_dim * N;
             const kittens::bf16 *up_W = reinterpret_cast<const kittens::bf16 *>(
-                g.template gls<SRC2>().raw_ptr);
+                g.template gls<SRC2>().raw_ptr) + layer_offset;
             const kittens::bf16 *gate_W = reinterpret_cast<const kittens::bf16 *>(
-                g.template gls<SRC3>().raw_ptr);
+                g.template gls<SRC3>().raw_ptr) + layer_offset;
             kittens::bf16 *output = (kittens::bf16 *)g.template gls<DST>().raw_ptr;
             const auto &x_gl = g.template gls<SRC0>();
 
@@ -167,8 +169,9 @@ struct RmsUpgateSilu {
             const int i0  = warp_id * ipw;
             const int i1  = min(i0 + ipw, inter_count);
 
-            int first_batch = min(total_rows, (int)ROWS_PER_PAGE);
-            normalize_batch(rows, first_batch, norm_weight, warp_id, lane);
+            // Decode: always 1 row
+            constexpr int total_rows = 1;
+            normalize_batch(rows, total_rows, norm_weight, warp_id, lane);
             consumer_group::sync(1);
 
             if (consumer_group::elect_leader()) {
@@ -176,63 +179,41 @@ struct RmsUpgateSilu {
             }
             consumer_group::sync(2);
 
-            int sem_phase = 1;
-            for (int batch_start = 0; batch_start < total_rows; batch_start += ROWS_PER_PAGE) {
-                const int batch_rows = min((int)ROWS_PER_PAGE, total_rows - batch_start);
+            {
+                const kittens::bf16 *xd = rows[0].data;
 
-                if (batch_start > 0) {
-                    consumer_group::sync(3);
+                for (int ii = i0; ii < i1; ii++) {
+                    const int idx = inter_start + ii;
+                    const kittens::bf16 *up_row   = up_W   + static_cast<int64_t>(idx) * N;
+                    const kittens::bf16 *gate_row = gate_W + static_cast<int64_t>(idx) * N;
 
-                    if (consumer_group::elect_leader()) {
-                        kittens::tma::expect_bytes(inputs_arrived(s), batch_rows * sizeof(row_vec));
-                        for (int i = 0; i < batch_rows; i++) {
-                            kittens::tma::load_async(rows[i], x_gl, {row_start + batch_start + i, 0}, inputs_arrived(s));
+                    float dot_up = 0.0f;
+                    float dot_gate = 0.0f;
+                    for (int cb = 0; cb < N; cb += elems_per_iter) {
+                        const int col = cb + lane * 4;
+                        if (col + 3 < N) {
+                            uint64_t xp = *reinterpret_cast<const uint64_t *>(&xd[col]);
+                            float xa, xb, xc, xd2;
+                            unpack_x4(xp, xa, xb, xc, xd2);
+
+                            uint64_t up = *reinterpret_cast<const uint64_t *>(&up_row[col]);
+                            float ua, ub, uc, ud;
+                            unpack_x4(up, ua, ub, uc, ud);
+
+                            uint64_t gp = *reinterpret_cast<const uint64_t *>(&gate_row[col]);
+                            float ga, gb, gc, gd;
+                            unpack_x4(gp, ga, gb, gc, gd);
+
+                            dot_up   += xa * ua + xb * ub + xc * uc + xd2 * ud;
+                            dot_gate += xa * ga + xb * gb + xc * gc + xd2 * gd;
                         }
                     }
-                    kittens::wait(inputs_arrived(s), sem_phase);
-                    sem_phase ^= 1;
+                    dot_up   = warp_reduce_sum(dot_up);
+                    dot_gate = warp_reduce_sum(dot_gate);
 
-                    normalize_batch(rows, batch_rows, norm_weight, warp_id, lane);
-                    consumer_group::sync(1);
-                }
-
-                for (int r = 0; r < batch_rows; r++) {
-                    const kittens::bf16 *xd = rows[r].data;
-
-                    for (int ii = i0; ii < i1; ii++) {
-                        const int idx = inter_start + ii;
-                        const kittens::bf16 *up_row   = up_W   + static_cast<int64_t>(idx) * N;
-                        const kittens::bf16 *gate_row = gate_W + static_cast<int64_t>(idx) * N;
-
-                        float dot_up = 0.0f;
-                        float dot_gate = 0.0f;
-                        for (int cb = 0; cb < N; cb += elems_per_iter) {
-                            const int col = cb + lane * 4;
-                            if (col + 3 < N) {
-                                uint64_t xp = *reinterpret_cast<const uint64_t *>(&xd[col]);
-                                float xa, xb, xc, xd2;
-                                unpack_x4(xp, xa, xb, xc, xd2);
-
-                                uint64_t up = *reinterpret_cast<const uint64_t *>(&up_row[col]);
-                                float ua, ub, uc, ud;
-                                unpack_x4(up, ua, ub, uc, ud);
-
-                                uint64_t gp = *reinterpret_cast<const uint64_t *>(&gate_row[col]);
-                                float ga, gb, gc, gd;
-                                unpack_x4(gp, ga, gb, gc, gd);
-
-                                dot_up   += xa * ua + xb * ub + xc * uc + xd2 * ud;
-                                dot_gate += xa * ga + xb * gb + xc * gc + xd2 * gd;
-                            }
-                        }
-                        dot_up   = warp_reduce_sum(dot_up);
-                        dot_gate = warp_reduce_sum(dot_gate);
-
-                        if (lane == 0) {
-                            float silu_gate = dot_gate / (1.0f + expf(-dot_gate));
-                            output[static_cast<int64_t>(row_start + batch_start + r) * inter_total + idx]
-                                = __float2bfloat16(dot_up * silu_gate);
-                        }
+                    if (lane == 0) {
+                        float silu_gate = dot_gate / (1.0f + expf(-dot_gate));
+                        output[idx] = __float2bfloat16(dot_up * silu_gate);
                     }
                 }
             }

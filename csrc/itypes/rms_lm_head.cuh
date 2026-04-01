@@ -102,23 +102,17 @@ struct RmsLmHead {
 
     struct loader {
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
-            const auto &instruction = s.instruction();
-            const int row_start  = instruction.indices[0];
-            const int total_rows = instruction.indices[1];
-            const int first_batch = min(total_rows, (int)ROWS_PER_PAGE);
-
             if (kittens::warp::elect_leader()) {
-                all_input_barrier_wait<Config>(g, instruction);
+                all_input_barrier_wait<Config>(g, s.instruction());
                 const int pid = s.lid_to_pid(0);
                 s.page_wait(pid);
 
                 const auto &x_gl = g.template gls<SRC0>();
                 row_vec *rows = reinterpret_cast<row_vec*>(s.pages[pid].data);
 
-                kittens::tma::expect_bytes(inputs_arrived(s), first_batch * sizeof(row_vec));
-                for (int i = 0; i < first_batch; i++) {
-                    kittens::tma::load_async(rows[i], x_gl, {row_start + i, 0}, inputs_arrived(s));
-                }
+                // Decode: always load 1 row at position 0
+                kittens::tma::expect_bytes(inputs_arrived(s), sizeof(row_vec));
+                kittens::tma::load_async(rows[0], x_gl, {0, 0}, inputs_arrived(s));
             } else if (kittens::warp::elect_leader_from_active()) {
                 for (int i = 1; i < Config::NUM_PAGES; i++) {
                     s.page_wait(s.lid_to_pid(i));
@@ -137,15 +131,16 @@ struct RmsLmHead {
 
     struct consumer {
         using consumer_group = kittens::group<Config::NUM_CONSUMER_WARPS>;
+        static constexpr int BLOCK_SIZE = 16;
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
             kittens::wait(inputs_arrived(s), 0);
 
             const auto &instruction = s.instruction();
-            const int row_start   = instruction.indices[0];
-            const int total_rows  = instruction.indices[1];
-            const int vocab_start = instruction.indices[2];
-            const int vocab_count = instruction.indices[3];
-            const int vocab_total = instruction.indices[4];
+            // indices: (start_block, end_block)
+            const int start_block = instruction.indices[0];
+            const int end_block   = instruction.indices[1];
+            const int vocab_start = start_block * BLOCK_SIZE;
+            const int vocab_count = (end_block - start_block) * BLOCK_SIZE;
             const int lane        = kittens::laneid();
             const int warp_id     = kittens::warpid();
 
@@ -157,7 +152,6 @@ struct RmsLmHead {
             const kittens::bf16 *W = reinterpret_cast<const kittens::bf16 *>(
                 g.template gls<SRC2>().raw_ptr);
             kittens::bf16 *logits = (kittens::bf16 *)g.template gls<DST>().raw_ptr;
-            const auto &x_gl = g.template gls<SRC0>();
 
             const int elems_per_iter = kittens::WARP_THREADS * 4;
 
@@ -165,8 +159,9 @@ struct RmsLmHead {
             const int v0  = warp_id * vpw;
             const int v1  = min(v0 + vpw, vocab_count);
 
-            int first_batch = min(total_rows, (int)ROWS_PER_PAGE);
-            normalize_batch(rows, first_batch, norm_weight, warp_id, lane);
+            // Decode: always 1 row
+            constexpr int total_rows = 1;
+            normalize_batch(rows, total_rows, norm_weight, warp_id, lane);
             consumer_group::sync(1);
 
             if (consumer_group::elect_leader()) {
@@ -174,54 +169,32 @@ struct RmsLmHead {
             }
             consumer_group::sync(2);
 
-            int sem_phase = 1;
-            for (int batch_start = 0; batch_start < total_rows; batch_start += ROWS_PER_PAGE) {
-                const int batch_rows = min((int)ROWS_PER_PAGE, total_rows - batch_start);
+            {
+                const kittens::bf16 *xd = rows[0].data;
 
-                if (batch_start > 0) {
-                    consumer_group::sync(3);
+                for (int vi = v0; vi < v1; vi++) {
+                    const int v = vocab_start + vi;
+                    const kittens::bf16 *w_row = W + static_cast<int64_t>(v) * N;
 
-                    if (consumer_group::elect_leader()) {
-                        kittens::tma::expect_bytes(inputs_arrived(s), batch_rows * sizeof(row_vec));
-                        for (int i = 0; i < batch_rows; i++) {
-                            kittens::tma::load_async(rows[i], x_gl, {row_start + batch_start + i, 0}, inputs_arrived(s));
+                    float dot = 0.0f;
+                    for (int cb = 0; cb < N; cb += elems_per_iter) {
+                        const int col = cb + lane * 4;
+                        if (col + 3 < N) {
+                            uint64_t xp = *reinterpret_cast<const uint64_t *>(&xd[col]);
+                            float xa, xb, xc, xd2;
+                            unpack_x4(xp, xa, xb, xc, xd2);
+
+                            uint64_t wp = *reinterpret_cast<const uint64_t *>(&w_row[col]);
+                            float wa, wb, wc, wd;
+                            unpack_x4(wp, wa, wb, wc, wd);
+
+                            dot += xa * wa + xb * wb + xc * wc + xd2 * wd;
                         }
                     }
-                    kittens::wait(inputs_arrived(s), sem_phase);
-                    sem_phase ^= 1;
+                    dot = warp_reduce_sum(dot);
 
-                    normalize_batch(rows, batch_rows, norm_weight, warp_id, lane);
-                    consumer_group::sync(1);
-                }
-
-                for (int r = 0; r < batch_rows; r++) {
-                    const kittens::bf16 *xd = rows[r].data;
-
-                    for (int vi = v0; vi < v1; vi++) {
-                        const int v = vocab_start + vi;
-                        const kittens::bf16 *w_row = W + static_cast<int64_t>(v) * N;
-
-                        float dot = 0.0f;
-                        for (int cb = 0; cb < N; cb += elems_per_iter) {
-                            const int col = cb + lane * 4;
-                            if (col + 3 < N) {
-                                uint64_t xp = *reinterpret_cast<const uint64_t *>(&xd[col]);
-                                float xa, xb, xc, xd2;
-                                unpack_x4(xp, xa, xb, xc, xd2);
-
-                                uint64_t wp = *reinterpret_cast<const uint64_t *>(&w_row[col]);
-                                float wa, wb, wc, wd;
-                                unpack_x4(wp, wa, wb, wc, wd);
-
-                                dot += xa * wa + xb * wb + xc * wc + xd2 * wd;
-                            }
-                        }
-                        dot = warp_reduce_sum(dot);
-
-                        if (lane == 0) {
-                            logits[static_cast<int64_t>(row_start + batch_start + r) * vocab_total + v]
-                                = __float2bfloat16(dot);
-                        }
+                    if (lane == 0) {
+                        logits[v] = __float2bfloat16(dot);
                     }
                 }
             }

@@ -49,7 +49,6 @@ struct AttentionPartial {
     struct loader {
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
             if (kittens::warp::elect_leader()) {
-                all_input_barrier_wait<Config>(g, s.instruction());
                 for (int i = 0; i < Config::NUM_PAGES; i++) {
                     int pid = s.lid_to_pid(i);
                     s.page_wait(pid);
@@ -70,6 +69,10 @@ struct AttentionPartial {
         using consumer_group = kittens::group<Config::NUM_CONSUMER_WARPS>;
 
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
+            if (consumer_group::elect_leader())
+                all_input_barrier_wait<Config>(g, s.instruction());
+            consumer_group::sync(4);
+
             parsed_instruction inst{s};
             const int seq_len = g.pos_id + 1;
             const float scale = g.attn_scale;

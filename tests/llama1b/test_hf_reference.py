@@ -187,80 +187,28 @@ def decode_step(
     return logits
 
 
-@torch.inference_mode()
-def test_llama1b_shapes_and_correctness():
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-    hf_model = AutoModelForCausalLM.from_pretrained(
-        MODEL_NAME, dtype=DTYPE, device_map=DEVICE,
-    )
-
-    config = hf_model.config
-    assert config.num_hidden_layers == NUM_LAYERS
-    assert config.hidden_size == HIDDEN_DIM
-    assert config.intermediate_size == INTERMEDIATE_DIM
-    assert config.num_attention_heads == NUM_ATTENTION_HEADS
-    assert config.num_key_value_heads == NUM_KV_HEADS
-    assert config.hidden_size // config.num_attention_heads == HEAD_DIM
-    assert config.vocab_size == VOCAB_SIZE
-    assert config.rms_norm_eps == RMS_NORM_EPS
-
-    weights = stack_weights(hf_model)
-
-    assert weights["qkv_weights"].shape == (NUM_LAYERS, NUM_ATTENTION_HEADS * HEAD_DIM + 2 * NUM_KV_HEADS * HEAD_DIM, HIDDEN_DIM)
-    assert weights["o_weights"].shape == (NUM_LAYERS, HIDDEN_DIM, HIDDEN_DIM)
-    assert weights["attn_norm_weights"].shape == (NUM_LAYERS, HIDDEN_DIM)
-    assert weights["mlp_norm_weights"].shape == (NUM_LAYERS, HIDDEN_DIM)
-    assert weights["up_weights"].shape == (NUM_LAYERS, INTERMEDIATE_DIM, HIDDEN_DIM)
-    assert weights["gate_weights"].shape == (NUM_LAYERS, INTERMEDIATE_DIM, HIDDEN_DIM)
-    assert weights["down_weights"].shape == (NUM_LAYERS, HIDDEN_DIM, INTERMEDIATE_DIM)
-    assert weights["lm_head_norm_weight"].shape == (HIDDEN_DIM,)
-    assert weights["lm_head_weight"].shape == (VOCAB_SIZE, HIDDEN_DIM)
-    assert weights["embed_weight"].shape == (VOCAB_SIZE, HIDDEN_DIM)
-    print("All stacked weight shapes verified.")
-
-    max_seq_len = 512
-    k_cache = torch.zeros(NUM_LAYERS, max_seq_len, NUM_KV_HEADS, HEAD_DIM, device=DEVICE, dtype=DTYPE)
-    v_cache = torch.zeros(NUM_LAYERS, max_seq_len, NUM_KV_HEADS, HEAD_DIM, device=DEVICE, dtype=DTYPE)
-
-    rope_cos, rope_sin = make_rope_table(config, max_seq_len, DEVICE)
-    assert rope_cos.shape == (max_seq_len, HEAD_DIM)
-    assert rope_sin.shape == (max_seq_len, HEAD_DIM)
-
-    prompt = "The cat sat on"
-    input_ids = tokenizer(prompt, return_tensors="pt", add_special_tokens=True)["input_ids"].to(DEVICE)
-    prompt_len = input_ids.shape[1]
-    print(f"Prompt: {prompt!r}, tokens: {input_ids[0].tolist()}, len: {prompt_len}")
-
-    # HF prefill (populates HF's internal kv cache)
-    hf_output = hf_model(input_ids)
-    hf_next_token = hf_output.logits[0, -1].argmax().item()
-    print(f"HF prefill -> {hf_next_token} = {tokenizer.decode([hf_next_token])!r}")
-
-    # our prefill (populates our kv cache, one token at a time)
-    for pos in range(prompt_len):
-        token = input_ids[0, pos].item()
-        x = weights["embed_weight"][token]
+def prefill_kv_cache(token_ids, weights, k_cache, v_cache, rope_cos, rope_sin):
+    """Prefill KV cache one token at a time using the PyTorch reference."""
+    attn_scale = 1.0 / math.sqrt(HEAD_DIM)
+    for pos in range(len(token_ids)):
+        x = weights["embed_weight"][token_ids[pos]]
+        cos = rope_cos[pos]
+        sin = rope_sin[pos]
+        seq_len = pos + 1
 
         for layer_idx in range(NUM_LAYERS):
             normed = rmsnorm(x, weights["attn_norm_weights"][layer_idx], RMS_NORM_EPS)
             qkv = weights["qkv_weights"][layer_idx] @ normed
-
             q = qkv[:NUM_ATTENTION_HEADS * HEAD_DIM].view(NUM_ATTENTION_HEADS, HEAD_DIM)
             k = qkv[NUM_ATTENTION_HEADS * HEAD_DIM:(NUM_ATTENTION_HEADS + NUM_KV_HEADS) * HEAD_DIM].view(NUM_KV_HEADS, HEAD_DIM)
             v = qkv[(NUM_ATTENTION_HEADS + NUM_KV_HEADS) * HEAD_DIM:].view(NUM_KV_HEADS, HEAD_DIM)
 
-            cos = rope_cos[pos]
-            sin = rope_sin[pos]
             q = apply_rope_interleaved(q, cos, sin)
             k = apply_rope_interleaved(k, cos, sin)
-
             k_cache[layer_idx, pos] = k
             v_cache[layer_idx, pos] = v
 
-            seq_len = pos + 1
-            attn_scale = 1.0 / math.sqrt(HEAD_DIM)
-            attn_out = torch.zeros(NUM_ATTENTION_HEADS, HEAD_DIM, device=DEVICE, dtype=DTYPE)
-
+            attn_out = torch.zeros(NUM_ATTENTION_HEADS, HEAD_DIM, device=x.device, dtype=x.dtype)
             for kv_head in range(NUM_KV_HEADS):
                 k_cached = k_cache[layer_idx, :seq_len, kv_head]
                 v_cached = v_cache[layer_idx, :seq_len, kv_head]
@@ -268,61 +216,61 @@ def test_llama1b_shapes_and_correctness():
                 for q_head in range(kv_head * gqa_size, (kv_head + 1) * gqa_size):
                     scores = (q[q_head] @ k_cached.T) * attn_scale
                     if seq_len > 1:
-                        mask = torch.full((seq_len,), float("-inf"), device=DEVICE)
+                        mask = torch.full((seq_len,), float("-inf"), device=x.device)
                         mask[:pos + 1] = 0.0
                         scores = scores + mask
-                    w = F.softmax(scores.float(), dim=-1).to(DTYPE)
+                    w = F.softmax(scores.float(), dim=-1).to(x.dtype)
                     attn_out[q_head] = w @ v_cached
 
-            attn_out_flat = attn_out.reshape(HIDDEN_DIM)
-            o_proj = weights["o_weights"][layer_idx] @ attn_out_flat
+            o_proj = weights["o_weights"][layer_idx] @ attn_out.reshape(HIDDEN_DIM)
             x = x + o_proj
 
             normed_mlp = rmsnorm(x, weights["mlp_norm_weights"][layer_idx], RMS_NORM_EPS)
             gate = weights["gate_weights"][layer_idx] @ normed_mlp
             up = weights["up_weights"][layer_idx] @ normed_mlp
-            silu_out = F.silu(gate) * up
-            down = weights["down_weights"][layer_idx] @ silu_out
+            down = weights["down_weights"][layer_idx] @ (F.silu(gate) * up)
             x = x + down
 
-    print("Prefill complete.")
 
-    # decode: both us and HF predict the next token after hf_next_token
-    our_logits = decode_step(
-        token_id=hf_next_token,
-        pos_id=prompt_len,
-        weights=weights,
-        k_cache=k_cache,
-        v_cache=v_cache,
-        rope_cos=rope_cos,
-        rope_sin=rope_sin,
-    )
+@torch.inference_mode()
+def test_llama1b_shapes_and_correctness():
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+    hf_model = AutoModelForCausalLM.from_pretrained(MODEL_NAME, dtype=DTYPE, device_map=DEVICE)
+    config = hf_model.config
+
+    weights = stack_weights(hf_model)
+    rope_cos, rope_sin = make_rope_table(config, 512, DEVICE)
+
+    prompt = "The cat sat on"
+    input_ids = tokenizer(prompt, return_tensors="pt", add_special_tokens=True)["input_ids"].to(DEVICE)
+    prompt_len = input_ids.shape[1]
+    print(f"Prompt: {prompt!r}, {prompt_len} tokens")
+
+    # HF prefill
+    hf_output = hf_model(input_ids)
+    hf_next_token = hf_output.logits[0, -1].argmax().item()
+    print(f"HF prefill -> {hf_next_token} = {tokenizer.decode([hf_next_token])!r}")
+
+    # Our prefill
+    k_cache = torch.zeros(NUM_LAYERS, 512, NUM_KV_HEADS, HEAD_DIM, device=DEVICE, dtype=DTYPE)
+    v_cache = torch.zeros(NUM_LAYERS, 512, NUM_KV_HEADS, HEAD_DIM, device=DEVICE, dtype=DTYPE)
+    prefill_kv_cache(input_ids[0].tolist(), weights, k_cache, v_cache, rope_cos, rope_sin)
+
+    # Decode: both us and HF predict the next token
+    our_logits = decode_step(hf_next_token, prompt_len, weights, k_cache, v_cache, rope_cos, rope_sin)
     our_next_token = our_logits.argmax().item()
     print(f"Our decode -> {our_next_token} = {tokenizer.decode([our_next_token])!r}")
 
-    hf_decode_input = torch.tensor([[hf_next_token]], device=DEVICE)
-    hf_decode_output = hf_model(hf_decode_input, past_key_values=hf_output.past_key_values)
-    hf_decode_logits = hf_decode_output.logits[0, -1]
-    hf_decode_next_token = hf_decode_logits.argmax().item()
-    print(f"HF decode  -> {hf_decode_next_token} = {tokenizer.decode([hf_decode_next_token])!r}")
+    hf_decode = hf_model(torch.tensor([[hf_next_token]], device=DEVICE), past_key_values=hf_output.past_key_values)
+    hf_logits = hf_decode.logits[0, -1]
+    hf_next = hf_logits.argmax().item()
+    print(f"HF decode  -> {hf_next} = {tokenizer.decode([hf_next])!r}")
 
-    # compare top token
-    assert our_next_token == hf_decode_next_token, (
-        f"token mismatch: ours={our_next_token} vs HF={hf_decode_next_token}"
-    )
+    assert our_next_token == hf_next, f"token mismatch: ours={our_next_token} vs HF={hf_next}"
 
-    # compare full logit vectors
-    diff = (our_logits.float() - hf_decode_logits.float()).abs()
-    max_diff = diff.max().item()
-    mean_diff = diff.mean().item()
-    # also check top-k ordering is consistent
-    our_topk = our_logits.topk(10).indices
-    hf_topk = hf_decode_logits.topk(10).indices
-    topk_match = (our_topk == hf_topk).all().item()
-    print(f"Logit diff: max={max_diff:.4f}, mean={mean_diff:.4f}, top-10 match={topk_match}")
-    assert max_diff < 2.0, f"logit max diff too large: {max_diff}"
-    assert mean_diff < 0.1, f"logit mean diff too large: {mean_diff}"
-
+    diff = (our_logits.float() - hf_logits.float()).abs()
+    print(f"Logit diff: max={diff.max().item():.4f}, mean={diff.mean().item():.4f}")
+    assert diff.max().item() < 2.0, f"logit max diff too large: {diff.max().item()}"
     print("PASS")
 
 

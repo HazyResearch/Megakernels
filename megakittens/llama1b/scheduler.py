@@ -7,8 +7,12 @@ matching the megakittens Instruction/InstructionMeta format.
 
 from __future__ import annotations
 
+from ..itypes.attention_partial import AttentionPartial
 from ..itypes.noop import Noop
 from ..itypes.proj_residual import ProjResidual
+from ..itypes.rms_lm_head import RmsLmHead
+from ..itypes.rms_qkv_rope_append import RmsQkvRopeAppend
+from ..itypes.rms_upgate_silu import RmsUpgateSilu
 from ..schema.device import Device
 from ..schema.dtype import DType
 from ..schema.instruction import Instruction, InstructionMeta
@@ -342,15 +346,34 @@ def schedule_decode(
 
     # Instruction metas (drive JIT codegen)
     _proj_residual_itype = ProjResidual()
+    _attention_partial_itype = AttentionPartial()
+    _rms_qkv_itype = RmsQkvRopeAppend(n=HIDDEN_DIM)
+    _rms_upgate_silu_itype = RmsUpgateSilu(n=HIDDEN_DIM)
+    _rms_lm_head_itype = RmsLmHead(n=HIDDEN_DIM)
     instruction_metas = [
         _noop_inst_meta,
-        # TODO: add QKV, attention, upgate, lm_head InstructionMeta entries
+        InstructionMeta(icode=ICODE_QKV, itype=_rms_qkv_itype,
+                        src_tensors=(T.HIDDEN_STATES, T.ATTN_NORM_WEIGHTS,
+                                     T.QKV_WEIGHTS, T.ROPE_COS, T.ROPE_SIN,
+                                     T.K_CACHE, T.V_CACHE),
+                        dst_tensors=(T.Q_POST_ROPE,)),
+        InstructionMeta(icode=ICODE_ATTENTION, itype=_attention_partial_itype,
+                        src_tensors=(T.Q_POST_ROPE, T.K_CACHE, T.V_CACHE),
+                        dst_tensors=(T.ATTN_OUT,)),
         InstructionMeta(icode=ICODE_O_PROJ, itype=_proj_residual_itype,
                         src_tensors=(T.ATTN_OUT, T.O_WEIGHTS),
                         dst_tensors=(T.HIDDEN_STATES,)),
+        InstructionMeta(icode=ICODE_UPGATE, itype=_rms_upgate_silu_itype,
+                        src_tensors=(T.HIDDEN_STATES, T.MLP_NORM_WEIGHTS,
+                                     T.UP_WEIGHTS, T.GATE_WEIGHTS),
+                        dst_tensors=(T.SILU_OUT,)),
         InstructionMeta(icode=ICODE_DOWNPROJ, itype=_proj_residual_itype,
                         src_tensors=(T.SILU_OUT, T.DOWN_WEIGHTS),
                         dst_tensors=(T.HIDDEN_STATES,)),
+        InstructionMeta(icode=ICODE_LM_HEAD, itype=_rms_lm_head_itype,
+                        src_tensors=(T.HIDDEN_STATES, T.LM_HEAD_NORM_WEIGHT,
+                                     T.LM_HEAD_WEIGHT),
+                        dst_tensors=(T.LOGITS,)),
     ]
 
     instructions: list[Instruction] = []

@@ -34,7 +34,6 @@ struct ProjResidual {
     struct loader {
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
             if (kittens::warp::elect_leader()) {
-                all_input_barrier_wait<Config>(g, s.instruction());
                 for (int i = 0; i < Config::NUM_PAGES; i++) {
                     int pid = s.lid_to_pid(i);
                     s.page_wait(pid);
@@ -60,6 +59,10 @@ struct ProjResidual {
         }
 
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
+            if (kittens::group<Config::NUM_CONSUMER_WARPS>::elect_leader())
+                all_input_barrier_wait<Config>(g, s.instruction());
+            kittens::group<Config::NUM_CONSUMER_WARPS>::sync(4);
+
             const auto &inst = s.instruction();
             const int layer_idx   = inst.indices[0];
             const int start_block = inst.indices[1];

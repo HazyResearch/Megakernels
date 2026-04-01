@@ -21,7 +21,6 @@ LLAMA1B_SCALARS = [
 
 
 def _allocate_tensors(tensor_metas):
-    """Allocate all tensors from schedule metadata."""
     return [
         torch.zeros(meta.shape, dtype=meta.dtype.torch_dtype, device=str(meta.device))
         for meta in tensor_metas

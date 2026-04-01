@@ -13,8 +13,8 @@ from megakittens.dispatcher import Dispatcher, ScalarField
 from megakittens.schema.device import Device
 from megakittens.schema.dtype import DType
 from megakittens.schema.instruction import Instruction, InstructionMeta
-from megakittens.schema.itype import IType
-from megakittens.schema.tensor import TensorMeta, TensorSpec
+from megakittens.schema.tensor import TensorMeta
+from megakittens.itypes.attention_partial import AttentionPartial
 from megakittens.itypes.noop import Noop
 
 initialize_cuda_context()
@@ -27,27 +27,6 @@ HEAD_DIM = 64
 GQA_RATIO = NUM_ATTENTION_HEADS // NUM_KV_HEADS  # 4
 DEVICE = "cuda"
 DTYPE = torch.bfloat16
-
-
-class AttentionPartialIType(IType):
-    @property
-    def name(self): return "attention_partial"
-    @property
-    def cpp_template(self): return "AttentionPartial<MKConfig, MKGlobals, {tensors}>"
-    @property
-    def cpp_include(self): return "itypes/attention_partial.cuh"
-    @property
-    def op_type(self): return "attention_partial"
-    @property
-    def inputs(self): return [
-        TensorSpec(dtype=DType.bf16, granularity=(1,)),          # q_post_rope
-        TensorSpec(dtype=DType.bf16, granularity=(1, 1, 1, 1)),  # k_cache
-        TensorSpec(dtype=DType.bf16, granularity=(1, 1, 1, 1)),  # v_cache
-    ]
-    @property
-    def outputs(self): return [TensorSpec(dtype=DType.bf16, granularity=(1,))]
-    def block_indices(self, src_metas, dst_metas): return [()]
-    def validate(self, src_metas, dst_metas): pass
 
 
 # Tensor indices
@@ -102,7 +81,7 @@ def test_attention_partial():
     ]
 
     noop_itype = Noop()
-    attn_itype = AttentionPartialIType()
+    attn_itype = AttentionPartial()
 
     instruction_metas = [
         InstructionMeta(icode=0, itype=noop_itype, src_tensors=(), dst_tensors=()),
