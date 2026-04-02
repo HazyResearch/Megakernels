@@ -348,7 +348,7 @@ def schedule_decode(
     # Instruction metas (drive JIT codegen)
     _matvec_adds_itype = MatVecAdds(n=HIDDEN_DIM)
     _attention_partial_itype = AttentionPartial()
-    _rms_qkv_itype = RmsQkvRopeAppend(n=HIDDEN_DIM)
+    _rms_qkv_itype = RmsQkvRopeAppend(n=HIDDEN_DIM, head_dim=HEAD_DIM, num_kv_heads=NUM_KV_HEADS)
     _rms_upgate_silu_itype = RmsUpgateSilu(n=HIDDEN_DIM)
     _rms_lm_head_itype = RmsLmHead(n=HIDDEN_DIM)
     instruction_metas = [

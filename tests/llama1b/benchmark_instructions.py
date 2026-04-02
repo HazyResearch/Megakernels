@@ -165,7 +165,7 @@ def _pt_rms_lm_head(x, norm_weight, lm_head_weight):
 # Each returns (name, mk_fn, pt_fn, roofline_bytes).
 
 def _setup_rms_qkv_rope_append(sm_count):
-    itype = RmsQkvRopeAppend(n=HIDDEN_DIM)
+    itype = RmsQkvRopeAppend(n=HIDDEN_DIM, head_dim=HEAD_DIM, num_kv_heads=NUM_KV_HEADS)
     src, dst = (0, 1, 2, 3, 4, 5, 6), (7,)
     inst_meta = InstructionMeta(icode=1, itype=itype, src_tensors=src, dst_tensors=dst)
 
