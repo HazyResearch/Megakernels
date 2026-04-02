@@ -92,7 +92,7 @@ struct RmsUpgateSilu {
 
             if (kittens::warp::elect_leader()) {
                 kittens::tma::store_async<kittens::cache_policy::EVICT_LAST>(
-                    g.template gls<DST>(), out_smem, {block_idx});
+                    g.template gls<DST>(), out_smem, {0, block_idx});
                 kittens::tma::store_async_read_wait();
                 // TODO: reference does store_async_wait() (full, not read) here
                 // followed by per-block atomicAdd barrier signaling, allowing
@@ -121,7 +121,8 @@ struct RmsUpgateSilu {
 
     struct loader {
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
-            pipeline::loader_loop(s, g);
+            parsed_instruction inst{s};
+            pipeline::loader_loop(s, g, inst.layer_idx);
         }
     };
 
@@ -143,8 +144,10 @@ struct RmsUpgateSilu {
             pipeline::template storer_loop<2>(s, g);
             // storer_loop already called store_async_wait + page_finish.
             // Now signal downstream ops that our global writes are visible.
-            if (kittens::warp::elect_leader())
+            if (kittens::warp::elect_leader()) {
+                __threadfence();
                 all_barrier_arrive<Config>(g, s.instruction());
+            }
         }
     };
 };

@@ -172,7 +172,8 @@ struct RmsQkvRopeAppend {
                 kittens::arrive(rope_arrived(s));
             }
 
-            pipeline::loader_loop(s, g);
+            parsed_instruction inst{s.instruction()};
+            pipeline::loader_loop(s, g, inst.layer_idx);
         }
     };
 
@@ -194,8 +195,10 @@ struct RmsQkvRopeAppend {
             pipeline::storer_loop(s, g);
             // storer_loop already called store_async_wait + page_finish.
             // Now signal downstream ops that our global writes are visible.
-            if (kittens::warp::elect_leader())
+            if (kittens::warp::elect_leader()) {
+                __threadfence();
                 all_barrier_arrive<Config>(g, s.instruction());
+            }
         }
     };
 };

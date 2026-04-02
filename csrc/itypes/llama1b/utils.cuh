@@ -5,10 +5,6 @@
 namespace megakittens {
 namespace llama1b {
 
-// ── RMSNorm ────────────────────────────────────────────────────────────────────
-// Normalize activations in-register, multiply by learned scale.
-// Each consumer warp owns N/NUM_CONSUMER_WARPS elements.
-// scratch_memory: NUM_CONSUMER_WARPS * sizeof(float) bytes for cross-warp reduction.
 template <typename Config, int N>
 __device__ static inline auto
 rms_norm(const kittens::sv_bf<N / Config::NUM_CONSUMER_WARPS> &rms_scale_smem,
@@ -45,9 +41,6 @@ rms_norm(const kittens::sv_bf<N / Config::NUM_CONSUMER_WARPS> &rms_scale_smem,
     return activations_vec;
 }
 
-// ── MatVec ─────────────────────────────────────────────────────────────────────
-// Per-warp partial dot product: out[row] = sum_col(weights[row, col] * activations[col])
-// Result written to sv_fl<rows> in shared memory (one float per output row).
 #ifdef KITTENS_BLACKWELL
 template <kittens::ducks::st::all st_t>
 __device__ static inline void matvec(kittens::sv_fl<st_t::rows> &out_smem,
@@ -111,9 +104,6 @@ __device__ static inline void matvec(kittens::sv_fl<st_t::rows> &out_smem,
 }
 #endif
 
-// ── MatVec reduce ──────────────────────────────────────────────────────────────
-// Sum partial dot products from all consumer warps.
-// Each warp wrote sv_fl<16> at scratch + warpid * SCRATCH_BYTES_PER_WARP.
 template <typename Config, int SCRATCH_BYTES_PER_WARP>
 __device__ static inline void matvec_reduce(uint8_t *scratch, kittens::rv_fl<16> &sum_vec) {
     using sv_t = kittens::sv_fl<16>;

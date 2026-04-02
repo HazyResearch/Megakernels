@@ -43,7 +43,7 @@ template <typename Config, typename Globals> struct rms_lm_head {
             auto block_idx = inst.start_block_idx + iter;
             kittens::tma::load_async<dim::ROW, cache_policy::EVICT_FIRST>(
                 weight_chunk, g.lm_head_weights, {block_idx, col_idx}, sem);
-        }
+        
 
         static __device__ inline void store(megakernel::state<Config> &s, const Globals &g,
                                             parsed_instruction &inst,

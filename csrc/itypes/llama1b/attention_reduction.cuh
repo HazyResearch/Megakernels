@@ -293,8 +293,10 @@ struct AttentionReduction {
                 s.page_finish(data_pid(s));
 
             // Signal downstream
-            if (kittens::warp::elect_leader())
+            if (kittens::warp::elect_leader()) {
+                __threadfence();
                 all_barrier_arrive<Config>(g, s.instruction());
+            }
         }
     };
 };

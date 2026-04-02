@@ -39,14 +39,14 @@ class AttentionPartial(IType):
         return [
             # SRC_Q: q_post_rope — loaded via cp.async (raw_ptr) in consumer
             TensorSpec(dtype=DType.bf16, granularity=(1,)),
-            # SRC_K_CACHE: k_cache — TMA tile loads (st<kv_block, head_dim>, axis=1 for depth)
+            # SRC_K_CACHE: k_cache — TMA tile loads
             TensorSpec(dtype=DType.bf16, granularity=(1, 1, 1, 1),
                        tma_types=[
                            sv(dtype=DType.bf16, length=self._kv_block_size),
                            st(dtype=DType.bf16, rows=self._kv_block_size,
                               cols=self._head_dim, axis=1),
                        ]),
-            # SRC_V_CACHE: v_cache — same TMA types as k_cache
+            # SRC_V_CACHE: v_cache
             TensorSpec(dtype=DType.bf16, granularity=(1, 1, 1, 1),
                        tma_types=[
                            sv(dtype=DType.bf16, length=self._kv_block_size),
@@ -58,7 +58,7 @@ class AttentionPartial(IType):
     @property
     def outputs(self):
         return [
-            # DST: attn_out — TMA sv store (head_dim-element chunks)
+            # DST: attn_out — TMA sv store
             TensorSpec(dtype=DType.bf16, granularity=(1,),
                        tma_types=[sv(dtype=DType.bf16, length=self._head_dim)]),
         ]

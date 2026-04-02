@@ -90,29 +90,34 @@ struct AttentionPartial {
             reinterpret_cast<char *>(s.pages[kv_pid(s)].ptr(sizeof(kv_st) * (1 + stage * 2))));
     }
 
-    // ── Q loading (cp.async, only 4 rows needed) ────────────────────
+    // ── Q loading (simple global→shared, 4 rows) ────────────────────
     __device__ static inline void
-    load_Q_async(q_st &dst, const Globals &g, int q_head_start_idx) {
-        static_assert(HEAD_DIM == 64 && GQA_RATIO == 4, "Fix this function.");
-        constexpr int elem_per_memcpy = sizeof(float4) / sizeof(kittens::bf16); // 8
-        constexpr int memcpy_per_row = HEAD_DIM / elem_per_memcpy;              // 8
-
-        // Read raw_ptr from consumer warp (not loader — loader can't read raw_ptr)
-        auto *src_ptr = reinterpret_cast<kittens::bf16 *>(
+    load_Q_simple(q_st &dst, const Globals &g, int q_head_start_idx) {
+        // Load 4 Q head vectors (4 × 64 = 256 bf16 elements) into the st tile.
+        // Use direct shared memory writes to avoid cp.async swizzle issues.
+        const kittens::bf16 *src = reinterpret_cast<const kittens::bf16 *>(
             g.template gls<SRC_Q>().raw_ptr) + q_head_start_idx * HEAD_DIM;
-        uint32_t dst_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(
-            &dst.data[(q_head_start_idx % 16) * HEAD_DIM]));
+        int local_row_start = q_head_start_idx % 16;
 
+        // 32 lanes × 8 elements = 256 elements = 4 rows × 64 cols
         int laneid = kittens::laneid();
-        int row = laneid / memcpy_per_row;
-        int col = (laneid * elem_per_memcpy) % HEAD_DIM;
+        int row = laneid / (HEAD_DIM / 8);  // 8 lanes per row
+        int col_base = (laneid % (HEAD_DIM / 8)) * 8;
 
-        asm volatile(
-            "cp.async.cg.shared.global.L2::128B [%0], [%1], 16;\n"
-            ::"r"(dst.idx(dst_ptr, {row, col})),
-              "l"(&src_ptr[row * HEAD_DIM + col])
-            : "memory");
-        asm volatile("cp.async.commit_group;\n" ::: "memory");
+        // Write directly to the st's data array at the swizzled positions
+        #pragma unroll
+        for (int c = 0; c < 8; c++) {
+            int global_col = col_base + c;
+            if (global_col < HEAD_DIM && row < GQA_RATIO) {
+                int src_idx = row * HEAD_DIM + global_col;
+                // Use st's idx function for correct swizzle
+                uint32_t base = static_cast<uint32_t>(__cvta_generic_to_shared(&dst));
+                uint32_t addr = dst.idx(base, {local_row_start + row, global_col});
+                kittens::bf16 val = src[src_idx];
+                asm volatile("st.shared.b16 [%0], %1;" :: "r"(addr), "h"(*(uint16_t*)&val) : "memory");
+            }
+        }
+        __syncwarp();
     }
 
     // ── store_4_rows: extract 4 rows from a 16-row register tile ────
@@ -307,11 +312,10 @@ struct AttentionPartial {
             o_sv (&O_smem)[4] = get_O_smem(s);
             l_sv &L_smem = get_L_smem(s);
 
-            // Load Q via cp.async into QOL page
+            // Load Q via cp.async into QOL page (reference-faithful)
             s.page_wait(qol_pid(s));
             q_st &Q_smem = get_Q_smem(s);
-            load_Q_async(Q_smem, g, q_head_start_idx);
-            kittens::warp::load_async_wait();
+            load_Q_simple(Q_smem, g, q_head_start_idx);
             kittens::warp::load(Q_reg, Q_smem);
 
             // Attention loop
@@ -417,7 +421,7 @@ struct AttentionPartial {
                     auto &smem_bf = *reinterpret_cast<o_sv_bf *>(&O_smem[head_offset]);
                     kittens::tma::store_async<kittens::cache_policy::EVICT_LAST>(
                         g.template gls<DST>(), smem_bf,
-                        {q_head_start_idx + head_offset});
+                        {0, q_head_start_idx + head_offset});
                 }
             }
 
@@ -428,8 +432,10 @@ struct AttentionPartial {
                 s.page_finish(qol_pid(s));
 
             // Signal downstream
-            if (kittens::warp::elect_leader())
+            if (kittens::warp::elect_leader()) {
+                __threadfence();
                 all_barrier_arrive<Config>(g, s.instruction());
+            }
         }
     };
 };

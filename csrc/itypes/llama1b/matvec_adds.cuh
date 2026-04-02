@@ -58,7 +58,7 @@ struct MatVecAdds {
             kittens::warp::sync();
 
             if (kittens::warp::elect_leader()) {
-                kittens::tma::store_add_async<kittens::cache_policy::EVICT_LAST>(g.template gls<DST>(), output_smem_bf, {block_idx});
+                kittens::tma::store_add_async<kittens::cache_policy::EVICT_LAST>(g.template gls<DST>(), output_smem_bf, {0, block_idx});
                 kittens::tma::store_async_read_wait();
             }
             kittens::warp::sync();
@@ -108,11 +108,19 @@ struct MatVecAdds {
             kittens::group<Config::NUM_CONSUMER_WARPS>::sync(4);
 
             // Each warp loads its slice of the input vector from global memory
+            // NOTE: Must use raw_ptr arithmetic, NOT warp::load(sv, gl, coord),
+            // because JIT gl has runtime dims and the coord {element_offset} would
+            // be misinterpreted as a batch index instead of an element offset.
             sv_t &activations_smem = reinterpret_cast<sv_t *>(
                 &pipeline::get_activations(s))[kittens::warpid()];
-            kittens::warp::load(activations_smem, g.template gls<SRC0>(),
-                kittens::coord<>{inst.reduction_col_offset +
-                                 kittens::warpid() * ELEMS_PER_WARP});
+            {
+                const kittens::bf16 *src = reinterpret_cast<const kittens::bf16 *>(
+                    g.template gls<SRC0>().raw_ptr)
+                    + inst.reduction_col_offset + kittens::warpid() * ELEMS_PER_WARP;
+                #pragma unroll
+                for (int i = kittens::laneid(); i < ELEMS_PER_WARP; i += kittens::WARP_THREADS)
+                    activations_smem.data[i] = src[i];
+            }
             kittens::warp::sync();
 
             // Shared memory -> registers
@@ -130,8 +138,10 @@ struct MatVecAdds {
             pipeline::storer_loop(s, g);
             // storer_loop already called store_async_wait + page_finish.
             // Now signal downstream ops that our global writes are visible.
-            if (kittens::warp::elect_leader())
+            if (kittens::warp::elect_leader()) {
+                __threadfence();
                 all_barrier_arrive<Config>(g, s.instruction());
+            }
         }
     };
 };

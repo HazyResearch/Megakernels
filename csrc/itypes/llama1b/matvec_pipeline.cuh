@@ -272,7 +272,7 @@ struct rms_matvec_pipeline
         return SEM_COUNT;
     }
 
-    __device__ static inline void loader_loop(state_t<Config> &s, const Globals &g) {
+    __device__ static inline void loader_loop(state_t<Config> &s, const Globals &g, int norm_layer_idx = 0) {
         if (kittens::laneid() == 0) {
             s.page_wait(pipeline::get_activation_page(s));
 
@@ -289,7 +289,7 @@ struct rms_matvec_pipeline
 
             auto &rms_sem = rms_scale_arrived(s);
             kittens::tma::expect_bytes(rms_sem, sizeof(rms_scale));
-            kittens::tma::load_async<kittens::cache_policy::EVICT_LAST>(rms_scale, g.template gls<SRC_NORM>(), {0, 0}, rms_sem);
+            kittens::tma::load_async<kittens::cache_policy::EVICT_LAST>(rms_scale, g.template gls<SRC_NORM>(), {0, 0, norm_layer_idx, 0}, rms_sem);
         }
         pipeline::loader_loop(s, g);
     }
