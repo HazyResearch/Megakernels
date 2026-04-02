@@ -1,6 +1,10 @@
 """
-Test proj_residual instruction in isolation for both o_proj and down_proj.
+Test pipelined proj_residual instruction for both o_proj and down_proj.
 Computes hidden_states += weights @ input and checks against PyTorch.
+
+For o_proj (2048x2048): one instruction per output block, full reduction.
+For down_proj (2048x8192): reduction split into 4 chunks of N=2048 each,
+    with store_add_async accumulating partial results.
 """
 
 import torch
@@ -20,10 +24,11 @@ HIDDEN_DIM = 2048
 INTERMEDIATE_DIM = 8192
 NUM_LAYERS = 16
 BLOCK_SIZE = 16
+N = 2048  # pipeline reduction capacity
 DEVICE = "cuda"
 DTYPE = torch.bfloat16
+CLUSTER_SIZE = 2
 
-# Tensor indices
 T_INPUT = 0
 T_WEIGHTS = 1
 T_HIDDEN_STATES = 2
@@ -35,10 +40,10 @@ SCALARS = [
 ]
 
 
-def _run_proj_residual(input_vec, weights, hidden_states, layer_idx, output_dim, atol):
-    """Run ProjResidual kernel and compare against PyTorch reference."""
+def _run_proj_residual(input_vec, weights, hidden_states, layer_idx, output_dim,
+                       reduction_dim, atol):
+    """Run pipelined ProjResidual kernel and compare against PyTorch reference."""
     device = Device(type="cuda", index=0)
-    reduction_dim = input_vec.shape[0]
 
     expected = hidden_states.clone() + weights[layer_idx] @ input_vec
 
@@ -49,7 +54,7 @@ def _run_proj_residual(input_vec, weights, hidden_states, layer_idx, output_dim,
     ]
 
     noop_itype = Noop()
-    proj_itype = ProjResidual()
+    proj_itype = ProjResidual(n=N)
 
     instruction_metas = [
         InstructionMeta(icode=0, itype=noop_itype, src_tensors=(), dst_tensors=()),
@@ -66,22 +71,26 @@ def _run_proj_residual(input_vec, weights, hidden_states, layer_idx, output_dim,
     )
 
     num_blocks = output_dim // BLOCK_SIZE
-    instructions = []
-    for block in range(num_blocks):
-        instructions.append(Instruction(
-            icode=1,
-            src_tensors=(T_INPUT, T_WEIGHTS),
-            dst_tensors=(T_HIDDEN_STATES,),
-            indices=(layer_idx, block, block + 1),
-            src_barriers=(),
-            src_barrier_targets=(),
-            num_input_barriers=0,
-            num_reuse_barriers=0,
-            num_dst_barriers=0,
-            dst_barriers=(),
-        ))
+    num_chunks = reduction_dim // N  # 1 for o_proj, 4 for down_proj
 
-    while len(instructions) % 2 != 0:
+    instructions = []
+    for chunk in range(num_chunks):
+        reduction_col_offset = chunk * N
+        for block in range(num_blocks):
+            instructions.append(Instruction(
+                icode=1,
+                src_tensors=(T_INPUT, T_WEIGHTS),
+                dst_tensors=(T_HIDDEN_STATES,),
+                indices=(layer_idx, block, block + 1, reduction_col_offset),
+                src_barriers=(),
+                src_barrier_targets=(),
+                num_input_barriers=0,
+                num_reuse_barriers=0,
+                num_dst_barriers=0,
+                dst_barriers=(),
+            ))
+
+    while len(instructions) % CLUSTER_SIZE != 0:
         instructions.append(noop)
 
     dispatcher = Dispatcher(
@@ -96,7 +105,6 @@ def _run_proj_residual(input_vec, weights, hidden_states, layer_idx, output_dim,
     result = dispatcher(input_vec, weights, hidden_states, 0, 0.125, 1e-5)
     torch.cuda.synchronize()
 
-    # Verify in-place: result IS the hidden_states tensor
     assert result.data_ptr() == hidden_states.data_ptr(), "result is not in-place"
 
     diff = (result.float() - expected.float()).abs()
@@ -115,7 +123,8 @@ def test_o_proj_residual():
     hidden_states = torch.randn(HIDDEN_DIM, dtype=DTYPE, device=DEVICE)
 
     max_diff, mean_diff, atol = _run_proj_residual(
-        attn_out, o_weights, hidden_states, layer_idx, HIDDEN_DIM, atol=2.0,
+        attn_out, o_weights, hidden_states, layer_idx,
+        output_dim=HIDDEN_DIM, reduction_dim=HIDDEN_DIM, atol=2.0,
     )
     print(f"o_proj: max_diff={max_diff:.6f}, mean_diff={mean_diff:.6f}")
     assert max_diff < atol, f"o_proj failed: max_diff={max_diff}"
@@ -123,7 +132,8 @@ def test_o_proj_residual():
 
 
 def test_down_proj_residual():
-    """down_proj: hidden_states += down_weights[layer] @ silu_out  (2048x8192 @ 8192)"""
+    """down_proj: hidden_states += down_weights[layer] @ silu_out  (2048x8192 @ 8192)
+    Reduction split into 4 chunks of 2048."""
     torch.manual_seed(42)
     layer_idx = 5
 
@@ -132,7 +142,8 @@ def test_down_proj_residual():
     hidden_states = torch.randn(HIDDEN_DIM, dtype=DTYPE, device=DEVICE)
 
     max_diff, mean_diff, atol = _run_proj_residual(
-        silu_out, down_weights, hidden_states, layer_idx, HIDDEN_DIM, atol=4.0,
+        silu_out, down_weights, hidden_states, layer_idx,
+        output_dim=HIDDEN_DIM, reduction_dim=INTERMEDIATE_DIM, atol=4.0,
     )
     print(f"down_proj: max_diff={max_diff:.6f}, mean_diff={mean_diff:.6f}")
     assert max_diff < atol, f"down_proj failed: max_diff={max_diff}"
@@ -141,3 +152,4 @@ def test_down_proj_residual():
 
 if __name__ == "__main__":
     test_o_proj_residual()
+    test_down_proj_residual()

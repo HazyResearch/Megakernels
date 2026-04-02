@@ -17,16 +17,16 @@ struct matvec_pipeline {
     static constexpr int ACTIVATION_PAGE = 0;
     static constexpr int WEIGHTS_START_PAGE = 1;
 
-    static constexpr int MATVEC_BLOCK_SIZE      = 16;
-    static constexpr int TILES_PER_PAGE         = Config::NUM_CONSUMER_WARPS / STAGE_PAGES; // 4
-    static constexpr int TILES_PER_STAGE        = STAGE_PAGES * TILES_PER_PAGE;             // 8
+    static constexpr int MATVEC_BLOCK_SIZE = 16;
+    static constexpr int TILES_PER_PAGE = Config::NUM_CONSUMER_WARPS / STAGE_PAGES; // 4
+    static constexpr int TILES_PER_STAGE = STAGE_PAGES * TILES_PER_PAGE;             // 8
 
     static constexpr int REDUCTION_DIM_PER_WARP = N / Config::NUM_CONSUMER_WARPS;
-    static constexpr int WARPS_PER_PAGE         = Config::NUM_CONSUMER_WARPS / STAGE_PAGES;
+    static constexpr int WARPS_PER_PAGE = Config::NUM_CONSUMER_WARPS / STAGE_PAGES;
 
     static constexpr int SEM_COUNT = 1 + (INPUT_PIPELINE_STAGES + OUTPUT_PIPELINE_STAGES) * 2;
 
-    static constexpr int SCRATCH_BYTES_PER_WARP  = MATVEC_BLOCK_SIZE * sizeof(float);
+    static constexpr int SCRATCH_BYTES_PER_WARP = MATVEC_BLOCK_SIZE * sizeof(float);
     static constexpr int SCRATCH_BYTES_PER_STAGE = SCRATCH_BYTES_PER_WARP * Config::NUM_CONSUMER_WARPS;
 
     // offsets on activation page
@@ -73,12 +73,14 @@ struct matvec_pipeline {
         int remainder = inst.iters % INPUT_PIPELINE_STAGES;
 
         if (inst.iters == 1) {
+            // unused pages first
             constexpr int order[] = {3, 4, 5, 6, 1, 2};
             return order[query];
         } else if (inst.iters == 2) {
             constexpr int order[] = {5, 6, 1, 2, 3, 4};
             return order[query];
         } else if (remainder == 1) {
+            // 3 and 4 finish first.
             constexpr int order[] = {3, 4, 5, 6, 1, 2};
             return order[query];
         } else if (remainder == 2) {

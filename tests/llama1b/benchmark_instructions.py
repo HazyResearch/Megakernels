@@ -267,7 +267,7 @@ def _setup_attention_partial(sm_count):
 
 
 def _setup_o_proj_residual(sm_count):
-    itype = ProjResidual()
+    itype = ProjResidual(n=HIDDEN_DIM)
     src, dst = (0, 1), (2,)
     inst_meta = InstructionMeta(icode=1, itype=itype, src_tensors=src, dst_tensors=dst)
 
@@ -282,7 +282,7 @@ def _setup_o_proj_residual(sm_count):
     instructions = []
     for b in range(num_blocks):
         instructions.append(Instruction(
-            icode=1, src_tensors=src, dst_tensors=dst, indices=(layer_idx, b, b + 1),
+            icode=1, src_tensors=src, dst_tensors=dst, indices=(layer_idx, b, b + 1, 0),
             src_barriers=(), src_barrier_targets=(),
             num_input_barriers=0, num_reuse_barriers=0, num_dst_barriers=0,
             dst_barriers=(),
@@ -358,7 +358,9 @@ def _setup_rms_upgate_silu(sm_count):
 
 
 def _setup_down_proj_residual(sm_count):
-    itype = ProjResidual()
+    N = HIDDEN_DIM  # pipeline reduction capacity
+    num_chunks = INTERMEDIATE_DIM // N  # 4
+    itype = ProjResidual(n=N)
     src, dst = (0, 1), (2,)
     inst_meta = InstructionMeta(icode=1, itype=itype, src_tensors=src, dst_tensors=dst)
 
@@ -371,15 +373,18 @@ def _setup_down_proj_residual(sm_count):
     layer_idx = 0
     num_blocks = HIDDEN_DIM // BLOCK_SIZE
     instructions = []
-    for sm in range(sm_count):
-        s = round(sm * num_blocks / sm_count)
-        e = round((sm + 1) * num_blocks / sm_count)
-        instructions.append(Instruction(
-            icode=1, src_tensors=src, dst_tensors=dst, indices=(layer_idx, s, e),
-            src_barriers=(), src_barrier_targets=(),
-            num_input_barriers=0, num_reuse_barriers=0, num_dst_barriers=0,
-            dst_barriers=(),
-        ))
+    for chunk in range(num_chunks):
+        reduction_col_offset = chunk * N
+        for sm in range(sm_count):
+            s = round(sm * num_blocks / sm_count)
+            e = round((sm + 1) * num_blocks / sm_count)
+            instructions.append(Instruction(
+                icode=1, src_tensors=src, dst_tensors=dst,
+                indices=(layer_idx, s, e, reduction_col_offset),
+                src_barriers=(), src_barrier_targets=(),
+                num_input_barriers=0, num_reuse_barriers=0, num_dst_barriers=0,
+                dst_barriers=(),
+            ))
 
     dispatcher = _make_dispatcher(inst_meta, tensor_metas, instructions,
                                   input_indices=(0, 1, 2),

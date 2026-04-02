@@ -204,7 +204,7 @@ def _schedule_o_proj(
             icode=icode,
             src_tensors=(T.ATTN_OUT, T.O_WEIGHTS),
             dst_tensors=(T.HIDDEN_STATES,),
-            indices=(layer_idx, sm, sm + 1),
+            indices=(layer_idx, sm, sm + 1, 0),
             src_barriers=(prev_barrier,),
             src_barrier_targets=(prev_barrier_target,),
             num_input_barriers=1,
@@ -254,22 +254,25 @@ def _schedule_downproj(
     dst_barrier: int,
 ) -> list[Instruction]:
     num_blocks = HIDDEN_DIM // MATVEC_BLOCK_SIZE  # 128
+    num_chunks = INTERMEDIATE_DIM // HIDDEN_DIM   # 4 reduction chunks
     instructions = []
-    for sm in range(sm_count):
-        start = round(sm * num_blocks / sm_count)
-        end = round((sm + 1) * num_blocks / sm_count)
-        instructions.append(Instruction(
-            icode=icode,
-            src_tensors=(T.SILU_OUT, T.DOWN_WEIGHTS),
-            dst_tensors=(T.HIDDEN_STATES,),
-            indices=(layer_idx, start, end),
-            src_barriers=(prev_barrier,),
-            src_barrier_targets=(prev_barrier_target,),
-            num_input_barriers=1,
-            num_reuse_barriers=0,
-            num_dst_barriers=1,
-            dst_barriers=(dst_barrier,),
-        ))
+    for chunk in range(num_chunks):
+        reduction_col_offset = chunk * HIDDEN_DIM
+        for sm in range(sm_count):
+            start = round(sm * num_blocks / sm_count)
+            end = round((sm + 1) * num_blocks / sm_count)
+            instructions.append(Instruction(
+                icode=icode,
+                src_tensors=(T.SILU_OUT, T.DOWN_WEIGHTS),
+                dst_tensors=(T.HIDDEN_STATES,),
+                indices=(layer_idx, start, end, reduction_col_offset),
+                src_barriers=(prev_barrier,),
+                src_barrier_targets=(prev_barrier_target,),
+                num_input_barriers=1,
+                num_reuse_barriers=0,
+                num_dst_barriers=1,
+                dst_barriers=(dst_barrier,),
+            ))
     _pad_to_cluster(instructions)
     return instructions
 
@@ -345,7 +348,7 @@ def schedule_decode(
     icode_lmhead = 0 if noop else ICODE_LM_HEAD
 
     # Instruction metas (drive JIT codegen)
-    _proj_residual_itype = ProjResidual()
+    _proj_residual_itype = ProjResidual(n=HIDDEN_DIM)
     _attention_partial_itype = AttentionPartial()
     _rms_qkv_itype = RmsQkvRopeAppend(n=HIDDEN_DIM)
     _rms_upgate_silu_itype = RmsUpgateSilu(n=HIDDEN_DIM)
