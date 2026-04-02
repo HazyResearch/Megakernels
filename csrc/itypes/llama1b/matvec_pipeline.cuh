@@ -285,11 +285,11 @@ struct rms_matvec_pipeline
 
             auto &act_sem = pipeline::activations_arrived(s);
             kittens::tma::expect_bytes(act_sem, sizeof(activations));
-            kittens::tma::load_async(activations, g.template gls<SRC_ACT>(), {0, 0}, act_sem);
+            kittens::tma::load_async<kittens::cache_policy::EVICT_LAST>(activations, g.template gls<SRC_ACT>(), {0, 0}, act_sem);
 
             auto &rms_sem = rms_scale_arrived(s);
             kittens::tma::expect_bytes(rms_sem, sizeof(rms_scale));
-            kittens::tma::load_async(rms_scale, g.template gls<SRC_NORM>(), {0, 0}, rms_sem);
+            kittens::tma::load_async<kittens::cache_policy::EVICT_LAST>(rms_scale, g.template gls<SRC_NORM>(), {0, 0}, rms_sem);
         }
         pipeline::loader_loop(s, g);
     }

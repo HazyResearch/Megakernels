@@ -32,7 +32,8 @@ struct RmsLmHead {
                   kittens::st_bf<16, 512> &weight_chunk,
                   kittens::semaphore &sem) {
             int block_idx = inst.start_block_idx + iter;
-            kittens::tma::load_async(weight_chunk, g.template gls<SRC2>(),
+            kittens::tma::load_async<kittens::dim::ROW, kittens::cache_policy::EVICT_FIRST>(
+                                     weight_chunk, g.template gls<SRC2>(),
                                      {block_idx, col_idx}, sem);
         }
 
@@ -56,7 +57,7 @@ struct RmsLmHead {
             kittens::warp::sync();
 
             if (kittens::warp::elect_leader()) {
-                kittens::tma::store_async(g.template gls<DST>(), logits_smem, {0, block_idx});
+                kittens::tma::store_async<kittens::cache_policy::EVICT_LAST>(g.template gls<DST>(), logits_smem, {0, block_idx});
                 kittens::tma::store_async_read_wait();
             }
             kittens::warp::sync();

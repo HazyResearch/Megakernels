@@ -17,7 +17,7 @@ from megakittens.schema.instruction import Instruction, InstructionMeta
 from megakittens.schema.tensor import TensorMeta
 from megakittens.itypes.noop import Noop
 from megakittens.itypes.attention_partial import AttentionPartial
-from megakittens.itypes.proj_residual import ProjResidual
+from megakittens.itypes.matvec_adds import MatVecAdds
 from megakittens.itypes.rms_lm_head import RmsLmHead
 from megakittens.itypes.rms_qkv_rope_append import RmsQkvRopeAppend
 from megakittens.itypes.rms_upgate_silu import RmsUpgateSilu
@@ -261,7 +261,7 @@ def _check_o_proj_residual(sm_count, atol, rtol, seed=42):
 
     expected = hidden_states.clone() + o_weights[layer_idx] @ attn_out
 
-    itype = ProjResidual(n=HIDDEN_DIM)
+    itype = MatVecAdds(n=HIDDEN_DIM)
     src, dst = (0, 1), (2,)
     inst_meta = InstructionMeta(icode=1, itype=itype, src_tensors=src, dst_tensors=dst)
 
@@ -303,7 +303,7 @@ def _check_down_proj_residual(sm_count, atol, rtol, seed=42):
 
     N = HIDDEN_DIM
     num_chunks = INTERMEDIATE_DIM // N  # 4
-    itype = ProjResidual(n=N)
+    itype = MatVecAdds(n=N)
     src, dst = (0, 1), (2,)
     inst_meta = InstructionMeta(icode=1, itype=itype, src_tensors=src, dst_tensors=dst)
 
@@ -317,12 +317,10 @@ def _check_down_proj_residual(sm_count, atol, rtol, seed=42):
     instructions = []
     for chunk in range(num_chunks):
         reduction_col_offset = chunk * N
-        for sm in range(sm_count):
-            s = round(sm * num_blocks / sm_count)
-            e = round((sm + 1) * num_blocks / sm_count)
+        for block in range(num_blocks):
             instructions.append(Instruction(
                 icode=1, src_tensors=src, dst_tensors=dst,
-                indices=(layer_idx, s, e, reduction_col_offset),
+                indices=(layer_idx, block, block + 1, reduction_col_offset),
                 src_barriers=(), src_barrier_targets=(),
                 num_input_barriers=0, num_reuse_barriers=0, num_dst_barriers=0,
                 dst_barriers=(),

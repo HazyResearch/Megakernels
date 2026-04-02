@@ -15,7 +15,7 @@ class OpType(str, Enum):
     attention = "attention"
     causal_attention = "causal_attention"
     rms_upgate_silu = "rms_upgate_silu"
-    proj_residual = "proj_residual"
+    matvec_adds = "matvec_adds"
     output = "output"
 
     @classmethod
@@ -59,8 +59,8 @@ _CALL_FUNCTION_MAP = {
     torch.ops.megakittens.rms_lm_head.default: OpType.rms_lm_head,
     torch.ops.megakittens.rms_upgate_silu: OpType.rms_upgate_silu,
     torch.ops.megakittens.rms_upgate_silu.default: OpType.rms_upgate_silu,
-    torch.ops.megakittens.proj_residual: OpType.proj_residual,
-    torch.ops.megakittens.proj_residual.default: OpType.proj_residual,
+    torch.ops.megakittens.matvec_adds: OpType.matvec_adds,
+    torch.ops.megakittens.matvec_adds.default: OpType.matvec_adds,
     torch.ops.megakittens.attention: OpType.attention,
     torch.ops.megakittens.attention.default: OpType.attention,
     torch.ops.megakittens.causal_attention: OpType.causal_attention,

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from ..itypes.attention_partial import AttentionPartial
 from ..itypes.noop import Noop
-from ..itypes.proj_residual import ProjResidual
+from ..itypes.matvec_adds import MatVecAdds
 from ..itypes.rms_lm_head import RmsLmHead
 from ..itypes.rms_qkv_rope_append import RmsQkvRopeAppend
 from ..itypes.rms_upgate_silu import RmsUpgateSilu
@@ -258,14 +258,12 @@ def _schedule_downproj(
     instructions = []
     for chunk in range(num_chunks):
         reduction_col_offset = chunk * HIDDEN_DIM
-        for sm in range(sm_count):
-            start = round(sm * num_blocks / sm_count)
-            end = round((sm + 1) * num_blocks / sm_count)
+        for block in range(num_blocks):
             instructions.append(Instruction(
                 icode=icode,
                 src_tensors=(T.SILU_OUT, T.DOWN_WEIGHTS),
                 dst_tensors=(T.HIDDEN_STATES,),
-                indices=(layer_idx, start, end, reduction_col_offset),
+                indices=(layer_idx, block, block + 1, reduction_col_offset),
                 src_barriers=(prev_barrier,),
                 src_barrier_targets=(prev_barrier_target,),
                 num_input_barriers=1,
@@ -348,7 +346,7 @@ def schedule_decode(
     icode_lmhead = 0 if noop else ICODE_LM_HEAD
 
     # Instruction metas (drive JIT codegen)
-    _proj_residual_itype = ProjResidual(n=HIDDEN_DIM)
+    _matvec_adds_itype = MatVecAdds(n=HIDDEN_DIM)
     _attention_partial_itype = AttentionPartial()
     _rms_qkv_itype = RmsQkvRopeAppend(n=HIDDEN_DIM)
     _rms_upgate_silu_itype = RmsUpgateSilu(n=HIDDEN_DIM)
@@ -363,14 +361,14 @@ def schedule_decode(
         InstructionMeta(icode=ICODE_ATTENTION, itype=_attention_partial_itype,
                         src_tensors=(T.Q_POST_ROPE, T.K_CACHE, T.V_CACHE),
                         dst_tensors=(T.ATTN_OUT,)),
-        InstructionMeta(icode=ICODE_O_PROJ, itype=_proj_residual_itype,
+        InstructionMeta(icode=ICODE_O_PROJ, itype=_matvec_adds_itype,
                         src_tensors=(T.ATTN_OUT, T.O_WEIGHTS),
                         dst_tensors=(T.HIDDEN_STATES,)),
         InstructionMeta(icode=ICODE_UPGATE, itype=_rms_upgate_silu_itype,
                         src_tensors=(T.HIDDEN_STATES, T.MLP_NORM_WEIGHTS,
                                      T.UP_WEIGHTS, T.GATE_WEIGHTS),
                         dst_tensors=(T.SILU_OUT,)),
-        InstructionMeta(icode=ICODE_DOWNPROJ, itype=_proj_residual_itype,
+        InstructionMeta(icode=ICODE_DOWNPROJ, itype=_matvec_adds_itype,
                         src_tensors=(T.SILU_OUT, T.DOWN_WEIGHTS),
                         dst_tensors=(T.HIDDEN_STATES,)),
         InstructionMeta(icode=ICODE_LM_HEAD, itype=_rms_lm_head_itype,

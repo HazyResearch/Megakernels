@@ -18,8 +18,8 @@ from ..schema.tensor import TensorMeta, TensorSpec
 from ..jit.pykittens import sv, st
 
 
-@torch.library.custom_op("megakittens::proj_residual", mutates_args=())
-def proj_residual_op(
+@torch.library.custom_op("megakittens::matvec_adds", mutates_args=())
+def matvec_adds_op(
     x: torch.Tensor,
     down_weights: torch.Tensor,
     residual: torch.Tensor,
@@ -27,8 +27,8 @@ def proj_residual_op(
     return residual + x @ down_weights.T
 
 
-@proj_residual_op.register_fake
-def _proj_residual_fake(
+@matvec_adds_op.register_fake
+def _matvec_adds_fake(
     x: torch.Tensor,
     down_weights: torch.Tensor,
     residual: torch.Tensor,
@@ -39,26 +39,26 @@ def _proj_residual_fake(
 BLOCK_SIZE = 16
 
 
-class ProjResidual(IType):
+class MatVecAdds(IType):
 
     def __init__(self, n: int = 0) -> None:
         self._n = n
 
     @property
     def name(self) -> str:
-        return "proj_residual"
+        return "matvec_adds"
 
     @property
     def cpp_template(self) -> str:
-        return f"ProjResidual<MKConfig, MKGlobals, {self._n}, {{tensors}}>"
+        return f"MatVecAdds<MKConfig, MKGlobals, {self._n}, {{tensors}}>"
 
     @property
     def cpp_include(self) -> str:
-        return "itypes/llama1b/proj_residual.cuh"
+        return "itypes/llama1b/matvec_adds.cuh"
 
     @property
     def op_type(self) -> str:
-        return "proj_residual"
+        return "matvec_adds"
 
     @property
     def inputs(self) -> list[TensorSpec]:

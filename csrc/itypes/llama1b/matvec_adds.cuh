@@ -7,26 +7,8 @@
 
 namespace megakittens {
 
-// Pipelined projection + residual add for LLaMA 1B decode.
-// Computes: output += weights[layer][start_block*16 : end_block*16, reduction_slice] @ input[reduction_slice]
-//
-// Used for both o_proj (square: 2048x2048) and down_proj (rect: 2048x8192 with reduction splitting).
-// Output uses TMA store_add_async for atomic residual accumulation.
-//
-// Template params:
-//   N    = reduction dimension handled per instruction (pipeline capacity, e.g. 2048)
-//   SRC0 = input activations [total_reduction_dim]       bf16 (warp::load from global)
-//   SRC1 = weights [layers, output_dim, reduction_dim]   bf16 (TMA pipeline)
-//   DST  = output  [output_dim]                          bf16 (TMA store_add_async)
-//
-// Instruction indices:
-//   [0] = layer_idx
-//   [1] = start_block  (output row blocks, units of 16)
-//   [2] = end_block
-//   [3] = reduction_col_offset  (element offset into input/weight cols; 0 when no splitting)
-
 template <typename Config, typename Globals, int N, int SRC0, int SRC1, int DST>
-struct ProjResidual {
+struct MatVecAdds {
 
     struct parsed_instruction {
         int layer_idx, start_block_idx, end_block_idx, reduction_col_offset, iters;
@@ -50,7 +32,8 @@ struct ProjResidual {
                   kittens::semaphore &sem) {
             int block_idx = inst.start_block_idx + iter;
             int col_tile  = inst.reduction_col_offset / 512 + col_idx;
-            kittens::tma::load_async(weight_chunk, g.template gls<SRC1>(),
+            kittens::tma::load_async<kittens::dim::ROW, kittens::cache_policy::EVICT_FIRST>(
+                                     weight_chunk, g.template gls<SRC1>(),
                                      {inst.layer_idx, block_idx, col_tile}, sem);
         }
 
@@ -75,7 +58,7 @@ struct ProjResidual {
             kittens::warp::sync();
 
             if (kittens::warp::elect_leader()) {
-                kittens::tma::store_add_async(g.template gls<DST>(), output_smem_bf, {block_idx});
+                kittens::tma::store_add_async<kittens::cache_policy::EVICT_LAST>(g.template gls<DST>(), output_smem_bf, {block_idx});
                 kittens::tma::store_async_read_wait();
             }
             kittens::warp::sync();

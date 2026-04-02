@@ -18,7 +18,7 @@ namespace megakittens {
 // DST  = output       [output_dim]                            bf16  (read-modify-write)
 
 template <typename Config, typename Globals, int SRC0, int SRC1, int DST>
-struct ProjResidual {
+struct MatVecAdds {
     static constexpr int BLOCK_SIZE = 16;
 
     struct controller {

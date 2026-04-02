@@ -16,7 +16,7 @@ from megakittens.schema.dtype import DType
 from megakittens.schema.instruction import Instruction, InstructionMeta
 from megakittens.schema.tensor import TensorMeta
 from megakittens.itypes.noop import Noop
-from megakittens.itypes.proj_residual import ProjResidual
+from megakittens.itypes.matvec_adds import MatVecAdds
 
 initialize_cuda_context()
 
@@ -42,7 +42,7 @@ SCALARS = [
 
 def _run_proj_residual(input_vec, weights, hidden_states, layer_idx, output_dim,
                        reduction_dim, atol):
-    """Run pipelined ProjResidual kernel and compare against PyTorch reference."""
+    """Run pipelined MatVecAdds kernel and compare against PyTorch reference."""
     device = Device(type="cuda", index=0)
 
     expected = hidden_states.clone() + weights[layer_idx] @ input_vec
@@ -54,7 +54,7 @@ def _run_proj_residual(input_vec, weights, hidden_states, layer_idx, output_dim,
     ]
 
     noop_itype = Noop()
-    proj_itype = ProjResidual(n=N)
+    proj_itype = MatVecAdds(n=N)
 
     instruction_metas = [
         InstructionMeta(icode=0, itype=noop_itype, src_tensors=(), dst_tensors=()),

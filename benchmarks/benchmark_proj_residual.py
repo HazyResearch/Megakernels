@@ -11,7 +11,7 @@ def proj_residual(
     weights: torch.Tensor,
     residual: torch.Tensor,
 ) -> torch.Tensor:
-    return torch.ops.megakittens.proj_residual(x, weights, residual)
+    return torch.ops.megakittens.matvec_adds(x, weights, residual)
 
 
 def proj_residual_unfused(
