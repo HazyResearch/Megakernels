@@ -312,7 +312,14 @@ struct AttentionPartial {
             o_sv (&O_smem)[4] = get_O_smem(s);
             l_sv &L_smem = get_L_smem(s);
 
-            // Load Q via cp.async into QOL page (reference-faithful)
+            // Wait for upstream barriers (QKV must be done) so Q is visible
+            // to this warp. The launcher waits on a different warp, and its
+            // fence.acquire does not propagate to the consumer warp.
+            if (kittens::warp::elect_leader())
+                all_input_barrier_wait<Config>(g, s.instruction());
+            kittens::warp::sync();
+
+            // Load Q via direct shared-memory writes
             s.page_wait(qol_pid(s));
             q_st &Q_smem = get_Q_smem(s);
             load_Q_simple(Q_smem, g, q_head_start_idx);

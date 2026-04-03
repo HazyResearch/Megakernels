@@ -2,6 +2,10 @@
 
 GPU megakernel runtime that fuses PyTorch operator graphs into a single persistent CUDA kernel, built on top of [ThunderKittens](csrc/ThunderKittens/).
 
+## Environment
+
+Always `conda activate enbao` first. Torch's bundled NVRTC 12.x was symlinked to NVRTC 13.0 (in `nvidia/cu13/lib/`) because B300 (`sm_103a`) requires NVRTC 13.0+. If a pip upgrade restores the old libs, re-symlink `nvidia/cuda_nvrtc/lib/libnvrtc.so.12` → `nvidia/cu13/lib/libnvrtc.so.13`.
+
 ## Running tests
 
 ```
@@ -47,6 +51,8 @@ Only two files need to be touched:
 - Barrier wait/arrive are single-thread operations. Call `all_barrier_wait` and `all_barrier_arrive` from one elected thread only (e.g. inside `warp::elect_leader()`).
 
 - Consumer is multiple warps unlike the other workers.
+
+- **`fence.acquire` is per-warp, not per-SM.** If the launcher waits on a cross-SM barrier (`all_input_barrier_wait`), its `fence.acquire.gpu` only makes prior writes visible to the launcher warp. Other warps (e.g. the consumer) reading global memory written by a previous instruction must do their own barrier wait or fence. This was the cause of a stale-Q-read bug in `attention_partial` — the consumer loaded Q from `raw_ptr` without waiting for the QKV barrier, so it could read zeros/stale data.
 
 - TMA tile type in C++ must match the Python `TensorSpec.tma_types`. If the C++ `tile_t` is `st<bf16, 128, 128>` (swizzled), the Python side must create `st(dtype=DType.bf16, rows=128, cols=128)` (swizzle=True is default).
 
