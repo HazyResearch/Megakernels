@@ -22,7 +22,7 @@ NVCCFLAGS+= -DKITTENS_4090 -arch=sm_89
 else ifeq ($(GPU),A100)
 NVCCFLAGS+= -DKITTENS_A100 -arch=sm_80
 else ifeq ($(GPU),H100)
-NVCCFLAGS+= -DKITTENS_HOPPER -arch=sm_90a
+NVCCFLAGS+= -DKITTENS_HOPPER -gencode arch=compute_90a,code=sm_90a
 else
 NVCCFLAGS+= -DKITTENS_HOPPER -DKITTENS_BLACKWELL -arch=sm_100a
 endif
