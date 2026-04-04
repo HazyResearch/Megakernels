@@ -85,6 +85,34 @@ ScheduleResult = tuple[
 # -- Helpers ------------------------------------------------------------------
 
 CLUSTER_SIZE = 2
+GQA_RATIO = NUM_ATTENTION_HEADS // NUM_KV_HEADS  # 4
+BLOCKS_PER_HEAD = HEAD_DIM // MATVEC_BLOCK_SIZE   # 4
+
+# -- Fine-grained barrier layout -----------------------------------------------
+# 3D logical structure: barriers[layer][opcode_slot][sub_idx]
+# Flattened to a 1D int32 array.
+NUM_BARRIER_SLOTS = 6   # qkv, attn, attn_red, oproj, upgate, downproj
+MAX_SUB_BARRIERS = 48   # largest: QKV with 32 Q + 8 K + 8 V = 48
+
+# Sub-barrier counts per opcode slot
+QKV_SUB_BARRIERS = NUM_ATTENTION_HEADS + 2 * NUM_KV_HEADS  # 48
+ATTN_SUB_BARRIERS = NUM_ATTENTION_HEADS                     # 32
+ATTN_RED_SUB_BARRIERS = 1
+OPROJ_SUB_BARRIERS = 1
+UPGATE_SUB_BARRIERS = INTERMEDIATE_DIM // HIDDEN_DIM        # 4
+DOWNPROJ_SUB_BARRIERS = 1
+
+# Target counts for fine-grained barriers
+QKV_TARGET_PER_SUB = BLOCKS_PER_HEAD                                    # 4
+UPGATE_TARGET_PER_SUB = HIDDEN_DIM // MATVEC_BLOCK_SIZE                 # 128
+ATTN_RED_TARGET = NUM_ATTENTION_HEADS                                   # 32
+OPROJ_TARGET = HIDDEN_DIM // MATVEC_BLOCK_SIZE                          # 128
+DOWNPROJ_TARGET = INTERMEDIATE_DIM // MATVEC_BLOCK_SIZE                 # 512
+
+
+def _barrier_index(layer_idx: int, opcode_slot: int, sub_idx: int = 0) -> int:
+    return layer_idx * NUM_BARRIER_SLOTS * MAX_SUB_BARRIERS + opcode_slot * MAX_SUB_BARRIERS + sub_idx
+
 
 _noop_inst_meta = InstructionMeta(icode=0, itype=Noop(), src_tensors=(), dst_tensors=())
 
@@ -138,8 +166,8 @@ def _schedule_qkv(
     icode: int,
     prev_barrier: int | None,
     prev_barrier_target: int,
-    dst_barrier: int,
 ) -> list[Instruction]:
+    barrier_base = _barrier_index(layer_idx, 0, 0)
     num_blocks = QKV_DIM // MATVEC_BLOCK_SIZE  # 192
     instructions = []
     for sm in range(sm_count):
@@ -152,13 +180,13 @@ def _schedule_qkv(
             src_tensors=(T.HIDDEN_STATES, T.ATTN_NORM_WEIGHTS, T.QKV_WEIGHTS,
                          T.ROPE_COS, T.ROPE_SIN, T.K_CACHE, T.V_CACHE),
             dst_tensors=(T.Q_POST_ROPE,),
-            indices=(layer_idx, start, end),
+            indices=(layer_idx, start, end, barrier_base),
             src_barriers=src_barriers,
             src_barrier_targets=src_targets,
             num_input_barriers=len(src_barriers),
             num_reuse_barriers=0,
-            num_dst_barriers=1,
-            dst_barriers=(dst_barrier,),
+            num_dst_barriers=0,
+            dst_barriers=(),
         ))
     _pad_to_cluster(instructions)
     return instructions
@@ -167,23 +195,34 @@ def _schedule_qkv(
 def _schedule_attention(
     layer_idx: int,
     icode: int,
-    prev_barrier: int,
-    prev_barrier_target: int,
-    dst_barrier: int,
 ) -> list[Instruction]:
+    # No attention_reduction step currently (1 partial per head),
+    # so attention signals the attn_red barrier (slot 2) directly.
+    # This matches the reference's skip_attn_reduction path.
+    attn_red_barrier = _barrier_index(layer_idx, 2, 0)
     instructions = []
     for kv_head in range(NUM_KV_HEADS):
+        # Fine-grained consumer: wait on 6 QKV sub-barriers for this KV head
+        # (4 Q heads + 1 K head + 1 V head), each with target = BLOCKS_PER_HEAD
+        q_head_start = kv_head * GQA_RATIO
+        src_barriers = tuple(
+            _barrier_index(layer_idx, 0, q_head_start + h) for h in range(GQA_RATIO)
+        ) + (
+            _barrier_index(layer_idx, 0, NUM_ATTENTION_HEADS + kv_head),
+            _barrier_index(layer_idx, 0, NUM_ATTENTION_HEADS + NUM_KV_HEADS + kv_head),
+        )
+        src_targets = (QKV_TARGET_PER_SUB,) * (GQA_RATIO + 2)
         instructions.append(Instruction(
             icode=icode,
             src_tensors=(T.Q_POST_ROPE, T.K_CACHE, T.V_CACHE),
             dst_tensors=(T.ATTN_OUT,),
-            indices=(layer_idx, kv_head),
-            src_barriers=(prev_barrier,),
-            src_barrier_targets=(prev_barrier_target,),
-            num_input_barriers=1,
+            indices=(layer_idx, kv_head, attn_red_barrier),
+            src_barriers=src_barriers,
+            src_barrier_targets=src_targets,
+            num_input_barriers=len(src_barriers),
             num_reuse_barriers=0,
-            num_dst_barriers=1,
-            dst_barriers=(dst_barrier,),
+            num_dst_barriers=0,
+            dst_barriers=(),
         ))
     _pad_to_cluster(instructions)
     return instructions
@@ -193,10 +232,9 @@ def _schedule_o_proj(
     sm_count: int,
     layer_idx: int,
     icode: int,
-    prev_barrier: int,
-    prev_barrier_target: int,
-    dst_barrier: int,
 ) -> list[Instruction]:
+    attn_red_barrier = _barrier_index(layer_idx, 2, 0)
+    oproj_barrier = _barrier_index(layer_idx, 3, 0)
     num_blocks = HIDDEN_DIM // MATVEC_BLOCK_SIZE  # 128
     instructions = []
     for sm in range(num_blocks):
@@ -205,12 +243,12 @@ def _schedule_o_proj(
             src_tensors=(T.ATTN_OUT, T.O_WEIGHTS),
             dst_tensors=(T.HIDDEN_STATES,),
             indices=(layer_idx, sm, sm + 1, 0),
-            src_barriers=(prev_barrier,),
-            src_barrier_targets=(prev_barrier_target,),
+            src_barriers=(attn_red_barrier,),
+            src_barrier_targets=(ATTN_RED_TARGET,),
             num_input_barriers=1,
             num_reuse_barriers=0,
             num_dst_barriers=1,
-            dst_barriers=(dst_barrier,),
+            dst_barriers=(oproj_barrier,),
         ))
     _pad_to_cluster(instructions)
     return instructions
@@ -220,10 +258,9 @@ def _schedule_upgate(
     sm_count: int,
     layer_idx: int,
     icode: int,
-    prev_barrier: int,
-    prev_barrier_target: int,
-    dst_barrier: int,
 ) -> list[Instruction]:
+    oproj_barrier = _barrier_index(layer_idx, 3, 0)
+    upgate_barrier_base = _barrier_index(layer_idx, 4, 0)
     num_blocks = INTERMEDIATE_DIM // MATVEC_BLOCK_SIZE  # 512
     instructions = []
     for sm in range(sm_count):
@@ -233,13 +270,13 @@ def _schedule_upgate(
             icode=icode,
             src_tensors=(T.HIDDEN_STATES, T.MLP_NORM_WEIGHTS, T.UP_WEIGHTS, T.GATE_WEIGHTS),
             dst_tensors=(T.SILU_OUT,),
-            indices=(layer_idx, start, end),
-            src_barriers=(prev_barrier,),
-            src_barrier_targets=(prev_barrier_target,),
+            indices=(layer_idx, start, end, upgate_barrier_base),
+            src_barriers=(oproj_barrier,),
+            src_barrier_targets=(OPROJ_TARGET,),
             num_input_barriers=1,
             num_reuse_barriers=0,
-            num_dst_barriers=1,
-            dst_barriers=(dst_barrier,),
+            num_dst_barriers=0,
+            dst_barriers=(),
         ))
     _pad_to_cluster(instructions)
     return instructions
@@ -249,27 +286,27 @@ def _schedule_downproj(
     sm_count: int,
     layer_idx: int,
     icode: int,
-    prev_barrier: int,
-    prev_barrier_target: int,
-    dst_barrier: int,
 ) -> list[Instruction]:
+    downproj_barrier = _barrier_index(layer_idx, 5, 0)
     num_blocks = HIDDEN_DIM // MATVEC_BLOCK_SIZE  # 128
     num_chunks = INTERMEDIATE_DIM // HIDDEN_DIM   # 4 reduction chunks
     instructions = []
     for chunk in range(num_chunks):
         reduction_col_offset = chunk * HIDDEN_DIM
+        # Fine-grained consumer: wait on the upgate sub-barrier for this chunk
+        upgate_sub = _barrier_index(layer_idx, 4, chunk)
         for block in range(num_blocks):
             instructions.append(Instruction(
                 icode=icode,
                 src_tensors=(T.SILU_OUT, T.DOWN_WEIGHTS),
                 dst_tensors=(T.HIDDEN_STATES,),
                 indices=(layer_idx, block, block + 1, reduction_col_offset),
-                src_barriers=(prev_barrier,),
-                src_barrier_targets=(prev_barrier_target,),
+                src_barriers=(upgate_sub,),
+                src_barrier_targets=(UPGATE_TARGET_PER_SUB,),
                 num_input_barriers=1,
                 num_reuse_barriers=0,
                 num_dst_barriers=1,
-                dst_barriers=(dst_barrier,),
+                dst_barriers=(downproj_barrier,),
             ))
     _pad_to_cluster(instructions)
     return instructions
@@ -277,10 +314,11 @@ def _schedule_downproj(
 
 def _schedule_lm_head(
     sm_count: int,
+    num_layers: int,
     icode: int,
-    prev_barrier: int,
-    prev_barrier_target: int,
 ) -> list[Instruction]:
+    prev_barrier = _barrier_index(num_layers - 1, 5, 0)
+    prev_barrier_target = DOWNPROJ_TARGET
     num_blocks = VOCAB_SIZE // MATVEC_BLOCK_SIZE
     # round up for non-divisible vocab
     if VOCAB_SIZE % MATVEC_BLOCK_SIZE != 0:
@@ -378,61 +416,20 @@ def schedule_decode(
     ]
 
     instructions: list[Instruction] = []
-    barrier_counter = 0
-
-    prev_layer_barrier: int | None = None
-    prev_layer_barrier_target: int = 0
+    num_barriers = num_layers * NUM_BARRIER_SLOTS * MAX_SUB_BARRIERS
 
     for layer_idx in range(num_layers):
-        # QKV
-        qkv_barrier = barrier_counter
-        barrier_counter += 1
+        prev_layer_barrier = _barrier_index(layer_idx - 1, 5, 0) if layer_idx > 0 else None
+        prev_layer_target = DOWNPROJ_TARGET if layer_idx > 0 else 0
+
         qkv_insts = _schedule_qkv(
             sm_count, layer_idx, icode_qkv,
-            prev_layer_barrier, prev_layer_barrier_target,
-            qkv_barrier,
+            prev_layer_barrier, prev_layer_target,
         )
-        qkv_target = sum(1 for i in qkv_insts if i.icode != 0 or noop)
-
-        # Attention
-        attn_barrier = barrier_counter
-        barrier_counter += 1
-        attn_insts = _schedule_attention(
-            layer_idx, icode_attn,
-            qkv_barrier, qkv_target,
-            attn_barrier,
-        )
-        attn_target = sum(1 for i in attn_insts if i.icode != 0 or noop)
-
-        # O-proj
-        oproj_barrier = barrier_counter
-        barrier_counter += 1
-        oproj_insts = _schedule_o_proj(
-            sm_count, layer_idx, icode_oproj,
-            attn_barrier, attn_target,
-            oproj_barrier,
-        )
-        oproj_target = sum(1 for i in oproj_insts if i.icode != 0 or noop)
-
-        # Upgate
-        upgate_barrier = barrier_counter
-        barrier_counter += 1
-        upgate_insts = _schedule_upgate(
-            sm_count, layer_idx, icode_upgate,
-            oproj_barrier, oproj_target,
-            upgate_barrier,
-        )
-        upgate_target = sum(1 for i in upgate_insts if i.icode != 0 or noop)
-
-        # Downproj
-        downproj_barrier = barrier_counter
-        barrier_counter += 1
-        downproj_insts = _schedule_downproj(
-            sm_count, layer_idx, icode_downproj,
-            upgate_barrier, upgate_target,
-            downproj_barrier,
-        )
-        downproj_target = sum(1 for i in downproj_insts if i.icode != 0 or noop)
+        attn_insts = _schedule_attention(layer_idx, icode_attn)
+        oproj_insts = _schedule_o_proj(sm_count, layer_idx, icode_oproj)
+        upgate_insts = _schedule_upgate(sm_count, layer_idx, icode_upgate)
+        downproj_insts = _schedule_downproj(sm_count, layer_idx, icode_downproj)
 
         instructions.extend(qkv_insts)
         instructions.extend(attn_insts)
@@ -440,14 +437,8 @@ def schedule_decode(
         instructions.extend(upgate_insts)
         instructions.extend(downproj_insts)
 
-        prev_layer_barrier = downproj_barrier
-        prev_layer_barrier_target = downproj_target
-
     # LM head
-    lmhead_insts = _schedule_lm_head(
-        sm_count, icode_lmhead,
-        prev_layer_barrier, prev_layer_barrier_target,
-    )
+    lmhead_insts = _schedule_lm_head(sm_count, num_layers, icode_lmhead)
     instructions.extend(lmhead_insts)
 
     # All tensors are inputs (caller pre-allocates everything)
@@ -458,7 +449,7 @@ def schedule_decode(
         instruction_metas,
         tensor_metas,
         instructions,
-        barrier_counter,
+        num_barriers,
         input_tensor_indices,
         output_tensor_indices,
     )

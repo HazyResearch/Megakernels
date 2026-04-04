@@ -11,11 +11,12 @@ template <typename Config, typename Globals, int N, int SRC_ACT, int SRC_NORM, i
 struct RmsUpgateSilu {
 
     struct parsed_instruction {
-        int layer_idx, start_block_idx, end_block_idx, iters;
+        int layer_idx, start_block_idx, end_block_idx, iters, barrier_base;
         __device__ inline parsed_instruction(const instruction_t &instruction) {
             layer_idx       = instruction.indices[0];
             start_block_idx = instruction.indices[1];
             end_block_idx   = instruction.indices[2];
+            barrier_base    = instruction.indices[3];
             iters           = 2 * (end_block_idx - start_block_idx);
         }
         __device__ inline parsed_instruction(state_t<Config> &s)
@@ -86,7 +87,11 @@ struct RmsUpgateSilu {
                 kittens::tma::store_async<kittens::cache_policy::EVICT_LAST>(
                     g.template gls<DST>(), out_smem, {0, block_idx});
                 kittens::tma::store_async_wait();
-                // atomic add here
+
+                // Per-block fine-grained barrier: signal the sub-barrier for
+                // this block's chunk (block_idx * BLOCK_SIZE / N => 0..3).
+                int sub_idx = block_idx * pipeline::MATVEC_BLOCK_SIZE / N;
+                barrier_arrive<Config>(&g.barriers.raw_ptr[inst.barrier_base + sub_idx], 1);
             }
 
             kittens::warp::sync();
@@ -130,11 +135,8 @@ struct RmsUpgateSilu {
     struct storer {
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
             pipeline::template storer_loop<2>(s, g);
-            // atomic add here
-            if (kittens::warp::elect_leader()) {
-                __threadfence();
-                all_barrier_arrive<Config>(g, s.instruction());
-            }
+            // Per-block barrier signaling happens inside store().
+            // num_dst_barriers=0 so all_barrier_arrive is not needed.
         }
     };
 };

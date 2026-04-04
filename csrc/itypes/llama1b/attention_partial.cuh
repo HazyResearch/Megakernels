@@ -34,9 +34,11 @@ struct AttentionPartial {
     struct parsed_instruction {
         int layer_idx;
         int kv_head_idx;
+        int barrier_base;
         __device__ inline parsed_instruction(const instruction_t &instruction) {
-            layer_idx   = instruction.indices[0];
-            kv_head_idx = instruction.indices[1];
+            layer_idx    = instruction.indices[0];
+            kv_head_idx  = instruction.indices[1];
+            barrier_base = instruction.indices[2];
         }
         __device__ inline parsed_instruction(state_t<Config> &s)
             : parsed_instruction(s.instruction()) {}
@@ -404,10 +406,12 @@ struct AttentionPartial {
             if (laneid == 0)
                 s.page_finish(qol_pid(s));
 
-            // atomic add here
+            // Signal the attn_red barrier (skip_attn_reduction path — no
+            // reduction step, so we signal o_proj's dependency directly).
+            // barrier_base points to attn_red slot; add GQA_RATIO for
+            // the 4 Q heads this instruction covers.
             if (kittens::warp::elect_leader()) {
-                __threadfence();
-                all_barrier_arrive<Config>(g, s.instruction());
+                barrier_arrive<Config>(&g.barriers.raw_ptr[inst.barrier_base], GQA_RATIO);
             }
         }
     };
