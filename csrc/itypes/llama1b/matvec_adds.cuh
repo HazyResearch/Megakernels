@@ -24,7 +24,6 @@ struct MatVecAdds {
     };
 
     struct pipeline_specifics {
-        // Load one iteration of weight tiles via TMA
         __device__ static inline void
         load_iter(state_t<Config> &s, const Globals &g, parsed_instruction &inst,
                   int iter, int col_idx,
@@ -37,7 +36,6 @@ struct MatVecAdds {
                                      {inst.layer_idx, block_idx, col_tile}, sem);
         }
 
-        // Reduce partial results from all consumer warps, then atomic-add to output
         __device__ static inline void
         store(state_t<Config> &s, const Globals &g, parsed_instruction &inst,
               int output_idx, int output_stage) {
@@ -49,7 +47,6 @@ struct MatVecAdds {
             llama1b::matvec_reduce<Config, pipeline::SCRATCH_BYTES_PER_WARP>(
                 output_scratch, output_rv);
 
-            // Reuse scratch as TMA staging area (reduce already read from it)
             kittens::sv_bf<16> &output_smem_bf =
                 *reinterpret_cast<kittens::sv_bf<16> *>(output_scratch);
 
@@ -87,8 +84,7 @@ struct MatVecAdds {
 
     struct launcher {
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
-            s.tensor_wait();
-            if (kittens::warp::elect_leader()) s.tensor_finish();
+            pipeline::launcher_loop(s, g);
         }
     };
 
@@ -100,17 +96,13 @@ struct MatVecAdds {
 
             parsed_instruction inst{s};
 
-            // Warp 0 waits for activation page + upstream data barriers
             if (kittens::warpid() == 0 && kittens::laneid() == 0) {
                 s.page_wait(pipeline::get_activation_page(s));
                 all_input_barrier_wait<Config>(g, s.instruction());
             }
             kittens::group<Config::NUM_CONSUMER_WARPS>::sync(4);
 
-            // Each warp loads its slice of the input vector from global memory
-            // NOTE: Must use raw_ptr arithmetic, NOT warp::load(sv, gl, coord),
-            // because JIT gl has runtime dims and the coord {element_offset} would
-            // be misinterpreted as a batch index instead of an element offset.
+            // please see if we can load instead of ptr bullshit here
             sv_t &activations_smem = reinterpret_cast<sv_t *>(
                 &pipeline::get_activations(s))[kittens::warpid()];
             {
@@ -123,12 +115,10 @@ struct MatVecAdds {
             }
             kittens::warp::sync();
 
-            // Shared memory -> registers
             rv_t activations_vec;
             kittens::warp::load(activations_vec, activations_smem);
             kittens::warp::sync();
 
-            // Run pipelined matvec (writes partial results to activation page scratch)
             pipeline::consumer_loop(s, g, activations_vec);
         }
     };
@@ -136,8 +126,6 @@ struct MatVecAdds {
     struct storer {
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
             pipeline::storer_loop(s, g);
-            // storer_loop already called store_async_wait + page_finish.
-            // Now signal downstream ops that our global writes are visible.
             if (kittens::warp::elect_leader()) {
                 __threadfence();
                 all_barrier_arrive<Config>(g, s.instruction());

@@ -32,6 +32,8 @@ Only two files need to be touched:
 
 - Cross-SM barriers use global memory atomics. Source barriers check `target > 0` (unused targets are 0). Destination barriers use `0xFF` padding for unused slots.
 
+- **Barrier granularity differs from reference.** The reference (`csrc/itypes/reference/`) calls `store_async_wait()` per block then signals a per-block/per-head barrier via `atomicAdd` inside each store function — this lets downstream ops start consuming individual blocks as they finish. The MK port (`csrc/itypes/llama1b/`) calls `store_async_read_wait()` per block (just frees shared memory), then defers `store_async_wait()` + `all_barrier_arrive()` to end-of-storer — downstream must wait for ALL blocks. Both are correct as long as consumers wait for the barrier before reading global data. The MK approach is faster for the storer but prevents fine-grained downstream overlap.
+
 - `compile_source_to_cubin` has both an in-memory `@functools.cache` and a file-backed cache (`~/.cache/megakittens/cubin/`). Pass `use_jit_cache=False` to skip file cache; in-memory cache still applies per-process.
 
 ## Rules for writing a CUDA instruction type (`csrc/itypes/*.cuh`)

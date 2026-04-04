@@ -86,8 +86,7 @@ struct RmsLmHead {
 
     struct launcher {
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
-            s.tensor_wait();
-            if (kittens::warp::elect_leader()) s.tensor_finish();
+            pipeline::launcher_loop(s, g);
         }
     };
 

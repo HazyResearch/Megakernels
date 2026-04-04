@@ -108,7 +108,13 @@ struct matvec_pipeline {
     }
 
 
-    __device__ static inline void loader_loop(state_t<Config> &s, 
+    __device__ static inline void launcher_loop(state_t<Config> &s,
+                                               const Globals &g) {
+        s.tensor_wait();
+        if (kittens::warp::elect_leader()) s.tensor_finish();
+    }
+
+    __device__ static inline void loader_loop(state_t<Config> &s,
                                               const Globals &g) {
         parsed_instruction inst{s.instruction()};
 

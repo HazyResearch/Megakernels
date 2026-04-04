@@ -42,7 +42,6 @@ struct AttentionPartial {
             : parsed_instruction(s.instruction()) {}
     };
 
-    // ── Semaphore accessors ──────────────────────────────────────────
     __device__ static inline kittens::semaphore &Q_arrived(state_t<Config> &s) {
         return s.semaphores()[0];
     }
@@ -64,9 +63,8 @@ struct AttentionPartial {
     __device__ static inline kittens::semaphore &V_finished(state_t<Config> &s, int stage) {
         return s.semaphores()[3 + NUM_STAGES * 2 + stage * 2 + 1];
     }
-    static constexpr int SEM_COUNT = 3 + 4 * NUM_STAGES; // 15
+    static constexpr int SEM_COUNT = 3 + 4 * NUM_STAGES;
 
-    // ── Page helpers ─────────────────────────────────────────────────
     __device__ static inline int qol_pid(state_t<Config> &s) { return s.lid_to_pid(QOL_PAGE); }
     __device__ static inline int kv_pid(state_t<Config> &s)  { return s.lid_to_pid(KV_PAGE); }
 
@@ -90,27 +88,22 @@ struct AttentionPartial {
             reinterpret_cast<char *>(s.pages[kv_pid(s)].ptr(sizeof(kv_st) * (1 + stage * 2))));
     }
 
-    // ── Q loading (simple global→shared, 4 rows) ────────────────────
     __device__ static inline void
     load_Q_simple(q_st &dst, const Globals &g, int q_head_start_idx) {
-        // Load 4 Q head vectors (4 × 64 = 256 bf16 elements) into the st tile.
-        // Use direct shared memory writes to avoid cp.async swizzle issues.
         const kittens::bf16 *src = reinterpret_cast<const kittens::bf16 *>(
             g.template gls<SRC_Q>().raw_ptr) + q_head_start_idx * HEAD_DIM;
         int local_row_start = q_head_start_idx % 16;
 
-        // 32 lanes × 8 elements = 256 elements = 4 rows × 64 cols
         int laneid = kittens::laneid();
-        int row = laneid / (HEAD_DIM / 8);  // 8 lanes per row
+        int row = laneid / (HEAD_DIM / 8);
         int col_base = (laneid % (HEAD_DIM / 8)) * 8;
 
-        // Write directly to the st's data array at the swizzled positions
+        // swizzle workaround
         #pragma unroll
         for (int c = 0; c < 8; c++) {
             int global_col = col_base + c;
             if (global_col < HEAD_DIM && row < GQA_RATIO) {
                 int src_idx = row * HEAD_DIM + global_col;
-                // Use st's idx function for correct swizzle
                 uint32_t base = static_cast<uint32_t>(__cvta_generic_to_shared(&dst));
                 uint32_t addr = dst.idx(base, {local_row_start + row, global_col});
                 kittens::bf16 val = src[src_idx];
@@ -120,7 +113,6 @@ struct AttentionPartial {
         __syncwarp();
     }
 
-    // ── store_4_rows: extract 4 rows from a 16-row register tile ────
     template <kittens::ducks::sv::all SV, kittens::ducks::rt::all RT>
     __device__ static inline void
     store_4_rows(SV (&dst)[4], const RT &src, int row4idx) {
@@ -171,7 +163,6 @@ struct AttentionPartial {
         }
     }
 
-    // ── right_fill: causal mask ─────────────────────────────────────
     template <kittens::ducks::rt::row_layout RT>
     __device__ static inline void right_fill(
         RT &dst, const RT &src, int col_idx,
@@ -193,15 +184,12 @@ struct AttentionPartial {
         }
     }
 
-    // ── Workers ──────────────────────────────────────────────────────
-
     struct controller {
         __device__ __forceinline__ static int
         lid_release_order(const Globals &g, state_t<Config> &s, int query) {
-            // Release unused pages first, then QOL and KV last
             if (query < Config::NUM_PAGES - 2)
                 return query + 2;
-            return query - (Config::NUM_PAGES - 2); // 0 or 1
+            return query - (Config::NUM_PAGES - 2);
         }
         __device__ __forceinline__ static int
         init_semaphores(const Globals &g, state_t<Config> &s) {
@@ -225,7 +213,6 @@ struct AttentionPartial {
 
     struct loader {
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
-            // Release unused pages (pages 2+)
             int laneid = kittens::laneid();
             if (laneid >= 2 && laneid < Config::NUM_PAGES) {
                 int pid = s.lid_to_pid(laneid);
@@ -246,17 +233,14 @@ struct AttentionPartial {
                 int seq_len = g.pos_id + 1;
                 int total_attn_blocks = (seq_len + KV_BLOCK_SIZE - 1) / KV_BLOCK_SIZE;
 
-                // Wait for KV page
                 s.page_wait(kv_pid(s));
 
                 if (total_attn_blocks == 0) {
                     s.page_finish(kv_pid(s));
                 }
 
-                // Wait for upstream barriers (QKV must be done)
                 all_input_barrier_wait<Config>(g, s.instruction());
 
-                // TMA KV loading pipeline
                 for (int i = 0; i < total_attn_blocks; i++) {
                     int stage = i % NUM_STAGES;
                     kv_st &K_smem = get_K_smem(s, stage);
@@ -312,26 +296,20 @@ struct AttentionPartial {
             o_sv (&O_smem)[4] = get_O_smem(s);
             l_sv &L_smem = get_L_smem(s);
 
-            // Wait for upstream barriers (QKV must be done) so Q is visible
-            // to this warp. The launcher waits on a different warp, and its
-            // fence.acquire does not propagate to the consumer warp.
             if (kittens::warp::elect_leader())
                 all_input_barrier_wait<Config>(g, s.instruction());
             kittens::warp::sync();
 
-            // Load Q via direct shared-memory writes
             s.page_wait(qol_pid(s));
             q_st &Q_smem = get_Q_smem(s);
             load_Q_simple(Q_smem, g, q_head_start_idx);
             kittens::warp::load(Q_reg, Q_smem);
 
-            // Attention loop
             for (int i = 0; i < total_attn_blocks; i++) {
                 int stage = i % NUM_STAGES;
                 kv_st &K_smem_tile = get_K_smem(s, stage);
                 kv_st &V_smem_tile = get_V_smem(s, stage);
 
-                // Q @ K.T
                 kittens::warp::zero(attn_fl_reg);
                 kittens::warp::wait(K_arrived(s, stage), (i / NUM_STAGES) % 2);
                 kittens::warp::load(K_reg, K_smem_tile);
@@ -339,27 +317,21 @@ struct AttentionPartial {
                 kittens::warp::sync();
                 kittens::warp::arrive(K_finished(s, stage));
 
-                // Causal mask at sequence boundary
                 if ((i + 1) * KV_BLOCK_SIZE > seq_len)
                     right_fill(attn_fl_reg, attn_fl_reg,
                                seq_len % KV_BLOCK_SIZE, -999999999999.f);
 
-                // Online softmax: max tracking
                 kittens::warp::row_max(max_vec_reg, attn_fl_reg, max_vec_reg);
 
-                // Scale by 1/(sqrt(d)*ln(2)) for exp2
                 kittens::warp::mul(attn_fl_reg, attn_fl_reg, softmax_temp);
                 kittens::warp::mul(scaled_max_vec_reg, max_vec_reg, softmax_temp);
 
-                // Softmax numerator
                 kittens::warp::sub_row(attn_fl_reg, attn_fl_reg, scaled_max_vec_reg);
                 kittens::warp::exp2(attn_fl_reg, attn_fl_reg);
 
-                // Rescale factor for accumulated O
                 kittens::warp::sub(diff_scaled_max_vec_reg, last_scaled_max_vec_reg, scaled_max_vec_reg);
                 kittens::warp::exp2(diff_scaled_max_vec_reg, diff_scaled_max_vec_reg);
 
-                // Accumulate O = rescale * O + softmax(QK) @ V
                 kittens::warp::mul_row(O_reg, O_reg, diff_scaled_max_vec_reg);
                 kittens::warp::wait(V_arrived(s, stage), (i / NUM_STAGES) % 2);
                 kittens::warp::load(V_reg, V_smem_tile);
@@ -368,14 +340,12 @@ struct AttentionPartial {
                 kittens::warp::sync();
                 kittens::warp::arrive(V_finished(s, stage));
 
-                // Update normalizer
                 kittens::warp::mul(norm_vec_reg, norm_vec_reg, diff_scaled_max_vec_reg);
                 kittens::warp::row_sum(norm_vec_reg, attn_fl_reg, norm_vec_reg);
 
                 kittens::warp::copy(last_scaled_max_vec_reg, scaled_max_vec_reg);
             }
 
-            // Finalize
             kittens::warp::sync();
 
             if (total_attn_blocks > 0) {
@@ -388,7 +358,6 @@ struct AttentionPartial {
                 kittens::warp::neg_infty(L_reg);
             }
 
-            // Store results to shared memory
             store_4_rows(O_smem, O_reg, q_head_local_idx);
             kittens::warp::sync();
             kittens::warp::arrive(O_arrived(s));
@@ -405,7 +374,6 @@ struct AttentionPartial {
             int laneid = kittens::laneid();
             int q_head_start_idx = inst.kv_head_idx * GQA_RATIO;
 
-            // Wait for O to be ready, convert fl→bf16, store via TMA
             o_sv (&O_smem)[4] = get_O_smem(s);
 
             if (laneid == 0)
@@ -432,13 +400,11 @@ struct AttentionPartial {
                 }
             }
 
-            // Wait for all stores, release QOL page
             kittens::warp::sync();
             kittens::tma::store_async_wait();
             if (laneid == 0)
                 s.page_finish(qol_pid(s));
 
-            // Signal downstream
             if (kittens::warp::elect_leader()) {
                 __threadfence();
                 all_barrier_arrive<Config>(g, s.instruction());

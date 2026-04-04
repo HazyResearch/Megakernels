@@ -89,15 +89,13 @@ struct RmsQkvRopeAppend {
                 rope_sin_rv[0][0] = sin_base[kittens::laneid()];
             }
 
-            if (block_idx < V_BLK_START) { // only Q & K need RoPE
+            if (block_idx < V_BLK_START) {
 
-                // Fetch the neighbor values
                 int mod = (kittens::laneid() & 0b1) ? -1 : 1; // 1 for even, -1 for odd
                 kittens::warp::sync();
                 float pair_val =
                     __shfl_sync(0xFFFFFFFF, qkv_proj[0][0], kittens::laneid() + mod);
 
-                // Compute RoPE in-place
                 if (kittens::laneid() < 16) {
                     qkv_proj[0][0] =
                         float(qkv_proj[0][0]) * rope_cos_rv[0][0] +
@@ -132,9 +130,7 @@ struct RmsQkvRopeAppend {
 
                 kittens::tma::store_async_read_wait();
                 // TODO: reference does store_async_wait() (full, not read) here
-                // followed by per-head atomicAdd barrier signaling, allowing
-                // attention_partial to start consuming heads as they become ready.
-                // Currently we batch-signal at end of storer via all_barrier_arrive.
+                // current is batch-signal at end of storer via all_barrier_arrive.
             }
 
             kittens::warp::sync();
@@ -165,9 +161,6 @@ struct RmsQkvRopeAppend {
     struct loader {
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
             if (kittens::laneid() == 0) {
-                // Load rope cos/sin from global memory into scratch
-                // Skip rope loading in loader (will load in store function instead)
-
                 __threadfence_block();
                 kittens::arrive(rope_arrived(s));
             }
@@ -179,8 +172,7 @@ struct RmsQkvRopeAppend {
 
     struct launcher {
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
-            s.tensor_wait();
-            if (kittens::warp::elect_leader()) s.tensor_finish();
+            pipeline::launcher_loop(s, g);
         }
     };
 
@@ -193,8 +185,6 @@ struct RmsQkvRopeAppend {
     struct storer {
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
             pipeline::storer_loop(s, g);
-            // storer_loop already called store_async_wait + page_finish.
-            // Now signal downstream ops that our global writes are visible.
             if (kittens::warp::elect_leader()) {
                 __threadfence();
                 all_barrier_arrive<Config>(g, s.instruction());

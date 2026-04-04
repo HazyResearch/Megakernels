@@ -73,13 +73,11 @@ struct RmsUpgateSilu {
             llama1b::matvec_reduce<Config, pipeline::SCRATCH_BYTES_PER_WARP>(
                 output_scratch, gate_out);
 
-            // neg
             kittens::warp::mul(gate_scratch, gate_out, -1.f);
             kittens::warp::exp(gate_scratch, gate_scratch);
             kittens::warp::add(gate_scratch, gate_scratch, 1.f);
             kittens::warp::div(gate_out, gate_out, gate_scratch);
 
-            // gating
             kittens::warp::mul(gate_out, up_out, gate_out);
 
             // wait before we overwrite gate_out
@@ -95,9 +93,6 @@ struct RmsUpgateSilu {
                     g.template gls<DST>(), out_smem, {0, block_idx});
                 kittens::tma::store_async_read_wait();
                 // TODO: reference does store_async_wait() (full, not read) here
-                // followed by per-block atomicAdd barrier signaling, allowing
-                // downproj to start consuming blocks as they become ready.
-                // Currently we batch-signal at end of storer via all_barrier_arrive.
             }
 
             kittens::warp::sync();
@@ -128,8 +123,7 @@ struct RmsUpgateSilu {
 
     struct launcher {
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
-            s.tensor_wait();
-            if (kittens::warp::elect_leader()) s.tensor_finish();
+            pipeline::launcher_loop(s, g);
         }
     };
 
