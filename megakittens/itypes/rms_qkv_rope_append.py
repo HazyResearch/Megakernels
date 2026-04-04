@@ -48,11 +48,10 @@ class RmsQkvRopeAppend(IType):
                 # SRC_QKV_W: qkv_weights — TMA st load (16×512 tiles)
                 TensorSpec(dtype=DType.bf16, granularity=(1, 1, 1),
                            tma_types=[st(dtype=DType.bf16, rows=16, cols=512)]),
-                # SRC_ROPE_COS: rope_cos — loaded via raw_ptr, not TMA.
-                # Dummy sv TMA type ensures alignment consistency in Globals struct.
+                # SRC_ROPE_COS: rope_cos — TMA sv load into scratch
                 TensorSpec(dtype=DType.fp32, granularity=(1, 1),
                            tma_types=[sv(dtype=DType.fp32, length=self._head_dim)]),
-                # SRC_ROPE_SIN: rope_sin — same as above
+                # SRC_ROPE_SIN: rope_sin — TMA sv load into scratch
                 TensorSpec(dtype=DType.fp32, granularity=(1, 1),
                            tma_types=[sv(dtype=DType.fp32, length=self._head_dim)]),
                 # SRC_K_CACHE: k_cache — TMA sv store (16-element chunks)

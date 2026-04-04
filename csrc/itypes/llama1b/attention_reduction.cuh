@@ -4,20 +4,9 @@
 #include "schema.cuh"
 #include "utils.cuh"
 
-namespace megakittens {
+// this one i am very not sure about
 
-// Attention reduction: combines partial attention outputs from multiple attention_partial
-// instructions using log-sum-exp correction. Only needed when multiple SMs compute
-// partial attention for the same KV head (long sequences).
-//
-// SRC_LSE         = attn_lse_intermediates  [NUM_Q_HEADS, MAX_PARTIALS]           fp32
-// SRC_O_PARTIAL   = attn_out_intermediates  [NUM_Q_HEADS, MAX_PARTIALS, HEAD_DIM] fp32
-// DST             = attn_out                [Q_DIM]                               bf16
-//
-// indices[0] = layer_idx
-// indices[1] = q_head_start_idx (0, 4, 8, ..., 28 for GQA_RATIO=4)
-// indices[2] = num_partials
-// indices[3..] = reduction_list (partial indices to reduce)
+namespace megakittens {
 
 template <typename Config, typename Globals,
           int HEAD_DIM, int Q_HEADS_PER_INSTRUCTION,
@@ -34,8 +23,6 @@ struct AttentionReduction {
     using o_rv = kittens::rv_fl<HEAD_DIM>;
     using o_final_sv = kittens::sv_bf<HEAD_DIM>;
 
-    // Shared memory layout per head:
-    //   l_partial_sv + NUM_STAGES * o_sv + o_final_sv
     static constexpr size_t size_per_head =
         sizeof(l_partial_sv) + NUM_STAGES * sizeof(o_sv) + sizeof(o_final_sv);
     static constexpr size_t total_smem_needed =
@@ -62,13 +49,6 @@ struct AttentionReduction {
         __device__ inline parsed_instruction(state_t<Config> &s)
             : parsed_instruction(s.instruction()) {}
     };
-
-    // ── Semaphore layout ─────────────────────────────────────────────
-    // Per head (Q_HEADS_PER_INSTRUCTION=4):
-    //   O_partial: NUM_STAGES arrived + NUM_STAGES finished = 4*2*2 = 16
-    //   L_partial: arrived + finished per head = 4*2 = 8
-    //   final_O_ready: 4
-    // Total: 28
 
     __device__ static constexpr int
     O_partial_sem_idx(int q_head, int stage, bool is_finished) {
@@ -108,7 +88,6 @@ struct AttentionReduction {
         return s.semaphores()[Final_O_ready_sem_idx(q_head)];
     }
 
-    // ── Shared memory accessors ──────────────────────────────────────
     __device__ static inline int data_pid(state_t<Config> &s) {
         return s.lid_to_pid(SHARED_DATA_PAGE);
     }
@@ -131,12 +110,9 @@ struct AttentionReduction {
             head_base + sizeof(l_partial_sv) + NUM_STAGES * sizeof(o_sv));
     }
 
-    // ── Workers ──────────────────────────────────────────────────────
-
     struct controller {
         __device__ __forceinline__ static int
         lid_release_order(const Globals &g, state_t<Config> &s, int query) {
-            // Release unused pages (1+) first, shared data page (0) last
             if (query < Config::NUM_PAGES - 1)
                 return query + 1;
             return 0;
@@ -145,7 +121,6 @@ struct AttentionReduction {
         init_semaphores(const Globals &g, state_t<Config> &s) {
             int lid = kittens::laneid();
             if (lid < SEM_COUNT) {
-                // All semaphores: expected arrivals = 1
                 kittens::init_semaphore(s.semaphores()[lid], 1);
             }
             return SEM_COUNT;
@@ -174,10 +149,8 @@ struct AttentionReduction {
             if (kittens::laneid() == 0) {
                 parsed_instruction inst{s};
 
-                // Wait for all attention partials to complete
                 all_input_barrier_wait<Config>(g, s.instruction());
 
-                // TMA load L_partial for each head
                 for (int i = 0; i < Q_HEADS_PER_INSTRUCTION; i++) {
                     l_partial_sv &L_smem = get_L_partial_smem(s, i);
                     kittens::tma::expect(L_partial_all_arrived(s, i), L_smem);
@@ -187,7 +160,6 @@ struct AttentionReduction {
                         L_partial_all_arrived(s, i));
                 }
 
-                // TMA load O_partial vectors (double-buffered)
                 for (int i = 0; i < inst.num_partials; i++) {
                     int stage = i % NUM_STAGES;
                     int cur_partial_idx = inst.reduction_list[i];
@@ -236,16 +208,13 @@ struct AttentionReduction {
 
                 o_sv &O_smem = get_O_partial_smem(s, q_head_local_idx, stage);
 
-                // Load current L_partial value from shared memory
                 int cur_partial_idx = inst.reduction_list[i];
                 uint32_t src_ptr_L = static_cast<uint32_t>(
                     __cvta_generic_to_shared(&L_smem.data[cur_partial_idx]));
                 kittens::move<float>::lds(current_lse, src_ptr_L);
 
-                // Load O_partial vector
                 kittens::warp::load(current_out, O_smem);
 
-                // Log-sum-exp correction
                 float max_lse = max(accumulated_lse, current_lse);
                 float accumulated_exp = exp2f(accumulated_lse - max_lse);
                 float current_exp = exp2f(current_lse - max_lse);
@@ -263,7 +232,6 @@ struct AttentionReduction {
             }
             kittens::warp::arrive(L_partial_all_finished(s, q_head_local_idx));
 
-            // Store final output to shared memory
             o_final_sv &O_final_smem = get_O_final_smem(s, q_head_local_idx);
             kittens::warp::store(O_final_smem, accumulated_out);
             kittens::warp::sync();
@@ -275,7 +243,6 @@ struct AttentionReduction {
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
             parsed_instruction inst{s};
 
-            // Each of first 4 lanes stores one head's output via TMA
             if (kittens::laneid() < Q_HEADS_PER_INSTRUCTION) {
                 int q_head_local_idx = kittens::laneid();
                 o_final_sv &O_final_smem = get_O_final_smem(s, q_head_local_idx);
@@ -287,12 +254,10 @@ struct AttentionReduction {
                 kittens::tma::store_async_wait();
             }
 
-            // Release shared data page
             kittens::warp::sync();
             if (kittens::warp::elect_leader())
                 s.page_finish(data_pid(s));
 
-            // Signal downstream
             if (kittens::warp::elect_leader()) {
                 __threadfence();
                 all_barrier_arrive<Config>(g, s.instruction());

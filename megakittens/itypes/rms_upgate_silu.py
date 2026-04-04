@@ -40,7 +40,7 @@ class RmsUpgateSilu(IType):
 
     @property
     def cpp_include(self):
-        return "itypes/llama1b/rms_upgate_silu.cuh"
+        return "itypes/llama1b/upgate.cuh"
 
     @property
     def op_type(self):

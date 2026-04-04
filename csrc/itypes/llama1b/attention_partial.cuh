@@ -89,28 +89,26 @@ struct AttentionPartial {
     }
 
     __device__ static inline void
-    load_Q_simple(q_st &dst, const Globals &g, int q_head_start_idx) {
-        const kittens::bf16 *src = reinterpret_cast<const kittens::bf16 *>(
+    load_Q_async(q_st &dst, const Globals &g, int q_head_start_idx) {
+        static_assert(HEAD_DIM == 64 && GQA_RATIO == 4, "Fix this function.");
+        constexpr int elem_per_memcpy = sizeof(float4) / sizeof(kittens::bf16); // 8
+        constexpr int memcpy_per_row = HEAD_DIM / elem_per_memcpy;              // 8
+
+        const kittens::bf16 *src_ptr = reinterpret_cast<const kittens::bf16 *>(
             g.template gls<SRC_Q>().raw_ptr) + q_head_start_idx * HEAD_DIM;
-        int local_row_start = q_head_start_idx % 16;
+        uint32_t dst_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(
+            &dst.data[(q_head_start_idx % 16) * HEAD_DIM]));
 
         int laneid = kittens::laneid();
-        int row = laneid / (HEAD_DIM / 8);
-        int col_base = (laneid % (HEAD_DIM / 8)) * 8;
+        int row = laneid / memcpy_per_row;
+        int col = (laneid * elem_per_memcpy) % HEAD_DIM;
 
-        // swizzle workaround
-        #pragma unroll
-        for (int c = 0; c < 8; c++) {
-            int global_col = col_base + c;
-            if (global_col < HEAD_DIM && row < GQA_RATIO) {
-                int src_idx = row * HEAD_DIM + global_col;
-                uint32_t base = static_cast<uint32_t>(__cvta_generic_to_shared(&dst));
-                uint32_t addr = dst.idx(base, {local_row_start + row, global_col});
-                kittens::bf16 val = src[src_idx];
-                asm volatile("st.shared.b16 [%0], %1;" :: "r"(addr), "h"(*(uint16_t*)&val) : "memory");
-            }
-        }
-        __syncwarp();
+        asm volatile(
+            "cp.async.cg.shared.global.L2::128B [%0], [%1], 16;\n" ::"r"(
+                dst.idx(dst_ptr, {row, col})),
+            "l"(&src_ptr[row * HEAD_DIM + col])
+            : "memory");
+        asm volatile("cp.async.commit_group;\n" ::: "memory");
     }
 
     template <kittens::ducks::sv::all SV, kittens::ducks::rt::all RT>
@@ -302,7 +300,8 @@ struct AttentionPartial {
 
             s.page_wait(qol_pid(s));
             q_st &Q_smem = get_Q_smem(s);
-            load_Q_simple(Q_smem, g, q_head_start_idx);
+            load_Q_async(Q_smem, g, q_head_start_idx);
+            kittens::warp::load_async_wait();
             kittens::warp::load(Q_reg, Q_smem);
 
             for (int i = 0; i < total_attn_blocks; i++) {

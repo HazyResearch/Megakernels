@@ -18,19 +18,6 @@ struct RmsQkvRopeAppend {
 
     using rope_t = kittens::sv_fl<HEAD_DIM>;
 
-    __device__ static inline uint8_t *get_rope_cos_ptr(state_t<Config> &s) {
-        return reinterpret_cast<uint8_t *>(s.scratch());
-    }
-    __device__ static inline uint8_t *get_rope_sin_ptr(state_t<Config> &s) {
-        return reinterpret_cast<uint8_t *>(s.scratch()) + sizeof(rope_t);
-    }
-    __device__ static inline rope_t &get_rope_cos(state_t<Config> &s) {
-        return *reinterpret_cast<rope_t *>(get_rope_cos_ptr(s));
-    }
-    __device__ static inline rope_t &get_rope_sin(state_t<Config> &s) {
-        return *reinterpret_cast<rope_t *>(get_rope_sin_ptr(s));
-    }
-
     struct parsed_instruction {
         int layer_idx, start_block_idx, end_block_idx, iters;
         __device__ inline parsed_instruction(const instruction_t &instruction) {
@@ -74,20 +61,19 @@ struct RmsQkvRopeAppend {
             llama1b::matvec_reduce<Config, pipeline::SCRATCH_BYTES_PER_WARP>(
                 output_scratch, qkv_proj);
 
-            // Load the 16 rope cos/sin values for this block directly from global memory
-            int head_chunk = block_idx % (HEAD_DIM / BLOCK_SIZE);
-            const float *cos_base = reinterpret_cast<const float *>(
-                g.template gls<SRC_ROPE_COS>().raw_ptr)
-                + static_cast<int>(g.pos_id) * HEAD_DIM + head_chunk * BLOCK_SIZE;
-            const float *sin_base = reinterpret_cast<const float *>(
-                g.template gls<SRC_ROPE_SIN>().raw_ptr)
-                + static_cast<int>(g.pos_id) * HEAD_DIM + head_chunk * BLOCK_SIZE;
-
             kittens::rv_fl<16> rope_cos_rv, rope_sin_rv;
-            if (kittens::laneid() < BLOCK_SIZE) {
-                rope_cos_rv[0][0] = cos_base[kittens::laneid()];
-                rope_sin_rv[0][0] = sin_base[kittens::laneid()];
-            }
+
+            kittens::wait(rope_arrived(s), 0);
+
+            auto head_chunk = block_idx % (HEAD_DIM / BLOCK_SIZE);
+
+            kittens::sv_fl<16> &rope_cos_sv = *reinterpret_cast<kittens::sv_fl<16> *>(
+                get_rope_cos_ptr(s) + head_chunk * BLOCK_SIZE * sizeof(float));
+            kittens::sv_fl<16> &rope_sin_sv = *reinterpret_cast<kittens::sv_fl<16> *>(
+                get_rope_sin_ptr(s) + head_chunk * BLOCK_SIZE * sizeof(float));
+
+            kittens::warp::load(rope_cos_rv, rope_cos_sv);
+            kittens::warp::load(rope_sin_rv, rope_sin_sv);
 
             if (block_idx < V_BLK_START) {
 
@@ -128,9 +114,7 @@ struct RmsQkvRopeAppend {
                         {inst.layer_idx, static_cast<int>(g.pos_id), head_idx, dim_idx});
                 }
 
-                kittens::tma::store_async_read_wait();
-                // TODO: reference does store_async_wait() (full, not read) here
-                // current is batch-signal at end of storer via all_barrier_arrive.
+                kittens::tma::store_async_wait();
             }
 
             kittens::warp::sync();
@@ -139,6 +123,20 @@ struct RmsQkvRopeAppend {
 
     using pipeline = llama1b::rms_matvec_pipeline<
         Config, Globals, N, parsed_instruction, pipeline_specifics, SRC_ACT, SRC_NORM>;
+
+    // Rope cos/sin live on the activation page, after the output scratch (1024-byte aligned).
+    static constexpr int ROPE_COS_OFFSET = ((pipeline::OUTPUT_SCRATCH_OFFSET +
+        pipeline::OUTPUT_PIPELINE_STAGES * pipeline::SCRATCH_BYTES_PER_STAGE) + 1023) & ~1023;
+    static constexpr int ROPE_SIN_OFFSET = ROPE_COS_OFFSET + HEAD_DIM * sizeof(float);
+
+    __device__ static inline uint8_t *get_rope_cos_ptr(state_t<Config> &s) {
+        return reinterpret_cast<uint8_t *>(
+            s.pages[pipeline::get_activation_page(s)].ptr(ROPE_COS_OFFSET));
+    }
+    __device__ static inline uint8_t *get_rope_sin_ptr(state_t<Config> &s) {
+        return reinterpret_cast<uint8_t *>(
+            s.pages[pipeline::get_activation_page(s)].ptr(ROPE_SIN_OFFSET));
+    }
 
     __device__ static inline kittens::semaphore &rope_arrived(state_t<Config> &s) {
         return s.semaphores()[pipeline::SEM_COUNT];
@@ -161,6 +159,23 @@ struct RmsQkvRopeAppend {
     struct loader {
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
             if (kittens::laneid() == 0) {
+                // Wait for activation page so we can write rope data to it
+                s.page_wait(pipeline::get_activation_page(s));
+
+                // Copy rope cos/sin from global memory into activation page
+                const float *cos_gmem = reinterpret_cast<const float *>(
+                    g.template gls<SRC_ROPE_COS>().raw_ptr)
+                    + static_cast<int>(g.pos_id) * HEAD_DIM;
+                const float *sin_gmem = reinterpret_cast<const float *>(
+                    g.template gls<SRC_ROPE_SIN>().raw_ptr)
+                    + static_cast<int>(g.pos_id) * HEAD_DIM;
+                float *cos_smem = reinterpret_cast<float *>(get_rope_cos_ptr(s));
+                float *sin_smem = reinterpret_cast<float *>(get_rope_sin_ptr(s));
+                #pragma unroll
+                for (int i = 0; i < HEAD_DIM; i++) {
+                    cos_smem[i] = cos_gmem[i];
+                    sin_smem[i] = sin_gmem[i];
+                }
                 __threadfence_block();
                 kittens::arrive(rope_arrived(s));
             }
