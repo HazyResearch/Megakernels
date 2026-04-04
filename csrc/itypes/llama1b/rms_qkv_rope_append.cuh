@@ -115,6 +115,7 @@ struct RmsQkvRopeAppend {
                 }
 
                 kittens::tma::store_async_wait();
+                // atomic add here
             }
 
             kittens::warp::sync();
@@ -124,7 +125,7 @@ struct RmsQkvRopeAppend {
     using pipeline = llama1b::rms_matvec_pipeline<
         Config, Globals, N, parsed_instruction, pipeline_specifics, SRC_ACT, SRC_NORM>;
 
-    // Rope cos/sin live on the activation page, after the output scratch (1024-byte aligned).
+    // 1024 aligned (stuart)
     static constexpr int ROPE_COS_OFFSET = ((pipeline::OUTPUT_SCRATCH_OFFSET +
         pipeline::OUTPUT_PIPELINE_STAGES * pipeline::SCRATCH_BYTES_PER_STAGE) + 1023) & ~1023;
     static constexpr int ROPE_SIN_OFFSET = ROPE_COS_OFFSET + HEAD_DIM * sizeof(float);
@@ -159,10 +160,8 @@ struct RmsQkvRopeAppend {
     struct loader {
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
             if (kittens::laneid() == 0) {
-                // Wait for activation page so we can write rope data to it
                 s.page_wait(pipeline::get_activation_page(s));
 
-                // Copy rope cos/sin from global memory into activation page
                 const float *cos_gmem = reinterpret_cast<const float *>(
                     g.template gls<SRC_ROPE_COS>().raw_ptr)
                     + static_cast<int>(g.pos_id) * HEAD_DIM;

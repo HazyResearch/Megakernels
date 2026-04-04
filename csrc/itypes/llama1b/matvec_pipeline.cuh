@@ -242,16 +242,14 @@ struct rms_matvec_pipeline
 
     using pipeline = matvec_pipeline<Config, Globals, N, parsed_instruction, pipeline_specifics>;
 
-    // Activation page layout (with RMS scale):
     static constexpr int ACTIVATIONS_SIZE      = N * sizeof(kittens::bf16);
     static constexpr int RMS_SCALE_OFFSET      = ACTIVATIONS_SIZE;
     static constexpr int RMS_SCALE_SIZE        = N * sizeof(kittens::bf16);
     static constexpr int RMS_SCRATCH_OFFSET    = RMS_SCALE_OFFSET + RMS_SCALE_SIZE;
     static constexpr int RMS_SCRATCH_SIZE      = Config::NUM_CONSUMER_WARPS * sizeof(float);
-    // Output scratch must be 1024-byte aligned for TMA
+    // 1024 aligned (stuart)
     static constexpr int OUTPUT_SCRATCH_OFFSET = ((RMS_SCRATCH_OFFSET + RMS_SCRATCH_SIZE) + 1023) & ~1023;
 
-    // +1 semaphore for rms_scale_arrived (matches original)
     static constexpr int SEM_COUNT = pipeline::SEM_COUNT + 1;
 
     __device__ static inline kittens::semaphore &rms_scale_arrived(state_t<Config> &s) {

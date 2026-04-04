@@ -404,6 +404,7 @@ struct AttentionPartial {
             if (laneid == 0)
                 s.page_finish(qol_pid(s));
 
+            // atomic add here
             if (kittens::warp::elect_leader()) {
                 __threadfence();
                 all_barrier_arrive<Config>(g, s.instruction());

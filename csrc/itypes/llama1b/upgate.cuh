@@ -77,22 +77,16 @@ struct RmsUpgateSilu {
             kittens::warp::exp(gate_scratch, gate_scratch);
             kittens::warp::add(gate_scratch, gate_scratch, 1.f);
             kittens::warp::div(gate_out, gate_out, gate_scratch);
-
             kittens::warp::mul(gate_out, up_out, gate_out);
-
-            // wait before we overwrite gate_out
             kittens::warp::sync();
-
             kittens::warp::store(out_smem, gate_out);
-
-            // wait before we store results to global memory
             kittens::warp::sync();
 
             if (kittens::warp::elect_leader()) {
                 kittens::tma::store_async<kittens::cache_policy::EVICT_LAST>(
                     g.template gls<DST>(), out_smem, {0, block_idx});
-                kittens::tma::store_async_read_wait();
-                // TODO: reference does store_async_wait() (full, not read) here
+                kittens::tma::store_async_wait();
+                // atomic add here
             }
 
             kittens::warp::sync();
@@ -136,8 +130,7 @@ struct RmsUpgateSilu {
     struct storer {
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
             pipeline::template storer_loop<2>(s, g);
-            // storer_loop already called store_async_wait + page_finish.
-            // Now signal downstream ops that our global writes are visible.
+            // atomic add here
             if (kittens::warp::elect_leader()) {
                 __threadfence();
                 all_barrier_arrive<Config>(g, s.instruction());

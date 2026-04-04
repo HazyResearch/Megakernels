@@ -57,6 +57,7 @@ struct MatVecAdds {
             if (kittens::warp::elect_leader()) {
                 kittens::tma::store_add_async<kittens::cache_policy::EVICT_LAST>(g.template gls<DST>(), output_smem_bf, {0, block_idx});
                 kittens::tma::store_async_read_wait();
+                // atomic add here
             }
             kittens::warp::sync();
         }
@@ -102,7 +103,7 @@ struct MatVecAdds {
             }
             kittens::group<Config::NUM_CONSUMER_WARPS>::sync(4);
 
-            // please see if we can load instead of ptr bullshit here
+            // please see if we can load instead of ptr crap here
             sv_t &activations_smem = reinterpret_cast<sv_t *>(
                 &pipeline::get_activations(s))[kittens::warpid()];
             {

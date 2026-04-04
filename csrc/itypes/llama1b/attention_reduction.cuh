@@ -15,7 +15,7 @@ struct AttentionReduction {
 
     static constexpr int NUM_STAGES = 2;
     static_assert(NUM_STAGES <= 2);
-    static constexpr int MAX_PARTIALS = 13; // limited by instruction_t::MAX_INDICES - 3
+    static constexpr int MAX_PARTIALS = 13;
     static constexpr int SHARED_DATA_PAGE = 0;
 
     using l_partial_sv = kittens::sv_fl<((MAX_PARTIALS + 15) / 16) * 16>;
@@ -200,7 +200,6 @@ struct AttentionReduction {
             kittens::warp::wait(L_partial_all_arrived(s, q_head_local_idx), 0);
             l_partial_sv &L_smem = get_L_partial_smem(s, q_head_local_idx);
 
-            // Reduction pipeline
             for (int i = 0; i < inst.num_partials; i++) {
                 int stage = i % NUM_STAGES;
                 kittens::warp::wait(O_partial_arrived(s, q_head_local_idx, stage),
@@ -257,7 +256,8 @@ struct AttentionReduction {
             kittens::warp::sync();
             if (kittens::warp::elect_leader())
                 s.page_finish(data_pid(s));
-
+            
+            // atomic add here
             if (kittens::warp::elect_leader()) {
                 __threadfence();
                 all_barrier_arrive<Config>(g, s.instruction());
