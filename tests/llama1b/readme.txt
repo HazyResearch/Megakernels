@@ -1,7 +1,5 @@
 Llama 3.2 1B decode baseline (2026-04-01, B300, bf16, M=1)
-==========================================================
-
-Instruction correctness (isolated tests, random weights)
+Instruction correctness
 ---------------------------------------------------------
 instruction              max_diff    mean_diff
 rms_qkv_rope_append Q    1.0000      0.0892
