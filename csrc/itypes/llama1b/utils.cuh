@@ -48,8 +48,6 @@ __device__ static inline void matvec(kittens::sv_fl<st_t::rows> &out_smem,
                                      kittens::rv_fl<st_t::cols> &activations) {
     using rt_t  = kittens::rt_bf<st_t::rows, st_t::cols>;
     using rrv_t = typename rt_t::row_vec;
-    using rcv_t = typename kittens::rt_fl<16, 16>::col_vec;
-    using rv_t  = kittens::rv_fl<st_t::rows>;
 
     rrv_t row_activations;
     kittens::warp::copy(row_activations, activations);
@@ -62,14 +60,11 @@ __device__ static inline void matvec(kittens::sv_fl<st_t::rows> &out_smem,
     kittens::warp::zero(out_activations);
     kittens::warp::mma_ABt(out_activations, weights, broadcast_activations, out_activations);
 
-    rcv_t sum_col_vec;
-    kittens::warp::row_max(sum_col_vec, out_activations);
-
-    rv_t sum_vec;
-    kittens::warp::copy(sum_vec, sum_col_vec);
-
-    if (kittens::laneid() < st_t::rows) {
-        out_smem[kittens::laneid()] = sum_vec[0][0];
+    if (kittens::laneid() % 4 == 0) {
+        int row0 = kittens::laneid() / 4;
+        int row1 = row0 + 8;
+        out_smem[row0] = out_activations.tiles[0][0].data[0].x;
+        out_smem[row1] = out_activations.tiles[0][0].data[1].x;
     }
     kittens::warp::sync();
 }
