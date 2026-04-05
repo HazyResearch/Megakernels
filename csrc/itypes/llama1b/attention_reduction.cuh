@@ -146,7 +146,7 @@ struct AttentionReduction {
             s.tensor_wait();
             if (kittens::warp::elect_leader()) s.tensor_finish();
 
-            if (kittens::laneid() == 0) {
+            if (kittens::warp::elect_leader()) {
                 parsed_instruction inst{s};
 
                 all_input_barrier_wait<Config>(g, s.instruction());

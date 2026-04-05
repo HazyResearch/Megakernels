@@ -269,13 +269,13 @@ struct rms_matvec_pipeline
 
     __device__ static inline int init_semaphores(const Globals &g, state_t<Config> &s) {
         pipeline::init_semaphores(g, s);
-        if (kittens::laneid() == 0)
+        if (kittens::warp::elect_leader())
             kittens::init_semaphore(rms_scale_arrived(s), 1);
         return SEM_COUNT;
     }
 
     __device__ static inline void loader_loop(state_t<Config> &s, const Globals &g, int norm_layer_idx = 0) {
-        if (kittens::laneid() == 0) {
+        if (kittens::warp::elect_leader()) {
             s.page_wait(pipeline::get_activation_page(s));
 
             // Wait for upstream (e.g. last downproj)

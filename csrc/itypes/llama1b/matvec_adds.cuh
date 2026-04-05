@@ -97,7 +97,7 @@ struct MatVecAdds {
 
             parsed_instruction inst{s};
 
-            if (kittens::warpid() == 0 && kittens::laneid() == 0) {
+            if (kittens::warpid() == 0 && kittens::warp::elect_leader()) {
                 s.page_wait(pipeline::get_activation_page(s));
                 all_input_barrier_wait<Config>(g, s.instruction());
             }

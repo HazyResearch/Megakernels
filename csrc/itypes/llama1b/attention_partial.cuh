@@ -227,7 +227,7 @@ struct AttentionPartial {
             s.tensor_wait();
             if (kittens::warp::elect_leader()) s.tensor_finish();
 
-            if (kittens::laneid() == 0) {
+            if (kittens::warp::elect_leader()) {
 
                 parsed_instruction inst{s};
                 int seq_len = g.pos_id + 1;
@@ -372,12 +372,11 @@ struct AttentionPartial {
     struct storer {
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
             parsed_instruction inst{s};
-            int laneid = kittens::laneid();
             int q_head_start_idx = inst.kv_head_idx * GQA_RATIO;
 
             o_sv (&O_smem)[4] = get_O_smem(s);
 
-            if (laneid == 0)
+            if (kittens::warp::elect_leader())
                 kittens::wait(O_arrived(s), 0);
             kittens::warp::sync();
 
@@ -392,7 +391,7 @@ struct AttentionPartial {
                 kittens::warp::sync();
             }
 
-            if (laneid == 0) {
+            if (kittens::warp::elect_leader()) {
                 for (int head_offset = 0; head_offset < GQA_RATIO; head_offset++) {
                     auto &smem_bf = *reinterpret_cast<o_sv_bf *>(&O_smem[head_offset]);
                     kittens::tma::store_async<kittens::cache_policy::EVICT_LAST>(
@@ -403,7 +402,7 @@ struct AttentionPartial {
 
             kittens::warp::sync();
             kittens::tma::store_async_wait();
-            if (laneid == 0)
+            if (kittens::warp::elect_leader())
                 s.page_finish(qol_pid(s));
 
             // Signal the attn_red barrier (skip_attn_reduction path — no

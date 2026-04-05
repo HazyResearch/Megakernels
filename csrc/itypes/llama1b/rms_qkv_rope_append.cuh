@@ -165,7 +165,7 @@ struct RmsQkvRopeAppend {
 
     struct loader {
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
-            if (kittens::laneid() == 0) {
+            if (kittens::warp::elect_leader()) {
                 s.page_wait(pipeline::get_activation_page(s));
 
                 const float *cos_gmem = reinterpret_cast<const float *>(
