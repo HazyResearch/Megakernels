@@ -37,7 +37,8 @@ def compile(
             disable=not enable,
             dynamic=False, # dynamic shapes not supported (TODO: support it)
         )(_fn)
-        functools.update_wrapper(megakernel_fn, _fn)
+        if callable(_fn) and not isinstance(_fn, torch.nn.Module):
+            functools.update_wrapper(megakernel_fn, _fn)
         return megakernel_fn
 
     if fn is not None:
