@@ -34,7 +34,7 @@ INTERMEDIATE_DIM = 8192
 VOCAB_SIZE = 128256
 MAX_SEQ_LEN = 512
 BLOCK_SIZE = 16
-SEQ_LEN = 256  # decode position for attention benchmark
+SEQ_LEN = 128  # decode position for attention benchmark
 
 B300_BW_BYTES_PER_SEC = 8_000_000_000_000
 

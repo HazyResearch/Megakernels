@@ -17,13 +17,13 @@ Top token: MK='doesn', ref='doesn'
 
 Instruction benchmarks 
 instruction              MK (us)    roofline (us)    MK GB/s
-rms_qkv_rope_append      163.7         1.57           77.0
-attention_partial         115.4         0.07            4.6
-o_proj_residual            77.8         1.05          107.9
-rms_upgate_silu           115.1         8.39          583.2
-down_proj_residual         74.3         4.20          451.9
-rms_lm_head                98.7        65.70         5324.1
+rms_qkv_rope_append      159.1         1.57           79.2
+attention_partial         109.9         0.03            2.5
+o_proj_residual            75.2         1.05          111.7
+rms_upgate_silu           115.0         8.39          583.8
+down_proj_residual         73.1         4.20          459.3
+rms_lm_head                95.6        65.70         5499.6
 
-Full decode (16 layers + lm_head, seq_len=256)
-Megakernel:   1155.6 us  (2146.2 GB/s)
-Roofline:      310.0 us
+Full decode (16 layers + lm_head, seq_len=128)
+Megakernel:   1115.0 us  (2220.7 GB/s)
+Roofline:      309.5 us
