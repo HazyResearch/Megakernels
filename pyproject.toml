@@ -18,5 +18,8 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=9,<10"]
 
+[tool.setuptools.packages.find]
+include = ["megakittens*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
