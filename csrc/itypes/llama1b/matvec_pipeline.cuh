@@ -189,15 +189,6 @@ struct matvec_pipeline {
             input_stage  = (input_stage  + 1) % INPUT_PIPELINE_STAGES;
             output_stage = (output_stage + 1) % OUTPUT_PIPELINE_STAGES;
         }
-
-        // release after consumer loop. could do in between but i was having issues
-        kittens::group<Config::NUM_CONSUMER_WARPS>::sync(1);
-        if (kittens::warpid() == 0 && kittens::warp::elect_leader()) {
-            int used_stages = min(inst.iters, INPUT_PIPELINE_STAGES);
-            for (int stage = 0; stage < used_stages; stage++)
-                for (int p = 0; p < STAGE_PAGES; p++)
-                    s.page_finish(get_weight_page(s, stage, p));
-        }
     }
 
     template <int iter_scale = 1>
@@ -219,6 +210,16 @@ struct matvec_pipeline {
                     kittens::warp::arrive(outputs_finished(s, stage));
                 }
             }
+
+            // release weight pages as soon as their last iteration completes
+            if (i + INPUT_PIPELINE_STAGES >= inst.iters) {
+                if (kittens::warp::elect_leader()) {
+                    int released_stage = i % INPUT_PIPELINE_STAGES;
+                    for (int p = 0; p < STAGE_PAGES; p++)
+                        s.page_finish(get_weight_page(s, released_stage, p));
+                }
+            }
+
             output_stage = (output_stage + 1) % OUTPUT_PIPELINE_STAGES;
         }
 
