@@ -20,7 +20,7 @@ rms_norm(const kittens::sv_bf<N / Config::NUM_CONSUMER_WARPS> &rms_scale_smem,
     kittens::warp::mul(sq_activations_vec, sq_activations_vec, sq_activations_vec);
     float partial_sum = kittens::warp::sum(sq_activations_vec);
 
-    if (kittens::laneid() == 0) {
+    if (kittens::warp::elect_leader()) {
         scratch_memory[kittens::warpid()] = partial_sum;
     }
     kittens::group<Config::NUM_CONSUMER_WARPS>::sync(0);
