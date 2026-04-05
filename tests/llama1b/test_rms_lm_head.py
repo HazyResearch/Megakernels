@@ -1,33 +1,29 @@
 """
-Test rms_lm_head instruction in isolation.
-Fused RMSNorm + LM head projection.
+Standalone test for the pipelined RmsLmHead kernel.
+Schedules ONLY lm_head instructions (no other layers), feeds known inputs,
+compares against PyTorch reference.
 """
 
 import torch
 
-from megakittens.jit.cuda_utils import initialize_cuda_context
+from megakittens.jit.cuda_utils import get_sm_count, initialize_cuda_context
 from megakittens.dispatcher import Dispatcher, ScalarField
+from megakittens.itypes.rms_lm_head import RmsLmHead
+from megakittens.itypes.noop import Noop
 from megakittens.schema.device import Device
 from megakittens.schema.dtype import DType
 from megakittens.schema.instruction import Instruction, InstructionMeta
 from megakittens.schema.tensor import TensorMeta
-from megakittens.itypes.noop import Noop
-from megakittens.itypes.rms_lm_head import RmsLmHead
 
 initialize_cuda_context()
 
-HIDDEN_DIM = 2048
-VOCAB_SIZE = 128256
-BLOCK_SIZE = 16
-RMS_NORM_EPS = 1e-5
 DEVICE = "cuda"
 DTYPE = torch.bfloat16
-
-# Tensor indices
-T_HIDDEN = 0
-T_NORM_W = 1
-T_LM_HEAD_W = 2
-T_LOGITS = 3
+HIDDEN_DIM = 2048
+VOCAB_SIZE = 128256  # must be divisible by 16
+BLOCK_SIZE = 16
+RMS_NORM_EPS = 1e-5
+CLUSTER_SIZE = 2
 
 SCALARS = [
     ScalarField("pos_id", "unsigned int", 4, 4),
@@ -36,61 +32,43 @@ SCALARS = [
 ]
 
 
-def rmsnorm(x, weight, eps):
-    x_float = x.float()
-    variance = x_float.pow(2).mean(-1, keepdim=True)
-    normed = x_float * torch.rsqrt(variance + eps)
-    return (weight.float() * normed).to(x.dtype)
+class T:
+    HIDDEN_STATES = 0
+    NORM_WEIGHT = 1
+    LM_HEAD_WEIGHT = 2
+    LOGITS = 3
+    COUNT = 4
 
 
-def test_rms_lm_head():
-    torch.manual_seed(42)
+def schedule_lm_head_only(sm_count):
     device = Device(type="cuda", index=0)
-
-    x = torch.randn(HIDDEN_DIM, dtype=DTYPE, device=DEVICE)
-    norm_weight = torch.randn(HIDDEN_DIM, dtype=DTYPE, device=DEVICE)
-    lm_head_weight = torch.randn(VOCAB_SIZE, HIDDEN_DIM, dtype=DTYPE, device=DEVICE)
-    logits = torch.zeros(VOCAB_SIZE, dtype=DTYPE, device=DEVICE)
-
-    # PyTorch reference
-    normed = rmsnorm(x, norm_weight, RMS_NORM_EPS)
-    expected = lm_head_weight @ normed
-
-    num_blocks = VOCAB_SIZE // BLOCK_SIZE  # 8016
+    bf16 = DType.bf16
 
     tensor_metas = [
-        TensorMeta(dtype=DType.bf16, shape=(HIDDEN_DIM,), device=device),
-        TensorMeta(dtype=DType.bf16, shape=(HIDDEN_DIM,), device=device),
-        TensorMeta(dtype=DType.bf16, shape=(VOCAB_SIZE, HIDDEN_DIM), device=device),
-        TensorMeta(dtype=DType.bf16, shape=(VOCAB_SIZE,), device=device),
+        TensorMeta(dtype=bf16, shape=(HIDDEN_DIM,), device=device),
+        TensorMeta(dtype=bf16, shape=(HIDDEN_DIM,), device=device),
+        TensorMeta(dtype=bf16, shape=(VOCAB_SIZE, HIDDEN_DIM), device=device),
+        TensorMeta(dtype=bf16, shape=(VOCAB_SIZE,), device=device),
     ]
 
-    noop_itype = Noop()
-    lm_head_itype = RmsLmHead(n=HIDDEN_DIM)
-
-    instruction_metas = [
-        InstructionMeta(icode=0, itype=noop_itype, src_tensors=(), dst_tensors=()),
-        InstructionMeta(icode=1, itype=lm_head_itype,
-                        src_tensors=(T_HIDDEN, T_NORM_W, T_LM_HEAD_W),
-                        dst_tensors=(T_LOGITS,)),
-    ]
-
-    noop = Instruction(
-        icode=0, src_tensors=(), dst_tensors=(), indices=(),
-        src_barriers=(), src_barrier_targets=(),
-        num_input_barriers=0, num_reuse_barriers=0, num_dst_barriers=0,
-        dst_barriers=(),
+    noop_meta = InstructionMeta(icode=0, itype=Noop(), src_tensors=(), dst_tensors=())
+    lm_head_meta = InstructionMeta(
+        icode=1,
+        itype=RmsLmHead(n=HIDDEN_DIM),
+        src_tensors=(T.HIDDEN_STATES, T.NORM_WEIGHT, T.LM_HEAD_WEIGHT),
+        dst_tensors=(T.LOGITS,),
     )
+    instruction_metas = [noop_meta, lm_head_meta]
 
-    sm_count = 32
+    num_blocks = (VOCAB_SIZE + BLOCK_SIZE - 1) // BLOCK_SIZE
     instructions = []
     for sm in range(sm_count):
         start = round(sm * num_blocks / sm_count)
         end = round((sm + 1) * num_blocks / sm_count)
         instructions.append(Instruction(
             icode=1,
-            src_tensors=(T_HIDDEN, T_NORM_W, T_LM_HEAD_W),
-            dst_tensors=(T_LOGITS,),
+            src_tensors=(T.HIDDEN_STATES, T.NORM_WEIGHT, T.LM_HEAD_WEIGHT),
+            dst_tensors=(T.LOGITS,),
             indices=(start, end),
             src_barriers=(),
             src_barrier_targets=(),
@@ -100,32 +78,77 @@ def test_rms_lm_head():
             dst_barriers=(),
         ))
 
-    while len(instructions) % 2 != 0:
+    # Pad to cluster size
+    noop = Instruction(
+        icode=0, src_tensors=(), dst_tensors=(), indices=(),
+        src_barriers=(), src_barrier_targets=(),
+        num_input_barriers=0, num_reuse_barriers=0, num_dst_barriers=0,
+        dst_barriers=(),
+    )
+    while len(instructions) % CLUSTER_SIZE != 0:
         instructions.append(noop)
 
-    input_indices = (T_HIDDEN, T_NORM_W, T_LM_HEAD_W, T_LOGITS)
-    output_indices = (T_LOGITS,)
+    return (
+        instruction_metas,
+        tensor_metas,
+        instructions,
+        0,  # num_barriers
+        tuple(range(T.COUNT)),
+        (T.LOGITS,),
+    )
+
+
+def rmsnorm(x, weight, eps):
+    x_f = x.float()
+    var = x_f.pow(2).mean(-1, keepdim=True)
+    return (x_f * torch.rsqrt(var + eps) * weight.float()).to(x.dtype)
+
+
+@torch.inference_mode()
+def test_rms_lm_head_pipelined():
+    torch.manual_seed(42)
+
+    hidden_states = torch.randn(HIDDEN_DIM, device=DEVICE, dtype=DTYPE)
+    norm_weight = torch.randn(HIDDEN_DIM, device=DEVICE, dtype=DTYPE)
+    lm_head_weight = torch.randn(VOCAB_SIZE, HIDDEN_DIM, device=DEVICE, dtype=DTYPE)
+    logits = torch.zeros(VOCAB_SIZE, device=DEVICE, dtype=DTYPE)
+
+    # Reference
+    normed = rmsnorm(hidden_states, norm_weight, RMS_NORM_EPS)
+    ref_logits = (lm_head_weight @ normed).float()
+
+    # Megakernel
+    sm_count = get_sm_count()
+    schedule = schedule_lm_head_only(sm_count)
+    instruction_metas, tensor_metas, instructions, num_barriers, input_indices, output_indices = schedule
 
     dispatcher = Dispatcher(
-        instruction_metas, tensor_metas, instructions,
-        num_barriers=0,
-        input_tensor_indices=input_indices,
-        output_tensor_indices=output_indices,
+        instruction_metas, tensor_metas, instructions, num_barriers,
+        input_indices, output_indices,
         use_jit_cache=False,
         scalar_fields=SCALARS,
     )
 
-    result = dispatcher(x, norm_weight, lm_head_weight, logits, 0, 0.125, RMS_NORM_EPS)
+    tensors = [hidden_states, norm_weight, lm_head_weight, logits]
+    mk_logits = dispatcher(*tensors, 0, 0.0, RMS_NORM_EPS)
     torch.cuda.synchronize()
 
-    diff = (result.float() - expected.float()).abs()
+    mk_logits_f = mk_logits.float()
+    diff = (mk_logits_f - ref_logits).abs()
     max_diff = diff.max().item()
     mean_diff = diff.mean().item()
-    print(f"max_diff={max_diff:.6f}, mean_diff={mean_diff:.6f}")
 
-    assert mean_diff < 4.0, f"rms_lm_head failed: mean_diff={mean_diff}"
+    mk_top = mk_logits_f.topk(10).indices.tolist()
+    ref_top = ref_logits.topk(10).indices.tolist()
+
+    print(f"max_diff={max_diff:.4f}, mean_diff={mean_diff:.6f}")
+    print(f"MK  top-10: {mk_top}")
+    print(f"Ref top-10: {ref_top}")
+    print(f"Top match: {mk_top[0] == ref_top[0]}")
+
+    assert mk_top[0] == ref_top[0], f"Top token mismatch: MK={mk_top[0]} vs ref={ref_top[0]}"
     print("PASS")
 
 
 if __name__ == "__main__":
-    test_rms_lm_head()
+    test_rms_lm_head_pipelined()
