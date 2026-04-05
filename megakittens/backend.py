@@ -368,6 +368,7 @@ def fx_graph_to_mk_dag(
 def megakittens_backend(
     fn: Callable[..., Any],
     *,
+    dry_run: bool = False,
     verify: bool = False,
     profile: bool = False,
     debug: bool = False,
@@ -380,8 +381,21 @@ def megakittens_backend(
             print(f"[MegaKittens] Compiling function `{fn.__qualname__}`")
             print(f"[MegaKittens] FX graph:")
             gm.graph.print_tabular()
-        
+
+        if save_dag or save_schedule:
+            base_path = utils.create_log_base_path(fn=fn)
+
         dag = fx_graph_to_mk_dag(gm, example_inputs)
+
+        if save_dag:
+            dag_json = utils.save_dag_as_png_as_json(dag, base_path)
+            utils.save_dag_as_png(dag_json, base_path)
+
+        if dry_run:
+            if debug:
+                print(f"[MegaKittens] Dry run mode; returning original function")
+            return make_boxed_func(gm)
+
         (
             instruction_metas,
             tensor_metas,
@@ -390,13 +404,6 @@ def megakittens_backend(
             input_tensor_indices,
             output_tensor_indices,
         ) = schedule(dag)
-
-        if save_dag or save_schedule:
-            base_path = utils.create_log_base_path(fn=fn)
-
-        if save_dag:
-            dag_json = utils.save_dag_as_png_as_json(dag, base_path)
-            utils.save_dag_as_png(dag_json, base_path)
 
         if save_schedule:
             utils.save_schedule_as_txt(

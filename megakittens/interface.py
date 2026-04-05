@@ -12,6 +12,7 @@ def compile(
     fn: Callable[..., Any] | None = None,
     *,
     enable: bool = True,
+    dry_run: bool = False,
     verify: bool = False,
     profile: bool = False,
     debug: bool = False,
@@ -24,6 +25,7 @@ def compile(
         megakernel_fn = torch._dynamo.optimize(
             backend=megakittens_backend(
                 fn=_fn,
+                dry_run=dry_run,
                 verify=verify,
                 profile=profile,
                 debug=debug,
