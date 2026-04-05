@@ -159,10 +159,8 @@ struct matvec_pipeline {
     consumer_loop(state_t<Config> &s, const Globals &g, rv_t &activations_vec) {
         
         parsed_instruction inst{s.instruction()};
-
-        int page_index   = kittens::warpid() / WARPS_PER_PAGE;
-
-        int activation_page      = get_activation_page(s);
+        int page_index = kittens::warpid() / WARPS_PER_PAGE;
+        int activation_page = get_activation_page(s);
 
         int input_stage = 0, output_stage = 0;
         for (int i = 0; i < inst.iters; i++) {
@@ -185,7 +183,6 @@ struct matvec_pipeline {
 
             llama1b::matvec(out_smem, weights, activations_vec);
 
-            kittens::warp::sync();
             kittens::warp::arrive(outputs_arrived(s, output_stage));
             kittens::warp::arrive(weights_finished(s, input_stage));
 
