@@ -16,10 +16,12 @@ __device__ __forceinline__ void controller_loop(const Globals &g, megakittens::s
         //         previous instruction to complete and invalidate its semaphores
         if (s.iter >= Config::INSTRUCTION_PIPE_STAGES) {
             const int phasebit = ((s.iter - Config::INSTRUCTION_PIPE_STAGES) / Config::INSTRUCTION_PIPE_STAGES) & 0b1;
+            if (lane_id == 0) s.record(TEVENT_AT_CTRL_WAIT);
             kittens::wait(s.instruction_finished[s.stage], phasebit);
+            if (lane_id == 0) s.record(TEVENT_DONE_CTRL_WAIT);
             if (lane_id < num_semaphores[s.stage])
                 invalidate_semaphore(s.instruction_states[s.stage].semaphores[lane_id]);
-            kittens::warp::sync(); // invalidate_semaphore relies on the instruction
+            kittens::warp::sync();
         }
 
         // Step 1. Query the CLC scheduler for the next instruction index
@@ -70,6 +72,7 @@ __device__ __forceinline__ void controller_loop(const Globals &g, megakittens::s
 
         // Step 4. Initialize dynamic semaphores
         const int icode = s.instruction_states[s.stage].instruction.icode;
+        if (lane_id == 0) s.record(TEVENT_ICODE, icode);
         num_semaphores[s.stage] = dispatch_instruction<WorkerType::semaphore_manager, int, Config, Globals>(icode, g, s);
         asm volatile("{fence.proxy.async.shared::cta;\n}" ::: "memory"); // TODO: is this really needed?
 

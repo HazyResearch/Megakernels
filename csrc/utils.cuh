@@ -56,4 +56,20 @@ __device__ __forceinline__ void all_barrier_arrive(const Globals &g, const instr
         barrier_arrive<Config>(&g.barriers.raw_ptr[inst.dst_barriers[i]], 1);
 }
 
+// timing event constants for profiling 
+// slot 0 is for icode
+constexpr int TEVENT_ICODE           = 0;
+constexpr int TEVENT_AT_GMEM_WAIT    = 1;
+constexpr int TEVENT_DONE_GMEM_WAIT  = 2;
+constexpr int TEVENT_FIRST_LOAD      = 3;
+constexpr int TEVENT_LAST_LOAD       = 4;
+constexpr int TEVENT_FIRST_USE       = 5;
+constexpr int TEVENT_LAST_USE        = 6;
+constexpr int TEVENT_FIRST_STORE     = 7;
+constexpr int TEVENT_LAST_STORE      = 8;
+constexpr int TEVENT_CONSUMER_START  = 9;
+constexpr int TEVENT_OUTPUT_READY    = 10;
+constexpr int TEVENT_AT_CTRL_WAIT    = 11;
+constexpr int TEVENT_DONE_CTRL_WAIT  = 12;
+
 } // namespace megakittens
