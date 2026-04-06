@@ -594,6 +594,119 @@ def benchmark_decode_e2e():
 
 
 
+def benchmark_tok_per_sec(prompt="Hello, my name is", max_new_tokens=200, warmup=5):
+    """Benchmark decode tokens/sec matching gpt-fast methodology.
+
+    Loads real Llama-3.2-1B weights from HuggingFace, tokenizes the same default
+    prompt as gpt-fast, and times 199 decode steps (max_new_tokens - 1, first
+    token comes from prefill) with host perf_counter + cuda.synchronize.
+    """
+    import time
+    import sys, os
+    sys.path.insert(0, os.path.dirname(__file__))
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from test_hf_reference import stack_weights, make_rope_table
+
+    sm_count = get_sm_count()
+    attn_scale = 1.0 / math.sqrt(HEAD_DIM)
+    D = "cuda"
+
+    # Load real weights from HuggingFace
+    print("Loading Llama-3.2-1B weights from HuggingFace...")
+    hf_model = AutoModelForCausalLM.from_pretrained(
+        "meta-llama/Llama-3.2-1B-Instruct", dtype=torch.bfloat16, device_map=D,
+    )
+    weights = stack_weights(hf_model)
+    rope_cos, rope_sin = make_rope_table(hf_model.config, MAX_SEQ_LEN, D)
+    embed_weight = weights["embed_weight"]
+
+    # Tokenize the same prompt as gpt-fast
+    tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-1B-Instruct")
+    input_ids = tokenizer(prompt, return_tensors="pt", add_special_tokens=True)["input_ids"][0]
+    prompt_len = input_ids.shape[0]
+    print(f"Prompt: {prompt!r}, {prompt_len} tokens")
+
+    del hf_model  # free HF model memory
+
+    # Build megakernel dispatcher
+    schedule = schedule_decode(sm_count=sm_count)
+    instruction_metas, tensor_metas, instructions, num_barriers, input_indices, output_indices = schedule
+
+    dispatcher = Dispatcher(
+        instruction_metas, tensor_metas, instructions, num_barriers,
+        input_indices, output_indices,
+        use_jit_cache=False,
+        scalar_fields=SCALARS,
+    )
+
+    # Assemble tensors in scheduler T.* order using real weights
+    hidden_states = embed_weight[input_ids[-1]].clone()  # embed last prompt token
+    logits = torch.zeros(VOCAB_SIZE, dtype=torch.bfloat16, device=D)
+    k_cache = torch.zeros(NUM_LAYERS, MAX_SEQ_LEN, NUM_KV_HEADS, HEAD_DIM, dtype=torch.bfloat16, device=D)
+    v_cache = torch.zeros(NUM_LAYERS, MAX_SEQ_LEN, NUM_KV_HEADS, HEAD_DIM, dtype=torch.bfloat16, device=D)
+
+    mk_tensors = [
+        weights["qkv_weights"],         # T.QKV_WEIGHTS
+        weights["o_weights"],           # T.O_WEIGHTS
+        weights["attn_norm_weights"],   # T.ATTN_NORM_WEIGHTS
+        weights["mlp_norm_weights"],    # T.MLP_NORM_WEIGHTS
+        weights["up_weights"],          # T.UP_WEIGHTS
+        weights["gate_weights"],        # T.GATE_WEIGHTS
+        weights["down_weights"],        # T.DOWN_WEIGHTS
+        weights["lm_head_norm_weight"], # T.LM_HEAD_NORM_WEIGHT
+        weights["lm_head_weight"],      # T.LM_HEAD_WEIGHT
+        hidden_states,                  # T.HIDDEN_STATES
+        torch.zeros(Q_DIM, dtype=torch.bfloat16, device=D),           # T.Q_POST_ROPE
+        torch.zeros(HIDDEN_DIM, dtype=torch.bfloat16, device=D),      # T.ATTN_OUT
+        torch.zeros(INTERMEDIATE_DIM, dtype=torch.bfloat16, device=D), # T.SILU_OUT
+        logits,                         # T.LOGITS
+        k_cache,                        # T.K_CACHE
+        v_cache,                        # T.V_CACHE
+        rope_cos,                       # T.ROPE_COS
+        rope_sin,                       # T.ROPE_SIN
+    ]
+
+    def _decode_step(pos_id):
+        dispatcher(*mk_tensors, pos_id, attn_scale, 1e-5)
+        # Sample + embed, matching gpt-fast's decode loop
+        probs = torch.nn.functional.softmax(logits.float(), dim=-1)
+        next_token = torch.argmax(probs, dim=-1)
+        hidden_states.copy_(embed_weight[next_token])
+
+    # Warmup: 5 full generation runs like gpt-fast
+    num_decode_tokens = max_new_tokens - 1  # 199, first token comes from prefill
+    for _ in range(warmup):
+        for pos_id in range(prompt_len, prompt_len + num_decode_tokens):
+            _decode_step(pos_id)
+    torch.cuda.synchronize()
+
+    # Timed run: 199 decode steps starting after prompt, incrementing pos_id
+    torch.cuda.synchronize()
+    t0 = time.perf_counter()
+    for pos_id in range(prompt_len, prompt_len + num_decode_tokens):
+        _decode_step(pos_id)
+    torch.cuda.synchronize()
+    t1 = time.perf_counter()
+
+    decode_time = t1 - t0
+    tok_per_sec = num_decode_tokens / decode_time
+
+    # Model size (non-embedding weights, same as gpt-fast _get_model_size)
+    model_bytes = sum(t.nelement() * t.element_size() for t in mk_tensors[:9])
+    bandwidth_gbs = model_bytes * tok_per_sec / 1e9
+
+    print()
+    print(f"Llama 3.2 1B tok/s benchmark (gpt-fast style)")
+    print(f"  Prompt length: {prompt_len}")
+    print(f"  Decode tokens: {num_decode_tokens}")
+    print(f"  Decode time: {decode_time:.3f} sec")
+    print(f"  Tokens/sec: {tok_per_sec:.1f}")
+    print(f"  Bandwidth: {bandwidth_gbs:.1f} GB/s")
+    print(f"  Model size: {model_bytes / 1e9:.2f} GB")
+    print(f"  us/token: {decode_time / num_decode_tokens * 1e6:.1f}")
+
+
 if __name__ == "__main__":
     benchmark_instructions()
     benchmark_decode_e2e()
+    benchmark_tok_per_sec()
