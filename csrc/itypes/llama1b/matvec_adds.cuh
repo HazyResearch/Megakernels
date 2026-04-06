@@ -93,7 +93,6 @@ struct MatVecAdds {
     struct consumer {
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
             constexpr int ELEMS_PER_WARP = N / Config::NUM_CONSUMER_WARPS;
-            using sv_t = kittens::sv_bf<ELEMS_PER_WARP>;
             using rv_t = kittens::rv_fl<ELEMS_PER_WARP>;
 
             parsed_instruction inst{s};
@@ -106,22 +105,15 @@ struct MatVecAdds {
             }
             kittens::group<Config::NUM_CONSUMER_WARPS>::sync(4);
 
-            // please see if we can load instead of ptr crap here
-            sv_t &activations_smem = reinterpret_cast<sv_t *>(
-                &pipeline::get_activations(s))[kittens::warpid()];
-            {
-                const kittens::bf16 *src = reinterpret_cast<const kittens::bf16 *>(
-                    g.template gls<SRC0>().raw_ptr)
-                    + inst.reduction_col_offset + kittens::warpid() * ELEMS_PER_WARP;
-                #pragma unroll
-                for (int i = kittens::laneid(); i < ELEMS_PER_WARP; i += kittens::WARP_THREADS)
-                    activations_smem.data[i] = src[i];
-            }
-            kittens::warp::sync();
-
             rv_t activations_vec;
-            kittens::warp::load(activations_vec, activations_smem);
-            kittens::warp::sync();
+            const kittens::bf16 *src = reinterpret_cast<const kittens::bf16 *>(
+                g.template gls<SRC0>().raw_ptr)
+                + inst.reduction_col_offset + kittens::warpid() * ELEMS_PER_WARP;
+            #pragma unroll
+            for (int w = 0; w < rv_t::outer_dim; w++) {
+                activations_vec.data[w][0] = __bfloat162float(
+                    src[w * kittens::WARP_THREADS + kittens::laneid()]);
+            }
 
             pipeline::consumer_loop(s, g, activations_vec);
         }
