@@ -274,14 +274,16 @@ class Dispatcher:
             max(self.num_barriers, 1), dtype=torch.int32, device=str(self.device),
         )
 
-        # Allocate timings buffer: [num_sms, max_iters_per_sm, TIMING_WIDTH]
-        # CLC persistent scheduling: 148 SMs each run ~num_instructions/num_sms instructions.
+        # Allocate timings buffer: [num_blocks, max_iters_per_block, TIMING_WIDTH]
+        # CLC with CLUSTER_SIZE=2: num_sms * CLUSTER_SIZE blocks are active,
+        # each running ~num_instructions / (num_sms * CLUSTER_SIZE) instructions.
         device_index = self.device.index if self.device.index else torch.cuda.current_device()
         num_sms = get_sm_count(device_index)
+        num_blocks = num_sms * self.CLUSTER_SIZE
         self._timings_max_iters = -(-len(self.instructions) // num_sms) + 8
         if self.profile:
             self.timings_tensor = torch.zeros(
-                num_sms, self._timings_max_iters, self.TIMING_WIDTH,
+                num_blocks, self._timings_max_iters, self.TIMING_WIDTH,
                 dtype=torch.int32, device=str(self.device),
             )
         else:
