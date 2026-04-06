@@ -215,10 +215,13 @@ class Dispatcher:
         self.timings_tensor: torch.Tensor | None = None
 
     def __del__(self) -> None:
-        if self._cubin_module is not None:
-            unload_cubin_module(self._cubin_module)
-            self._cubin_module = None
-            self._kernel_fn = None
+        try:
+            if self._cubin_module is not None:
+                unload_cubin_module(self._cubin_module)
+                self._cubin_module = None
+                self._kernel_fn = None
+        except TypeError:
+            pass  # module already garbage collected during shutdown
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         return self.call(*args, **kwargs)
@@ -272,6 +275,7 @@ class Dispatcher:
         )
 
         # Allocate timings buffer: [num_sms, max_iters_per_sm, TIMING_WIDTH]
+        # CLC persistent scheduling: 148 SMs each run ~num_instructions/num_sms instructions.
         device_index = self.device.index if self.device.index else torch.cuda.current_device()
         num_sms = get_sm_count(device_index)
         self._timings_max_iters = -(-len(self.instructions) // num_sms) + 8

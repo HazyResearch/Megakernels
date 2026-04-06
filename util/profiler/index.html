@@ -1677,54 +1677,49 @@
                     
                     if (sm >= this.timingData.numProcessors) continue;
                     
+                    // Collect all activities for this SM+functional unit, then assign sub-lanes for overlaps
+                    const activities = [];
                     for (let instr = 0; instr < this.timingData.numInstructions; instr++) {
                         totalActivitiesChecked++;
                         const activity = this.timingData.getFunctionalUnitActivity(sm, instr, functionalUnit);
-                        
-                        // Skip if no activity for this functional unit
-                        if (!activity) {
-                            skippedNoActivity++;
-                            continue;
-                        }
-                        
-                        // Skip if outside time bounds or too small
-                        if (activity.end < bounds.left || activity.start > bounds.right) {
-                            skippedOutsideTime++;
-                            continue;
-                        }
-                        if (activity.end - activity.start < minBarWidth) {
-                            skippedTooSmall++;
-                            continue;
-                        }
-                        if (barHeight < minBarHeight) {
-                            skippedTooSmall++;
-                            continue;
-                        }
-                        
-                        // Calculate Y position based on bar type
-                        let y;
+                        if (!activity) { skippedNoActivity++; continue; }
+                        if (activity.end < bounds.left || activity.start > bounds.right) { skippedOutsideTime++; continue; }
+                        if (activity.end - activity.start < minBarWidth) { skippedTooSmall++; continue; }
+                        if (barHeight < minBarHeight) { skippedTooSmall++; continue; }
+                        activities.push(activity);
+                    }
+
+                    // Assign sub-lanes: greedily place each bar in the first lane where it doesn't overlap
+                    const laneEnds = []; // tracks end time of the last bar in each lane
+                    for (const activity of activities) {
+                        let lane = 0;
+                        while (lane < laneEnds.length && laneEnds[lane] > activity.start) lane++;
+                        if (lane === laneEnds.length) laneEnds.push(0);
+                        laneEnds[lane] = activity.end;
+                        activity._lane = lane;
+                    }
+                    const numLanes = Math.max(1, laneEnds.length);
+                    const subBarHeight = barHeight / numLanes;
+
+                    for (const activity of activities) {
+                        let baseY;
                         if (functionalUnit === 1) {
-                            // Consumer bars - center them across rows 2 and 3 of the SM
-                            const sm = Math.floor(row / 5);
                             const row2Start = (sm * 5 + 2) * this.timingData.processorHeight;
-                            y = row2Start + (this.timingData.processorHeight * (1-0.667));
+                            baseY = row2Start + (this.timingData.processorHeight * (1-0.667));
                         } else {
-                            // Loader and Storer bars - standard positioning
-                            y = row * this.timingData.processorHeight + (this.timingData.processorHeight * (1-0.667)/2);
+                            baseY = row * this.timingData.processorHeight + (this.timingData.processorHeight * (1-0.667)/2);
                         }
-                        
-                        // Store bar data for batched rendering
+
                         const barData = {
                             x: activity.start,
-                            y: y,
+                            y: baseY + activity._lane * subBarHeight,
                             width: activity.end - activity.start,
-                            height: barHeight,
+                            height: subBarHeight,
                             color: activity.color
                         };
 
                         if (!this.instructionBars) this.instructionBars = [];
                         this.instructionBars.push(barData);
-                        
                         this.visibleBars++;
                         rendered++;
                     }
