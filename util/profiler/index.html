@@ -1,0 +1,2187 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>MEGAPROFILER</title>
+    <style>
+        body { margin: 0; padding: 0; background: #2a2a2a; color: white; font-family: Arial, sans-serif; }
+        #app { width: 100vw; height: 100vh; }
+        #controls { position: absolute; top: 10px; left: 10px; z-index: 100; background: rgba(0,0,0,0.8); padding: 10px; border-radius: 5px; }
+        #info { position: absolute; top: 10px; right: 10px; z-index: 100; background: rgba(0,0,0,0.8); padding: 10px; border-radius: 5px; }
+        .control-group { margin: 5px 0; }
+        label { display: inline-block; width: 120px; }
+        input { width: 60px; }
+        #loadFile { margin-top: 10px; }
+        #status { color: #888; font-size: 12px; }
+        button { 
+            background: #444; 
+            color: white; 
+            border: 1px solid #666; 
+            padding: 4px 8px; 
+            border-radius: 3px; 
+            cursor: pointer; 
+            font-size: 11px;
+        }
+        button:hover { background: #555; }
+        #tooltip { 
+            position: absolute; 
+            background: rgba(0,0,0,0.9); 
+            color: white; 
+            padding: 8px; 
+            border-radius: 4px; 
+            font-size: 12px; 
+            pointer-events: none; 
+            z-index: 1000; 
+            display: none; 
+            max-width: 300px; 
+            border: 1px solid #555; 
+        }
+        #sampleDownload { font-size: 12px; margin-top: 6px; }
+        #sampleDownload a { color: #8ab4f8; text-decoration: none; }
+        #sampleDownload a:hover { text-decoration: underline; }
+    </style>
+</head>
+<body>
+    <div id="app"></div>
+    
+    <div id="controls">
+        <div class="control-group">
+            <input type="file" id="loadFile" accept=".bin,.dat,.mkprof">
+            <div id="status">Load binary timing data</div>
+            <div id="sampleDownload"><a id="downloadSampleLink" href="https://drive.google.com/file/d/1ElBpwWvz2kNhaW--yHy649d0FcvJ0VtQ/view?usp=sharing" target="_blank" rel="noopener">No profile? Download an example.</a></div>
+        </div>
+        <div class="control-group">
+            <button id="clearPinned">Clear Pinned Events</button>
+            <div id="pinnedCount" style="font-size: 11px; color: #888;">0 events pinned</div>
+        </div>
+        <div style="font-size: 11px; margin-top: 10px;">
+            <div>Controls:</div>
+            <div>• Scroll: Zoom both axes</div>
+            <div>• Shift+Scroll: Zoom X (time)</div>
+            <div>• Ctrl+Scroll: Zoom Y (processors)</div>
+            <div>• Drag: Pan</div>
+            <div>• Click event: Pin tooltip</div>
+        </div>
+    </div>
+
+    <div id="info">
+        <div>File: <span id="fileInfo">No file loaded</span></div>
+        <div>File version: <span id="fileVersion">Unknown</span></div>
+        <div>Zoom: <span id="zoomInfo">1.0x, 1.0x</span></div>
+        <div>Visible: <span id="visibleInfo">0 bars, 0 events</span></div>
+        <div>Last Frame: <span id="perfInfo">0ms</span></div>
+        <div>Profiler version: 1.20</div>
+    </div>
+
+    <div id="tooltip"></div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pixi.js/7.2.4/pixi.min.js"></script>
+    
+    <script>
+        // Configure sample download link via URL parameter, defaulting to "/megaprofiler-sample"
+        (function(){
+            try {
+                var params = new URL(window.location.href).searchParams;
+                var sampleHref = params.get('sample');
+                var link = document.getElementById('downloadSampleLink');
+                if (link && sampleHref) {
+                    link.setAttribute('href', sampleHref);
+                }
+            } catch (e) { /* no-op */ }
+        })();
+
+        // Memory-efficient data structures
+        class TimingData {
+            constructor() {
+                this.numGpus = 0;        // Number of GPUs
+                this.numProcessors = 0;  // Now represents number of SMs
+                this.numInstructions = 0;
+                this.processorHeight = 30;  // Height for each functional unit row
+                
+                // Use separate typed arrays for different data types
+                this.instructions = null;      // Int32Array - full instruction data
+                this.startTimes = null;        // Uint32Array (nanoseconds, 4 LSBs preserved)
+                this.endTimes = null;          // Uint32Array (nanoseconds, 4 LSBs preserved)
+                this.allEvents = null;         // Uint32Array - dense [proc*instr*num_timing_events] (nanoseconds)
+                
+                this.minTime = null;
+                this.maxTime = null;
+                
+                // Configuration will be loaded from file
+                this.config = null;
+                this.colorMap = {};
+                this.eventRanges = {};
+            }
+            
+            // Load from binary format (matches Python exporter)
+            async loadFromBinary(arrayBuffer) {
+                const uint8Array = new Uint8Array(arrayBuffer);
+                let offset = 0;
+                
+                // Check for magic header "MKPROF1.2"
+                const magicHeader = "MKPROF1.2";
+                const actualMagicHeader = String.fromCharCode(...uint8Array.slice(0, uint8Array.indexOf(10))); // 10 is ASCII for newline
+                const hasMagicHeader = actualMagicHeader === magicHeader;
+                // Update file version display with version from magic header
+                document.getElementById('fileVersion').textContent = actualMagicHeader.substring('MKPROF'.length);
+                
+                
+                if (!hasMagicHeader) {
+                    throw new Error('Invalid file format. Only MKPROF 1.2 files are supported.');
+                }
+                
+                offset = magicHeader.length; // Skip magic header
+                
+                try {
+                    // Find JSON end by counting braces
+                    const textDecoder = new TextDecoder('utf-8');
+                    let jsonEndIndex = -1;
+                    let braceCount = 0;
+                    
+                    for (let i = offset; i < uint8Array.length; i++) {
+                        const char = String.fromCharCode(uint8Array[i]);
+                        if (char === '{') braceCount++;
+                        else if (char === '}') {
+                            braceCount--;
+                            if (braceCount === 0) {
+                                jsonEndIndex = i + 1;
+                                break;
+                            }
+                        }
+                    }
+                    
+                    if (jsonEndIndex <= offset) {
+                        throw new Error('Could not find JSON configuration in MKPROF 1.2 file');
+                    }
+                    
+                    const jsonBytes = uint8Array.slice(offset, jsonEndIndex);
+                    const jsonString = textDecoder.decode(jsonBytes);
+                    const parsedConfig = JSON.parse(jsonString);
+                    
+                    // Validate it has expected fields
+                    const missingFields = [];
+                    
+                    if (!parsedConfig.instruction_types) {
+                        missingFields.push('instruction_types');
+                    }
+                    if (!parsedConfig.functional_units) {
+                        missingFields.push('functional_units');
+                    }
+                    if (parsedConfig.num_gpus === undefined) {
+                        missingFields.push('num_gpus');
+                    }
+                    if (parsedConfig.total_processors === undefined) {
+                        missingFields.push('total_processors');
+                    }
+                    if (parsedConfig.max_instructions === undefined) {
+                        missingFields.push('max_instructions');
+                    }
+                    if (!parsedConfig.instruction_format || parsedConfig.instruction_format.instruction_length === undefined) {
+                        missingFields.push('instruction_format.instruction_length');
+                    }
+                    if (!parsedConfig.instruction_format || parsedConfig.instruction_format.timing_length === undefined) {
+                        missingFields.push('instruction_format.timing_length');
+                    }
+                    
+                    if (missingFields.length > 0) {
+                        throw new Error(`Invalid MKPROF 1.2 configuration: missing required fields: ${missingFields.join(', ')}`);
+                    }
+                    
+                    console.log('Loaded JSON configuration from MKPROF 1.2 file');
+                    this.config = parsedConfig;
+                    this.colorMap = this.initColorMap();
+                    this.eventRanges = this.initEventRanges();
+                    offset = jsonEndIndex;
+                    
+                } catch (e) {
+                    if (e instanceof Error) {
+                        throw e; // Re-throw our custom errors
+                    }
+                    throw new Error(`Failed to parse MKPROF 1.2 configuration: ${e.message}`);
+                }
+                
+                // Read header from JSON config
+                this.numGpus = this.config.num_gpus;
+                this.numProcessors = this.config.total_processors;
+                this.numInstructions = this.config.max_instructions;
+                const hasEvents = this.config.has_events_flag;
+                
+                console.log(`Header from JSON: numGpus=${this.numGpus}, numProcessors=${this.numProcessors}, numInstructions=${this.numInstructions}, hasEvents=${hasEvents}`);
+                
+                // Add padding to align to 4-byte boundary
+                const paddingNeeded = (4 - (offset % 4)) % 4;
+                offset += paddingNeeded;
+                
+                const totalInstructions = this.numProcessors * this.numInstructions;
+                console.log(`Calculated totalInstructions: ${totalInstructions}`);
+                
+                // Instruction data (int32 array)
+                const instructionLength = this.config.instruction_format.instruction_length;
+                const instructionDataSize = totalInstructions * instructionLength;
+                this.instructions = new Int32Array(arrayBuffer, offset, instructionDataSize);
+                this.instructionLength = instructionLength;
+                offset += instructionDataSize * 4;
+                
+                // Start times (4 bytes each, uint32 nanoseconds)
+                this.startTimes = new Uint32Array(arrayBuffer, offset, totalInstructions);
+                offset += totalInstructions * 4;
+                
+                // End times (4 bytes each, uint32 nanoseconds)
+                this.endTimes = new Uint32Array(arrayBuffer, offset, totalInstructions);
+                offset += totalInstructions * 4;
+                
+                // All events (dense format: timing_length events per instruction, uint32 nanoseconds)
+                if (hasEvents && offset < arrayBuffer.byteLength) {
+                    const timingLength = this.config.instruction_format.timing_length;
+                    const totalEvents = totalInstructions * timingLength;
+                    this.allEvents = new Uint32Array(arrayBuffer, offset, totalEvents);
+                    offset += totalEvents * 4;
+                }
+                
+                // Find time bounds from valid data
+                let minTime = Infinity;
+                let maxTime = -Infinity;
+                let validCount = 0;
+                
+                for (let i = 0; i < totalInstructions; i++) {
+                    const start = this.startTimes[i];
+                    const end = this.endTimes[i];
+                    if (start > 0 && end > start) {
+                        minTime = Math.min(minTime, start);
+                        maxTime = Math.max(maxTime, end);
+                        validCount++;
+                    }
+                }
+                
+                this.minTime = minTime === Infinity ? 0 : minTime;
+                this.maxTime = maxTime === -Infinity ? 1000 : maxTime;
+                
+                // Preprocess error events for efficient rendering
+                this.preprocessErrorEvents();
+            }
+            
+            // Get event time for a specific processor, instruction, and event type
+            getEventTime(proc, instr, eventType) {
+                if (!this.allEvents) return 0;
+                const instrIdx = proc * this.numInstructions + instr;
+                const timingLength = this.config.instruction_format.timing_length;
+                const eventIdx = instrIdx * timingLength + eventType;
+                return this.allEvents[eventIdx] || 0;
+            }
+            
+            // Decode event data - extract timing (upper 28 bits) and event type (lower 4 bits)
+            decodeEvent(rawEventData) {
+                if (!rawEventData) return null;
+                const eventType = rawEventData & 0xF;  // Last 4 bits
+                const timestamp = (rawEventData >>> 4) * 16;  // Upper 28 bits, multiply by 16 for nanosecond precision
+                return { timestamp, eventType };
+            }
+            
+            // Get functional unit name from event index
+            getFunctionalUnitFromEventIndex(eventIndex) {
+                if (eventIndex >= 16 && eventIndex <= 47) return "LOADER";
+                if (eventIndex >= 48 && eventIndex <= 79) return "CONSUMER";
+                if (eventIndex >= 80 && eventIndex <= 111) return "LAUNCHER";
+                if (eventIndex >= 112 && eventIndex <= 127) return "STORER";
+                return null;
+            }
+            
+            // Get all events for a specific functional unit and instruction
+            getEventsForFunctionalUnit(proc, instr, functionalUnitName) {
+                if (!this.allEvents) return [];
+                
+                const range = this.eventRanges[functionalUnitName];
+                if (!range) return [];
+                
+                const events = [];
+                const instrIdx = proc * this.numInstructions + instr;
+                const timingLength = this.config.instruction_format.timing_length;
+                
+                // Process events in this range more efficiently
+                for (let eventIdx = range.start; eventIdx <= range.end; eventIdx++) {
+                    const arrayIdx = instrIdx * timingLength + eventIdx;
+                    const rawData = this.allEvents[arrayIdx];
+                    
+                    // Early termination: once we hit a zero, all subsequent events in this functional unit will be zero
+                    if (!rawData || rawData === 0) break;
+                    
+                    const decoded = this.decodeEvent(rawData);
+                    if (decoded && decoded.timestamp > 0) {
+                        events.push({
+                            index: eventIdx,
+                            timestamp: decoded.timestamp,
+                            eventType: decoded.eventType,
+                            functionalUnit: functionalUnitName
+                        });
+                    }
+                }
+                return events;
+            }
+            
+            // Get functional unit activity period for a specific SM, instruction, and functional unit
+            getFunctionalUnitActivity(sm, instr, functionalUnit) {
+                // Get event mappings from config
+                const functionalUnitConfig = this.config.functional_units[functionalUnit.toString()];
+                if (!functionalUnitConfig) return null;
+                
+                const mapping = functionalUnitConfig.special_events;
+                if (!mapping) return null;
+                
+                const startTime = this.getEventTime(sm, instr, mapping.start);
+                const endTime = this.getEventTime(sm, instr, mapping.end);
+                
+                // Only return activity if both start and end events exist
+                if (startTime > 0 && endTime > startTime) {
+                    const instruction = this.getInstruction(sm, instr);
+                    return {
+                        start: startTime,
+                        end: endTime,
+                        instructionType: instruction.type,
+                        color: instruction.color
+                    };
+                }
+                
+                return null;
+            }
+            
+            getInstruction(proc, instr) {
+                const idx = proc * this.numInstructions + instr;
+                
+                // Get instruction type (always at position 0)
+                const instructionType = this.instructions[idx * this.instructionLength];
+                let color = this.colorMap[instructionType] || 0x808080;
+                
+                return {
+                    type: instructionType,
+                    start: this.startTimes[idx],
+                    end: this.endTimes[idx],
+                    color: color,
+                    fullData: this.instructions.slice(idx * this.instructionLength, (idx + 1) * this.instructionLength)
+                };
+            }
+            
+            // Get instruction parameters as a readable object
+            getInstructionParameters(proc, instr) {
+                const instruction = this.getInstruction(proc, instr);
+                const instructionType = instruction.type;
+                const instructionTypeConfig = this.config.instruction_types[instructionType.toString()];
+                
+                if (!instructionTypeConfig || !instructionTypeConfig.params) {
+                    return { opcode: instructionType };
+                }
+                
+                const params = { opcode: instructionType };
+                const paramMapping = instructionTypeConfig.params;
+                
+                for (const [position, paramName] of Object.entries(paramMapping)) {
+                    const pos = parseInt(position);
+                    if (pos < instruction.fullData.length) {
+                        params[paramName] = instruction.fullData[pos];
+                    }
+                }
+                
+                return params;
+            }
+
+            // Preprocess error events for efficient rendering
+            preprocessErrorEvents() {
+                if (!this.allEvents) return;
+                
+                console.log("Preprocessing error events...");
+                this.errorEvents = [];
+                
+                // Dynamically find all error event types by checking event_types for names containing "error"
+                const errorEventTypes = new Set();
+                if (this.config.event_types) {
+                    for (const [id, info] of Object.entries(this.config.event_types)) {
+                        if (info.name && info.name.toLowerCase().includes('error')) {
+                            errorEventTypes.add(parseInt(id));
+                        }
+                    }
+                }
+                
+                console.log(`Found error event types: ${Array.from(errorEventTypes).join(', ')}`);
+                
+                const totalInstructions = this.numProcessors * this.numInstructions;
+                let errorEventCount = 0;
+                
+                for (let sm = 0; sm < this.numProcessors; sm++) {
+                    for (let instr = 0; instr < this.numInstructions; instr++) {
+                        const instruction = this.getInstruction(sm, instr);
+                        
+                        // Skip invalid instructions
+                        if (instruction.start <= 0 || instruction.end <= instruction.start) continue;
+                        
+                        // Check each functional unit for error events
+                        for (const [functionalUnitName, range] of Object.entries(this.eventRanges)) {
+                            const events = this.getEventsForFunctionalUnit(sm, instr, functionalUnitName);
+                            
+                            for (const event of events) {
+                                // Check if this is an error event (any type that contains "error" in its name)
+                                if (errorEventTypes.has(event.eventType)) {
+                                    console.log(`Found error event: SM=${sm}, instr=${instr}, timestamp=${event.timestamp}, functionalUnit=${functionalUnitName}, eventIndex=${event.index}, eventType=${event.eventType}`);
+                                    this.errorEvents.push({
+                                        sm: sm,
+                                        instr: instr,
+                                        timestamp: event.timestamp,
+                                        functionalUnit: functionalUnitName,
+                                        eventIndex: event.index,
+                                        eventType: event.eventType,
+                                        instructionType: instruction.type
+                                    });
+                                    errorEventCount++;
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                console.log(`Found ${errorEventCount} error events`);
+                console.log("Error events array:", this.errorEvents);
+            }
+            
+            initColorMap() {
+                const colorMap = {};
+                for (const [id, info] of Object.entries(this.config.instruction_types)) {
+                    colorMap[parseInt(id)] = parseInt(info.color.replace('#', '0x'));
+                }
+                return colorMap;
+            }
+            
+            initEventRanges() {
+                const eventRanges = {};
+                for (const [id, info] of Object.entries(this.config.functional_units)) {
+                    eventRanges[info.name.toUpperCase()] = {
+                        start: info.event_range.start,
+                        end: info.event_range.end,
+                        name: info.name
+                    };
+                }
+                return eventRanges;
+            }
+        }
+
+        class GanttChart {
+            constructor() {
+                this.app = new PIXI.Application({
+                    width: window.innerWidth,
+                    height: window.innerHeight,
+                    backgroundColor: 0x2a2a2a,
+                    antialias: true
+                });
+                
+                document.getElementById('app').appendChild(this.app.view);
+                
+                this.timingData = new TimingData();
+                
+                // Viewport for pan/zoom
+                this.container = new PIXI.Container();
+                this.app.stage.addChild(this.container);
+                
+                // Screen-space container for X axis (stays in screen coordinates)
+                this.axisContainer = new PIXI.Container();
+                this.app.stage.addChild(this.axisContainer);
+                
+                // Create persistent Graphics objects to avoid memory leaks
+                this.gpuBackgroundGraphics = new PIXI.Graphics();
+                this.backgroundGraphics = new PIXI.Graphics();
+                this.controllerEventGraphics = new PIXI.Graphics(); // Special controller events (behind bars)
+                this.barGraphics = new PIXI.Graphics();
+                this.eventGraphics = new PIXI.Graphics(); // Regular events (on top)
+                
+                // X axis graphics in screen space
+                this.axesGraphics = new PIXI.Graphics();
+                
+                // Add them to container in the right order
+                this.container.addChild(this.gpuBackgroundGraphics);
+                this.container.addChild(this.backgroundGraphics);
+                this.container.addChild(this.controllerEventGraphics); // Controller events behind bars
+                this.container.addChild(this.barGraphics);
+                this.container.addChild(this.eventGraphics);
+                
+                // Add X axis to screen-space container
+                this.axisContainer.addChild(this.axesGraphics);
+                
+                // GPU color mapping (distinct off-black colors)
+                this.gpuColors = [
+                    0x2d1b1b, // Dark red
+                    0x1b2d1b, // Dark green  
+                    0x1b1b2d, // Dark blue
+                    0x2d2d1b, // Dark yellow
+                    0x2d1b2d, // Dark magenta
+                    0x1b2d2d, // Dark cyan
+                    0x2d1f1b, // Dark orange
+                    0x1f1b2d  // Dark purple
+                ];
+                
+                // Performance tracking
+                this.lastRenderTime = 0;
+                this.visibleBars = 0;
+                this.visibleEvents = 0;
+                
+                // Tooltip element
+                this.tooltip = document.getElementById('tooltip');
+                
+                // Pinned tooltips system
+                this.pinnedTooltips = [];
+                this.nextPinnedId = 0;
+                
+                this.setupViewport();
+                this.setupControls();
+                this.setupTooltips();
+                // Create bitmap font for axis labels (once)
+                if (!PIXI.BitmapFont.available || !PIXI.BitmapFont.available['AxisFont3']) {
+                    PIXI.BitmapFont.from(
+                        'AxisFont3',
+                        { fontFamily: 'Arial', fontSize: 32, fill: '#ffffff' },
+                        {
+                            // Much more comprehensive character set for axis labels
+                            chars: PIXI.BitmapFont.ALPHANUMERIC + ' .:-μµmns0123456789',
+                        }
+                    );
+                    // Reset axis label pool to ensure the new font is used
+                    this.axisBitmapFontName = 'AxisFont3';
+                    if (this.axisLabels) {
+                        for (const lbl of this.axisLabels) {
+                            if (lbl && lbl.parent) lbl.parent.removeChild(lbl);
+                        }
+                        this.axisLabels = [];
+                        this.axisLabelVisibleCount = 0;
+                    }
+                }
+                
+                // Conditional rendering system
+                this.needsRedraw = true;
+                this.app.ticker.add(() => {
+                    if (this.needsRedraw) {
+                        this.render();
+                        this.needsRedraw = false;
+                    }
+                });
+            }
+            
+            markDirty() {
+                this.needsRedraw = true;
+            }
+            
+            setupViewport() {
+                // Custom viewport handling for independent axis zoom
+                this.scale = { x: 1, y: 1 };
+                this.position = { x: 0, y: 0 };
+                this.isDragging = false;
+                this.lastMouse = { x: 0, y: 0 };
+                this.mouseDownPos = null;
+                
+                const canvas = this.app.view;
+                
+                canvas.addEventListener('wheel', (e) => {
+                    e.preventDefault();
+                    const zoomFactor = 1 + e.deltaY * -0.001;
+                    const boundedZoom = Math.max(0.1, Math.min(100, zoomFactor));
+                    
+                    // Get mouse position relative to canvas
+                    const rect = canvas.getBoundingClientRect();
+                    const mouseX = e.clientX - rect.left;
+                    const mouseY = e.clientY - rect.top;
+                    
+                    // Convert mouse position to world coordinates before zoom
+                    const worldX = (mouseX - this.position.x * this.scale.x) / this.scale.x;
+                    const worldY = (mouseY - this.position.y * this.scale.y) / this.scale.y;
+                    
+                    // Apply zoom
+                    if (e.shiftKey) {
+                        // X-axis only
+                        const newScaleX = this.scale.x * boundedZoom;
+                        this.position.x = (mouseX - worldX * newScaleX) / newScaleX;
+                        this.scale.x = newScaleX;
+                    } else if (e.ctrlKey || e.metaKey) {
+                        // Y-axis only  
+                        const newScaleY = this.scale.y * boundedZoom;
+                        this.position.y = (mouseY - worldY * newScaleY) / newScaleY;
+                        this.scale.y = newScaleY;
+                    } else {
+                        // Both axes
+                        const newScaleX = this.scale.x * boundedZoom;
+                        const newScaleY = this.scale.y * boundedZoom;
+                        this.position.x = (mouseX - worldX * newScaleX) / newScaleX;
+                        this.position.y = (mouseY - worldY * newScaleY) / newScaleY;
+                        this.scale.x = newScaleX;
+                        this.scale.y = newScaleY;
+                    }
+                    
+                    this.updateTransform();
+                    this.markDirty();
+                });
+                
+                canvas.addEventListener('mousedown', (e) => {
+                    this.mouseDownPos = { x: e.clientX, y: e.clientY };
+                    this.lastMouse = { x: e.clientX, y: e.clientY };
+                    this.isDragging = false; // Don't set to true immediately
+                });
+                
+                canvas.addEventListener('mousemove', (e) => {
+                    if (this.mouseDownPos && !this.isDragging) {
+                        // Check if mouse moved enough to start dragging
+                        const dx = e.clientX - this.mouseDownPos.x;
+                        const dy = e.clientY - this.mouseDownPos.y;
+                        const distance = Math.sqrt(dx * dx + dy * dy);
+                        
+                        if (distance > 3) { // 3 pixel threshold
+                            this.isDragging = true;
+                        }
+                    }
+                    
+                    if (this.isDragging) {
+                        const dx = e.clientX - this.lastMouse.x;
+                        const dy = e.clientY - this.lastMouse.y;
+                        
+                        this.position.x += dx / this.scale.x;
+                        this.position.y += dy / this.scale.y;
+                        
+                        this.lastMouse = { x: e.clientX, y: e.clientY };
+                        this.updateTransform();
+                        this.markDirty();
+                    } else {
+                        // Handle tooltip updates when not dragging
+                        this.updateTooltip(e);
+                    }
+                });
+                
+                canvas.addEventListener('mouseup', (e) => {
+                    if (!this.isDragging) {
+                        // Handle click - check for events to pin
+                        this.handleCanvasClick(e);
+                        this.markDirty(); // Redraw for tooltip changes
+                    }
+                    this.isDragging = false;
+                    this.mouseDownPos = null;
+                });
+                
+                canvas.addEventListener('mouseleave', () => {
+                    this.isDragging = false;
+                    this.mouseDownPos = null;
+                });
+            }
+            
+            updateTransform() {
+                this.container.scale.set(this.scale.x, this.scale.y);
+                this.container.position.set(this.position.x * this.scale.x, this.position.y * this.scale.y);
+                
+                // Update pinned tooltips to follow the chart
+                this.updateAllPinnedTooltipPositions();
+                
+                // Update info display
+                document.getElementById('zoomInfo').textContent = 
+                    `${this.scale.x.toFixed(2)}x, ${this.scale.y.toFixed(2)}x`;
+            }
+            
+            setupTooltips() {
+                // Initialize mappings from config - will be updated when file loads
+                this.updateTooltipMappings();
+            }
+            
+            updateTooltipMappings() {
+                // Only update mappings if config is loaded
+                if (!this.timingData.config) {
+                    this.eventMapping = {};
+                    this.controllerEventMapping = {};
+                    this.instructionTypeNames = {};
+                    this.functionalUnitNames = {};
+                    return;
+                }
+                
+                // Event color and shape mapping for regular functional unit events
+                this.eventMapping = {};
+                for (const [id, info] of Object.entries(this.timingData.config.event_types)) {
+                    this.eventMapping[parseInt(id)] = {
+                        name: info.name,
+                        color: parseInt(info.color.replace('#', '0x'))
+                    };
+                }
+                
+                // Separate mapping for controller events (by index, not eventType)
+                this.controllerEventMapping = {};
+                for (const [id, info] of Object.entries(this.timingData.config.controller_events)) {
+                    this.controllerEventMapping[parseInt(id)] = {
+                        name: info.name,
+                        color: parseInt(info.color.replace('#', '0x'))
+                    };
+                }
+                
+                // Instruction type names mapping
+                this.instructionTypeNames = {};
+                for (const [id, info] of Object.entries(this.timingData.config.instruction_types)) {
+                    this.instructionTypeNames[parseInt(id)] = info.name;
+                }
+                
+                // Functional unit names
+                this.functionalUnitNames = {};
+                for (const [id, info] of Object.entries(this.timingData.config.functional_units)) {
+                    this.functionalUnitNames[parseInt(id)] = info.name;
+                }
+            }
+            
+            updateTooltip(mouseEvent) {
+                if (this.timingData.numProcessors === 0) {
+                    this.hideTooltip();
+                    return;
+                }
+                
+                // Convert mouse position to world coordinates
+                const rect = this.app.view.getBoundingClientRect();
+                const mouseX = mouseEvent.clientX - rect.left;
+                const mouseY = mouseEvent.clientY - rect.top;
+                
+                const worldX = (mouseX - this.position.x * this.scale.x) / this.scale.x;
+                const worldY = (mouseY - this.position.y * this.scale.y) / this.scale.y;
+                
+                // Check for events first (only in detailed view)
+                const eventHit = this.hitTestEvent(worldX, worldY);
+                if (eventHit) {
+                    this.showEventTooltip(eventHit, mouseEvent);
+                    return;
+                }
+                
+                // Check for functional unit activities (which represent the former instructions)
+                const activityHit = this.hitTestInstruction(worldX, worldY);
+                if (activityHit) {
+                    this.showInstructionTooltip(activityHit, mouseEvent);
+                    return;
+                }
+                
+                // Nothing hit, hide tooltip
+                this.hideTooltip();
+            }
+            
+            hitTestEvent(worldX, worldY) {
+                if (!this.timingData.allEvents) return null;
+                
+                // Only hit test events in detailed view
+                const pixelsPerProcessor = this.scale.y * this.timingData.processorHeight;
+                if (pixelsPerProcessor < 3) return null;
+                
+                // First check for controller events (they span the full SM functional area)
+                const smHeight = this.timingData.processorHeight * 5;
+                const sm = Math.floor(worldY / smHeight);
+                
+                if (sm >= 0 && sm < this.timingData.numProcessors) {
+                    const smBaseY = sm * smHeight;
+                    const functionalAreaTop = smBaseY + this.timingData.processorHeight; // Skip separator row
+                    const functionalAreaBottom = functionalAreaTop + this.timingData.processorHeight * 4; // 4 functional rows
+                    
+                    // Check if we're in the functional unit area (not the separator row)
+                    if (worldY >= functionalAreaTop && worldY <= functionalAreaBottom) {
+                        // Check for controller events
+                        for (let instr = 0; instr < this.timingData.numInstructions; instr++) {
+                            const instruction = this.timingData.getInstruction(sm, instr);
+                            if (instruction.start <= 0 || instruction.end <= instruction.start) continue;
+                            
+                            // Check controller events (indices 5, 6, 7)
+                            for (const eventIndex of [5, 6, 7]) {
+                                const instrIdx = sm * this.timingData.numInstructions + instr;
+                                const timingLength = this.timingData.config.instruction_format.timing_length;
+                                const arrayIdx = instrIdx * timingLength + eventIndex;
+                                const rawData = this.timingData.allEvents[arrayIdx];
+                                
+                                if (!rawData || rawData === 0) continue;
+                                
+                                const decoded = this.timingData.decodeEvent(rawData);
+                                if (!decoded || decoded.timestamp <= 0) continue;
+                                
+                                const toleranceX = 20;
+                                if (Math.abs(worldX - decoded.timestamp) <= toleranceX) {
+                                    return {
+                                        sm: sm,
+                                        instr: instr,
+                                        instruction: instruction,
+                                        event: {
+                                            index: eventIndex,
+                                            timestamp: decoded.timestamp,
+                                            eventType: eventIndex, // Use event index as type for controller events
+                                            functionalUnit: "CONTROLLER"
+                                        },
+                                        functionalUnit: "CONTROLLER"
+                                    };
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                // Then check for regular functional unit events
+                const row = Math.floor(worldY / this.timingData.processorHeight);
+                const rowType = row % 5;
+                
+                if (rowType === 0) return null; // Skip separator rows
+                
+                const smFromRow = Math.floor(row / 5);
+                if (smFromRow >= this.timingData.numProcessors) return null;
+                
+                // Map row type to functional unit
+                let functionalUnitName;
+                if (rowType === 1) functionalUnitName = "LOADER";
+                else if (rowType === 2 || rowType === 3) functionalUnitName = "CONSUMER";
+                else if (rowType === 4) functionalUnitName = "STORER";
+                
+                for (let instr = 0; instr < this.timingData.numInstructions; instr++) {
+                    const instruction = this.timingData.getInstruction(smFromRow, instr);
+                    if (instruction.start <= 0 || instruction.end <= instruction.start) continue;
+                    
+                    const events = this.timingData.getEventsForFunctionalUnit(smFromRow, instr, functionalUnitName);
+                    
+                    // No need to filter out error events since we handle them together now
+                    
+                    // Calculate expected Y position
+                    let expectedY, toleranceY;
+                    const toleranceX = 20;
+                    if (functionalUnitName === "CONSUMER") {
+                        const row2Start = (smFromRow * 5 + 2) * this.timingData.processorHeight;
+                        expectedY = row2Start + this.timingData.processorHeight;
+                        // Consumer events span 2 full rows, so tolerance needs to cover the full area
+                        toleranceY = this.timingData.processorHeight * 0.667;
+                    } else {
+                        expectedY = row * this.timingData.processorHeight + this.timingData.processorHeight / 2;
+                        toleranceY = this.timingData.processorHeight * 0.4;
+                    }
+                    
+                    for (const event of events) {
+                        if (Math.abs(worldX - event.timestamp) <= toleranceX && 
+                            Math.abs(worldY - expectedY) <= toleranceY) {
+                            return {
+                                sm: smFromRow,
+                                instr: instr,
+                                instruction: instruction,
+                                event: event,
+                                functionalUnit: functionalUnitName
+                            };
+                        }
+                    }
+                }
+                return null;
+            }
+            
+            hitTestInstruction(worldX, worldY) {
+                const pixelsPerProcessor = this.scale.y * this.timingData.processorHeight;
+                
+                if (pixelsPerProcessor < 3) {
+                    // Simplified mode - hit test against SM-level bars
+                    const smHeight = this.timingData.processorHeight * 5;
+                    const sm = Math.floor(worldY / smHeight);
+                    
+                    if (sm < 0 || sm >= this.timingData.numProcessors) return null;
+                    
+                    // Check if we're in the bar area of this SM
+                    const smY = sm * smHeight;
+                    const barHeight = Math.min(smHeight * 0.667, this.timingData.processorHeight * 2);
+                    const barTop = smY + (smHeight - barHeight) / 2;
+                    const barBottom = barTop + barHeight;
+                    
+                    if (worldY < barTop || worldY > barBottom) return null;
+                    
+                    // Find which instruction the X coordinate corresponds to
+                    for (let instr = 0; instr < this.timingData.numInstructions; instr++) {
+                        const mainUnit = this.timingData.config.main_functional_unit;
+                        const activity = this.timingData.getFunctionalUnitActivity(sm, instr, mainUnit);
+                        if (!activity) continue;
+                        if (worldX >= activity.start && worldX <= activity.end) {
+                            return {
+                                sm: sm,
+                                functionalUnit: mainUnit, // Main functional unit (simplified mode)
+                                instr: instr,
+                                activity: activity,
+                                simplified: true
+                            };
+                        }
+                    }
+                    return null;
+                } else {
+                    // Detailed mode - hit test against individual functional unit rows
+                    const row = Math.floor(worldY / this.timingData.processorHeight);
+                    const totalRows = this.timingData.numProcessors * 5;
+                    
+                    if (row < 0 || row >= totalRows) return null;
+                    
+                    const rowType = row % 5;
+                    
+                    // Skip hit testing on separator rows
+                    if (rowType === 0) return null;
+                    
+                    const sm = Math.floor(row / 5);
+                    
+                    // Map row types to functional units
+                    let functionalUnit;
+                    if (rowType === 1) {
+                        functionalUnit = 0; // Loader
+                    } else if (rowType === 2 || rowType === 3) {
+                        functionalUnit = 1; // Consumer (spans 2 rows)
+                    } else if (rowType === 4) {
+                        functionalUnit = 2; // Storer
+                    }
+                    
+                    // For consumer, determine which row we're in and adjust hit testing
+                    let barHeight, barY;
+                    if (functionalUnit === 1) {
+                        // Consumer spans 2 rows - test against the combined area
+                        barHeight = this.timingData.processorHeight * 1.6;
+                        // Use the same Y calculation as in rendering
+                        const row2Start = (sm * 5 + 2) * this.timingData.processorHeight;
+                        barY = row2Start + (this.timingData.processorHeight * 0.2);
+                    } else {
+                        // Loader and Storer are single rows
+                        barHeight = this.timingData.processorHeight * 0.667;
+                        barY = row * this.timingData.processorHeight + (this.timingData.processorHeight * 0.1);
+                    }
+                    
+                    // Check if Y coordinate is within the bar area
+                    if (worldY < barY || worldY > barY + barHeight) return null;
+                    
+                    for (let instr = 0; instr < this.timingData.numInstructions; instr++) {
+                        const activity = this.timingData.getFunctionalUnitActivity(sm, instr, functionalUnit);
+                        
+                        if (!activity) continue;
+                        if (worldX < activity.start || worldX > activity.end) continue;
+                        
+                        return {
+                            sm: sm,
+                            functionalUnit: functionalUnit,
+                            instr: instr,
+                            activity: activity,
+                            simplified: false
+                        };
+                    }
+                    return null;
+                }
+            }
+            
+            showEventTooltip(eventHit, mouseEvent) {
+                const smsPerGpu = this.timingData.numGpus > 0 ? Math.ceil(this.timingData.numProcessors / this.timingData.numGpus) : 132;
+                const gpu = Math.floor(eventHit.sm / smsPerGpu);
+                const sm_local = eventHit.sm % smsPerGpu;
+                const instructionTypeName = this.instructionTypeNames[eventHit.instruction.type] || `Type ${eventHit.instruction.type}`;
+                
+                // Get full instruction parameters
+                const params = this.timingData.getInstructionParameters(eventHit.sm, eventHit.instr);
+                
+                // Convert nanoseconds to microseconds for display
+                const timestampUs = eventHit.event.timestamp / 1000;
+                
+                let eventTypeName;
+                if (eventHit.functionalUnit === "CONTROLLER") {
+                    eventTypeName = this.controllerEventMapping[eventHit.event.eventType]?.name || `Unknown Controller (${eventHit.event.eventType})`;
+                } else {
+                    eventTypeName = this.eventMapping[eventHit.event.eventType]?.name || `Unknown (${eventHit.event.eventType})`;
+                }
+                
+                // Build parameters display
+                const paramLines = [];
+                for (const [key, value] of Object.entries(params)) {
+                    if (key === 'opcode') continue; // Skip opcode as it's already shown
+                    paramLines.push(`${key}: ${value}`);
+                }
+                
+                let content;
+                if (eventHit.functionalUnit === "CONTROLLER") {
+                    content = [
+                        `<strong>Controller Event</strong>`,
+                        `<strong>Event Type: ${eventTypeName}</strong>`,
+                        `<strong>Instruction Type: ${instructionTypeName}</strong>`,
+                        `GPU: ${gpu}, SM: ${sm_local}`,
+                        `Instruction: ${eventHit.instr}`,
+                        `Time: ${timestampUs.toFixed(2)} μs`,
+                        `Event Index: ${eventHit.event.index}`,
+                        ...(paramLines.length > 0 ? [`<strong>Instruction Parameters:</strong>`, ...paramLines] : []),
+                        `<em>Background controller event</em>`
+                    ].join('<br>');
+                } else {
+                    content = [
+                        `<strong>${eventHit.functionalUnit} Event</strong>`,
+                        `<strong>Event Type: ${eventTypeName}</strong>`,
+                        `<strong>Instruction Type: ${instructionTypeName}</strong>`,
+                        `GPU: ${gpu}, SM: ${sm_local}`,
+                        `Instruction: ${eventHit.instr}`,
+                        `Time: ${timestampUs.toFixed(2)} μs`,
+                        `Event Index: ${eventHit.event.index}`,
+                        ...(paramLines.length > 0 ? [`<strong>Instruction Parameters:</strong>`, ...paramLines] : [])
+                    ].join('<br>');
+                }
+                
+                this.showTooltip(content, mouseEvent);
+            }
+            
+            showInstructionTooltip(instrHit, mouseEvent) {
+                const smsPerGpu = this.timingData.numGpus > 0 ? Math.ceil(this.timingData.numProcessors / this.timingData.numGpus) : 132;
+                const gpu = Math.floor(instrHit.sm / smsPerGpu);
+                const sm_local = instrHit.sm % smsPerGpu;
+                const duration = instrHit.activity.end - instrHit.activity.start;
+                const instructionTypeName = this.instructionTypeNames[instrHit.activity.instructionType] || `Type ${instrHit.activity.instructionType}`;
+                const functionalUnitName = this.functionalUnitNames[instrHit.functionalUnit];
+                
+                // Get full instruction parameters
+                const params = this.timingData.getInstructionParameters(instrHit.sm, instrHit.instr);
+                
+                // Convert nanoseconds to microseconds for display (preserving precision)
+                const startUs = instrHit.activity.start / 1000;
+                const endUs = instrHit.activity.end / 1000;
+                const durationUs = duration / 1000;
+                
+                // Build parameters display
+                const paramLines = [];
+                for (const [key, value] of Object.entries(params)) {
+                    if (key === 'opcode') continue; // Skip opcode as it's already shown
+                    paramLines.push(`${key}: ${value}`);
+                }
+                
+                let content;
+                if (instrHit.simplified) {
+                    content = [
+                        `<strong>SM ${sm_local} - Instruction ${instrHit.instr}</strong>`,
+                        `<strong>Type: ${instructionTypeName}</strong>`,
+                        `GPU: ${gpu}, SM: ${sm_local}`,
+                        `Consumer Activity:`,
+                        `Start: ${startUs.toFixed(2)} μs`,
+                        `End: ${endUs.toFixed(2)} μs`,
+                        `Duration: ${durationUs.toFixed(2)} μs`,
+                        ...(paramLines.length > 0 ? [`<strong>Parameters:</strong>`, ...paramLines] : []),
+                        `<em>(Simplified view - zoom in for detail)</em>`
+                    ].join('<br>');
+                } else {
+                    content = [
+                        `<strong>${functionalUnitName} processing Instruction ${instrHit.instr}</strong>`,
+                        `<strong>Type: ${instructionTypeName}</strong>`,
+                        `GPU: ${gpu}, SM: ${sm_local}`,
+                        `Start: ${startUs.toFixed(2)} μs`,
+                        `End: ${endUs.toFixed(2)} μs`,
+                        `Duration: ${durationUs.toFixed(2)} μs`,
+                        ...(paramLines.length > 0 ? [`<strong>Parameters:</strong>`, ...paramLines] : [])
+                    ].join('<br>');
+                }
+                
+                this.showTooltip(content, mouseEvent);
+            }
+            
+            showTooltip(content, mouseEvent) {
+                this.tooltip.innerHTML = content;
+                this.tooltip.style.display = 'block';
+                
+                // Position tooltip near mouse, but avoid going off screen
+                const tooltipRect = this.tooltip.getBoundingClientRect();
+                let left = mouseEvent.clientX + 10;
+                let top = mouseEvent.clientY - 10;
+                
+                // Adjust if tooltip would go off right edge
+                if (left + tooltipRect.width > window.innerWidth) {
+                    left = mouseEvent.clientX - tooltipRect.width - 10;
+                }
+                
+                // Adjust if tooltip would go off bottom edge
+                if (top + tooltipRect.height > window.innerHeight) {
+                    top = mouseEvent.clientY - tooltipRect.height - 10;
+                }
+                
+                this.tooltip.style.left = left + 'px';
+                this.tooltip.style.top = top + 'px';
+            }
+            
+            hideTooltip() {
+                this.tooltip.style.display = 'none';
+            }
+            
+            handleCanvasClick(mouseEvent) {
+                // Convert mouse position to world coordinates
+                const rect = this.app.view.getBoundingClientRect();
+                const mouseX = mouseEvent.clientX - rect.left;
+                const mouseY = mouseEvent.clientY - rect.top;
+                
+                const worldX = (mouseX - this.position.x * this.scale.x) / this.scale.x;
+                const worldY = (mouseY - this.position.y * this.scale.y) / this.scale.y;
+                
+                // Check for events to pin
+                const eventHit = this.hitTestEvent(worldX, worldY);
+                if (eventHit) {
+                    this.pinEventTooltip(eventHit, mouseEvent);
+                }
+            }
+            
+            pinEventTooltip(eventHit, mouseEvent) {
+                const smsPerGpu = this.timingData.numGpus > 0 ? Math.ceil(this.timingData.numProcessors / this.timingData.numGpus) : 132;
+                const gpu = Math.floor(eventHit.sm / smsPerGpu);
+                const sm_local = eventHit.sm % smsPerGpu;
+                const instructionTypeName = this.instructionTypeNames[eventHit.instruction.type] || `Type ${eventHit.instruction.type}`;
+                
+                // Get full instruction parameters
+                const params = this.timingData.getInstructionParameters(eventHit.sm, eventHit.instr);
+                
+                // Convert nanoseconds to microseconds for display
+                const timestampUs = eventHit.event.timestamp / 1000;
+                
+                let eventTypeName;
+                if (eventHit.functionalUnit === "CONTROLLER") {
+                    eventTypeName = this.controllerEventMapping[eventHit.event.eventType]?.name || `Unknown Controller (${eventHit.event.eventType})`;
+                } else {
+                    eventTypeName = this.eventMapping[eventHit.event.eventType]?.name || `Unknown (${eventHit.event.eventType})`;
+                }
+                
+                // Convert mouse click position to world coordinates
+                const rect = this.app.view.getBoundingClientRect();
+                const mouseX = mouseEvent.clientX - rect.left;
+                const mouseY = mouseEvent.clientY - rect.top;
+                const worldClickX = (mouseX - this.position.x * this.scale.x) / this.scale.x;
+                const worldClickY = (mouseY - this.position.y * this.scale.y) / this.scale.y;
+                
+                // Check if this event is already pinned
+                const existingIndex = this.pinnedTooltips.findIndex(pinned => 
+                    pinned.sm === eventHit.sm && 
+                    pinned.instr === eventHit.instr && 
+                    pinned.eventIndex === eventHit.event.index
+                );
+                
+                if (existingIndex !== -1) {
+                    // Already pinned - remove it
+                    this.removePinnedTooltip(existingIndex);
+                    return;
+                }
+                
+                // Build parameters display
+                const paramLines = [];
+                for (const [key, value] of Object.entries(params)) {
+                    if (key === 'opcode') continue; // Skip opcode as it's already shown
+                    paramLines.push(`${key}: ${value}`);
+                }
+
+                let content;
+                if (eventHit.functionalUnit === "CONTROLLER") {
+                    content = [
+                        `<strong>Controller Event</strong>`,
+                        `<strong>Event Type: ${eventTypeName}</strong>`,
+                        `<strong>Instruction Type: ${instructionTypeName}</strong>`,
+                        `GPU: ${gpu}, SM: ${sm_local}`,
+                        `Instruction: ${eventHit.instr}`,
+                        `Time: ${timestampUs.toFixed(2)} μs`,
+                        `Event Index: ${eventHit.event.index}`,
+                        ...(paramLines.length > 0 ? [`<strong>Instruction Parameters:</strong>`, ...paramLines] : []),
+                        `<em>Background controller event</em>`,
+                        `<em>Click to unpin</em>`
+                    ].join('<br>');
+                } else {
+                    content = [
+                        `<strong>${eventHit.functionalUnit} Event</strong>`,
+                        `<strong>Event Type: ${eventTypeName}</strong>`,
+                        `<strong>Instruction Type: ${instructionTypeName}</strong>`,
+                        `GPU: ${gpu}, SM: ${sm_local}`,
+                        `Instruction: ${eventHit.instr}`,
+                        `Time: ${timestampUs.toFixed(2)} μs`,
+                        `Event Index: ${eventHit.event.index}`,
+                        ...(paramLines.length > 0 ? [`<strong>Instruction Parameters:</strong>`, ...paramLines] : []),
+                        `<em>Click to unpin</em>`
+                    ].join('<br>');
+                }
+                
+                // Create pinned tooltip element
+                const pinnedTooltip = document.createElement('div');
+                pinnedTooltip.className = 'pinned-tooltip';
+                pinnedTooltip.innerHTML = content;
+                pinnedTooltip.style.cssText = `
+                    position: absolute;
+                    background: rgba(0,0,0,0.95);
+                    color: white;
+                    padding: 8px;
+                    border-radius: 4px;
+                    font-size: 12px;
+                    z-index: 1001;
+                    max-width: 300px;
+                    border: 2px solid #4CAF50;
+                    box-shadow: 0 4px 8px rgba(0,0,0,0.5);
+                `;
+                
+                // No connection line needed
+                
+                // Position the pinned tooltip (will be updated after world coords are stored)
+                // Initial positioning will be updated in the next step
+                
+                // Add click handler to remove when clicked
+                pinnedTooltip.addEventListener('click', () => {
+                    const index = this.pinnedTooltips.findIndex(p => p.element === pinnedTooltip);
+                    if (index !== -1) {
+                        this.removePinnedTooltip(index);
+                    }
+                });
+                
+                document.body.appendChild(pinnedTooltip);
+                
+                // Store pinned tooltip data with world coordinates
+                let worldY;
+                if (eventHit.functionalUnit === "CONSUMER") {
+                    const row2Start = (eventHit.sm * 5 + 2) * this.timingData.processorHeight;
+                    worldY = row2Start + this.timingData.processorHeight;
+                } else {
+                    const row = eventHit.sm * 5 + (eventHit.functionalUnit === "LOADER" ? 1 : 4);
+                    worldY = row * this.timingData.processorHeight + this.timingData.processorHeight / 2;
+                }
+                
+                this.pinnedTooltips.push({
+                    id: this.nextPinnedId++,
+                    element: pinnedTooltip,
+                    sm: eventHit.sm,
+                    instr: eventHit.instr,
+                    eventIndex: eventHit.event.index,
+                    timestamp: timestampUs,
+                    worldClickX: worldClickX, // World X coordinate of click for tooltip center
+                    worldClickY: worldClickY, // World Y coordinate of click for tooltip center
+                    functionalUnit: eventHit.functionalUnit
+                });
+                
+                // Position the tooltip using world coordinates
+                this.updatePinnedTooltipPosition(this.pinnedTooltips[this.pinnedTooltips.length - 1]);
+                
+                this.updatePinnedCount();
+                this.updatePinnedTooltipDeltas();
+            }
+            
+            updatePinnedTooltipPosition(pinned) {
+                // Convert world coordinates back to screen coordinates
+                const screenClickX = pinned.worldClickX * this.scale.x + this.position.x * this.scale.x;
+                const screenClickY = pinned.worldClickY * this.scale.y + this.position.y * this.scale.y;
+                
+                // Center tooltip exactly on the converted click position
+                let left = screenClickX - 150; // Center horizontally (assuming ~300px tooltip width)
+                let top = screenClickY - 75;   // Center vertically (assuming ~150px tooltip height)
+                
+                // Add small cascade offset for multiple tooltips to avoid complete overlap
+                const index = this.pinnedTooltips.indexOf(pinned);
+                const cascadeOffset = index * 15;
+                left += cascadeOffset;
+                top += cascadeOffset;
+                
+                // Ensure tooltip stays on screen
+                if (left + 300 > window.innerWidth) {
+                    left = window.innerWidth - 310;
+                }
+                if (left < 10) {
+                    left = 10;
+                }
+                if (top < 10) {
+                    top = 10;
+                }
+                if (top + 150 > window.innerHeight) {
+                    top = window.innerHeight - 160;
+                }
+                
+                // Position tooltip
+                pinned.element.style.left = left + 'px';
+                pinned.element.style.top = top + 'px';
+            }
+            
+            updateAllPinnedTooltipPositions() {
+                this.pinnedTooltips.forEach(pinned => {
+                    this.updatePinnedTooltipPosition(pinned);
+                });
+            }
+            
+            removePinnedTooltip(index) {
+                if (index >= 0 && index < this.pinnedTooltips.length) {
+                    const pinned = this.pinnedTooltips[index];
+                    document.body.removeChild(pinned.element);
+                    this.pinnedTooltips.splice(index, 1);
+                    this.updatePinnedCount();
+                    this.updatePinnedTooltipDeltas();
+                }
+            }
+            
+            clearAllPinnedTooltips() {
+                while (this.pinnedTooltips.length > 0) {
+                    this.removePinnedTooltip(0);
+                }
+            }
+            
+            updatePinnedCount() {
+                const count = this.pinnedTooltips.length;
+                document.getElementById('pinnedCount').textContent = `${count} event${count !== 1 ? 's' : ''} pinned`;
+            }
+            
+            updatePinnedTooltipDeltas() {
+                if (this.pinnedTooltips.length < 2) return;
+                
+                // Calculate deltas relative to earliest event
+                const times = this.pinnedTooltips.map(p => p.timestamp).sort((a, b) => a - b);
+                const earliestTime = times[0];
+                
+                this.pinnedTooltips.forEach((pinned, index) => {
+                    const delta = pinned.timestamp - earliestTime;
+                    const deltaText = delta === 0 ? " (earliest)" : ` (+${delta.toFixed(2)} μs)`;
+                    
+                    // Update tooltip content to include delta
+                    const content = pinned.element.innerHTML;
+                    const lines = content.split('<br>');
+                    
+                    // Find and update/add the time line
+                    const timeLineIndex = lines.findIndex(line => line.includes('Time:'));
+                    if (timeLineIndex !== -1) {
+                        const originalTime = lines[timeLineIndex].split(' ')[1]; // Extract just the time value
+                        lines[timeLineIndex] = `Time: ${originalTime}${deltaText}`;
+                        pinned.element.innerHTML = lines.join('<br>');
+                    }
+                });
+            }
+
+            setupControls() {
+                document.getElementById('loadFile').addEventListener('change', async (e) => {
+                    const file = e.target.files[0];
+                    if (file) {
+                        try {
+                            const arrayBuffer = await file.arrayBuffer();
+                            await this.timingData.loadFromBinary(arrayBuffer);
+                            this.updateTooltipMappings(); // Update mappings after config loads
+                            this.fitToData();
+                            document.getElementById('status').textContent = 'File loaded successfully';
+                            document.getElementById('fileInfo').textContent = file.name;
+                            var sampleEl = document.getElementById('sampleDownload');
+                            if (sampleEl) { sampleEl.style.display = 'none'; }
+                            this.markDirty(); // Force redraw with new data
+                        } catch (error) {
+                            console.error('Error loading file:', error);
+                            document.getElementById('status').textContent = `Error: ${error.message}`;
+                        }
+                    }
+                });
+                
+                // Hide tooltip when mouse leaves canvas
+                this.app.view.addEventListener('mouseleave', () => {
+                    this.hideTooltip();
+                });
+                
+                // Clear pinned tooltips button
+                document.getElementById('clearPinned').addEventListener('click', () => {
+                    this.clearAllPinnedTooltips();
+                });
+            }
+            
+            fitToData() {
+                if (this.timingData.numProcessors === 0) return;
+                
+                const timeRange = this.timingData.maxTime - this.timingData.minTime;
+                // Now we have 5 rows per SM (1 separator + 1 loader + 2 consumer + 1 storer)
+                const totalRows = this.timingData.numProcessors * 5;
+                const procRange = totalRows * this.timingData.processorHeight;
+                
+                // Fit to viewport with some padding
+                this.scale.x = (this.app.screen.width * 0.9) / timeRange;
+                this.scale.y = (this.app.screen.height * 0.9) / procRange;
+                
+                // Center the data in the viewport
+                // For X: move left edge of data to 5% of screen width
+                this.position.x = -this.timingData.minTime + (this.app.screen.width * 0.05) / this.scale.x;
+                
+                // For Y: move top edge of data to 5% of screen height  
+                this.position.y = -(this.app.screen.height * 0.05) / this.scale.y;
+                
+                this.updateTransform();
+                this.markDirty();
+            }
+            
+                         renderGpuBackgrounds(bounds) {
+                 // Render large rectangles for different GPUs in zoomed out mode
+                 if (this.timingData.numGpus === 0) return; // No GPU data loaded yet
+                 
+                 const smsPerGpu = Math.ceil(this.timingData.numProcessors / this.timingData.numGpus); // Calculate SMs per GPU
+                 const smHeight = this.timingData.processorHeight * 5; // 5 rows per SM now
+                 const gpuHeight = smsPerGpu * smHeight;
+                 
+                 const startGpu = Math.max(0, Math.floor(bounds.top / gpuHeight));
+                 const endGpu = Math.min(this.timingData.numGpus, Math.ceil(bounds.bottom / gpuHeight));
+                 
+                 for (let gpu = startGpu; gpu < endGpu; gpu++) {
+                     const y = gpu * gpuHeight;
+                     const color = this.gpuColors[gpu % 8]; // Use gpu % 8 for coloring as requested
+                     
+                     this.gpuBackgroundGraphics.beginFill(color);
+                     this.gpuBackgroundGraphics.drawRect(bounds.left, y, bounds.right - bounds.left, gpuHeight);
+                     this.gpuBackgroundGraphics.endFill();
+                 }
+             }
+            
+            render() {
+                const startTime = performance.now();
+                
+                // Clear persistent graphics objects instead of creating/destroying them
+                this.gpuBackgroundGraphics.clear();
+                this.backgroundGraphics.clear();
+                this.controllerEventGraphics.clear(); // Clear controller events
+                this.barGraphics.clear();
+                this.eventGraphics.clear(); // Clear events every frame
+                this.axesGraphics.clear();
+                
+                this.instructionBars = []; // Reset instruction bars array for batching
+                this.visibleBars = 0;
+                this.visibleEvents = 0;
+                
+                if (this.timingData.numProcessors === 0) {
+                    this.lastRenderTime = performance.now() - startTime;
+                    this.updatePerformanceInfo();
+                    return;
+                }
+                
+                // Calculate visible bounds
+                const bounds = this.getVisibleBounds();
+                
+                // LOD decisions - choose rendering mode based on zoom level
+                const pixelsPerProcessor = this.scale.y * this.timingData.processorHeight;
+                const minBarWidth = Math.max(0.5 / this.scale.x, 1.0);  // At least 0.5 screen pixels or 1.0 world units
+                const minBarHeight = Math.max(0.5 / this.scale.y, 1.0); // At least 0.5 screen pixels or 1.0 world units
+                
+                if (pixelsPerProcessor < 3) {
+                    // Zoomed out - show simplified view with GPU backgrounds
+                    console.log("Rendering in zoomed out mode");
+                    this.renderGpuBackgrounds(bounds);
+                    this.renderSimplifiedBars(bounds, minBarWidth, minBarHeight);
+                    this.renderEventsZoomedOut(bounds);
+                } else {
+                    // Zoomed in - show detailed view with backgrounds and all functional units
+                    console.log("Rendering in zoomed in mode");
+                    // Render background stripes
+                    this.renderProcessorBackgrounds(bounds, pixelsPerProcessor);
+                    
+                    // Render controller events (behind instruction bars)
+                    this.renderControllerEvents(bounds);
+                    
+                    // Render instruction bars
+                    this.renderInstructionBars(bounds, minBarWidth, minBarHeight);
+                    
+                    // Render all events in detailed view
+                    this.renderEventsZoomedIn(bounds);
+                }
+                
+                // Draw X-axis at the bottom (after all other rendering)
+                this.drawXAxis(bounds);
+                
+                this.lastRenderTime = performance.now() - startTime;
+                this.updatePerformanceInfo();
+            }
+            
+            renderEventsZoomedOut(bounds) {
+                console.log("renderEventsZoomedOut called");
+                console.log("errorEvents array:", this.timingData.errorEvents);
+                console.log("errorEvents length:", this.timingData.errorEvents ? this.timingData.errorEvents.length : 0);
+                
+                if (!this.timingData.errorEvents || this.timingData.errorEvents.length === 0) {
+                    console.log("No error events to render");
+                    return;
+                }
+                
+                const smHeight = this.timingData.processorHeight * 5; // 5 rows per SM
+                
+                // Filter error events by both time bounds AND Y bounds
+                const visibleErrorEvents = this.timingData.errorEvents.filter(errorEvent => {
+                    // Check time bounds
+                    if (errorEvent.timestamp < bounds.left || errorEvent.timestamp > bounds.right) {
+                        return false;
+                    }
+                    
+                    // Check Y bounds - calculate the Y position for this error event
+                    const smBaseY = errorEvent.sm * smHeight;
+                    const smEndY = smBaseY + smHeight;
+                    
+                    // Only include if the SM overlaps with visible Y bounds
+                    return smEndY >= bounds.top && smBaseY <= bounds.bottom;
+                });
+                
+                console.log("Visible error events after filtering:", visibleErrorEvents.length);
+                console.log("Time bounds:", bounds.left, "to", bounds.right);
+                console.log("Y bounds:", bounds.top, "to", bounds.bottom);
+                
+                if (visibleErrorEvents.length === 0) {
+                    console.log("No visible error events in bounds");
+                    return;
+                }
+                
+                const errorColor = this.eventMapping[7]?.color || 0x000000; // Use mapping color or default to black
+                
+                console.log("Rendering", visibleErrorEvents.length, "error events with color:", errorColor.toString(16));
+                console.log("SM height:", smHeight, "Processor height:", this.timingData.processorHeight);
+                console.log("Scale:", this.scale.x, this.scale.y, "Position:", this.position.x, this.position.y);
+                
+                for (const errorEvent of visibleErrorEvents) {
+                    const smBaseY = errorEvent.sm * smHeight;
+                    // Fix line width calculation - make it reasonable but keep it thick for visibility
+                    const lineWidth = Math.max(4.0 / this.scale.x, Math.min(smHeight * 0.1, 50.0 / this.scale.x));
+                    
+                    console.log("Rendering error event at timestamp:", errorEvent.timestamp, "SM:", errorEvent.sm, "Y:", smBaseY, "to", smBaseY + smHeight);
+                    console.log("Line width:", lineWidth, "Bounds:", bounds.left, "to", bounds.right, "Y bounds:", bounds.top, "to", bounds.bottom);
+                    
+                    this.eventGraphics.lineStyle(lineWidth, errorColor, 1);
+                    this.eventGraphics.moveTo(errorEvent.timestamp, smBaseY);
+                    this.eventGraphics.lineTo(errorEvent.timestamp, smBaseY + smHeight);
+                    
+                    this.visibleEvents++;
+                }
+            }
+            
+            renderEventsZoomedIn(bounds) {
+                if (!this.timingData.allEvents) return;
+                
+                // Render all events in detailed view
+                const startRow = Math.max(0, Math.floor(bounds.top / this.timingData.processorHeight));
+                const endRow = Math.min(this.timingData.numProcessors * 5, 
+                                       Math.ceil(bounds.bottom / this.timingData.processorHeight));
+                
+                for (let row = startRow; row < endRow; row++) {
+                    const rowType = row % 5;
+                    if (rowType === 0) continue; // Skip separator rows
+                    
+                    const sm = Math.floor(row / 5);
+                    if (sm >= this.timingData.numProcessors) continue;
+                    
+                    // Map row type to functional unit
+                    let functionalUnitName;
+                    if (rowType === 1) functionalUnitName = "LOADER";
+                    else if (rowType === 2 || rowType === 3) functionalUnitName = "CONSUMER";
+                    else if (rowType === 4) functionalUnitName = "STORER";
+                    
+                    // Skip the second consumer row to avoid double-rendering
+                    if (rowType === 3) continue;
+                    
+                    for (let instr = 0; instr < this.timingData.numInstructions; instr++) {
+                        const instruction = this.timingData.getInstruction(sm, instr);
+                        
+                        // Skip invalid instructions
+                        if (instruction.start <= 0 || instruction.end <= instruction.start) continue;
+                        
+                        // Skip instructions that are not visible - early exit before expensive event processing
+                        if (instruction.end < bounds.left || instruction.start > bounds.right) continue;
+                        
+                        // Get all events for this functional unit (including error events)
+                        const events = this.timingData.getEventsForFunctionalUnit(sm, instr, functionalUnitName);
+                        
+                        // Skip if no events found
+                        if (events.length === 0) continue;
+                        
+                        // Calculate Y position (similar to instruction bars)
+                        let y;
+                        let markerHeight = this.timingData.processorHeight * 0.667;
+                        if (functionalUnitName === "CONSUMER") {
+                            const row2Start = (sm * 5 + 2) * this.timingData.processorHeight;
+                            y = row2Start + this.timingData.processorHeight;  // Center of consumer area
+                            markerHeight *= 2;
+                        } else {
+                            y = row * this.timingData.processorHeight + this.timingData.processorHeight / 2;
+                        }
+                        
+                        // Render all events (including error events)
+                        this.renderEventMarkers(events, y, bounds, markerHeight);
+                    }
+                }
+            }
+            
+            getVisibleBounds() {
+                const invScaleX = 1 / this.scale.x;
+                const invScaleY = 1 / this.scale.y;
+                
+                return {
+                    left: -this.position.x,
+                    right: -this.position.x + this.app.screen.width * invScaleX,
+                    top: -this.position.y,
+                    bottom: -this.position.y + this.app.screen.height * invScaleY
+                };
+            }
+            
+            renderProcessorBackgrounds(bounds, pixelsPerProcessor) {
+                // Calculate which rows are visible (now we have 5 rows per SM: separator + loader + consumer + consumer + storer)
+                const startRow = Math.max(0, Math.floor(bounds.top / this.timingData.processorHeight));
+                const endRow = Math.min(this.timingData.numProcessors * 5, 
+                                       Math.ceil(bounds.bottom / this.timingData.processorHeight));
+                
+                // Group rows by color to minimize fill operations
+                const colorGroups = {
+                    0x000000: [], // Black separators
+                    0x003b4d: [], // Loader blue
+                    0x4d004d: [], // Consumer purple
+                    0x4d4d00: []  // Storer yellow
+                };
+                
+                for (let row = startRow; row < endRow; row++) {
+                    const y = row * this.timingData.processorHeight;
+                    const height = this.timingData.processorHeight;
+                    const rowType = row % 5;
+                    
+                    let color;
+                    if (rowType === 0) {
+                        color = 0x000000; // Black separator
+                    } else if (rowType === 1) {
+                        color = 0x003b4d; // Loader blue
+                    } else if (rowType === 2 || rowType === 3) {
+                        color = 0x4d004d; // Consumer red (takes 2 rows)
+                    } else if (rowType === 4) {
+                        color = 0x4d4d00; // Storer yellow
+                    }
+                    
+                    if (!colorGroups[color]) {
+                        colorGroups[color] = [];
+                    }
+                    colorGroups[color].push({ x: bounds.left, y: y, width: bounds.right - bounds.left, height: height });
+                }
+                
+                // Render each color group with a single fill operation using persistent graphics
+                for (const [color, rects] of Object.entries(colorGroups)) {
+                    if (rects.length > 0) {
+                        this.backgroundGraphics.beginFill(parseInt(color));
+                        for (const rect of rects) {
+                            this.backgroundGraphics.drawRect(rect.x, rect.y, rect.width, rect.height);
+                        }
+                        this.backgroundGraphics.endFill();
+                    }
+                }
+            }
+            
+            renderInstructionBars(bounds, minBarWidth, minBarHeight) {
+                // Calculate which rows are visible (now 5 rows per SM)
+                const startRow = Math.max(0, Math.floor(bounds.top / this.timingData.processorHeight));
+                const endRow = Math.min(this.timingData.numProcessors * 5, 
+                                       Math.ceil(bounds.bottom / this.timingData.processorHeight));
+                
+                let totalActivitiesChecked = 0;
+                let skippedOutsideTime = 0;
+                let skippedTooSmall = 0;
+                let skippedNoActivity = 0;
+                let rendered = 0;
+                
+                for (let row = startRow; row < endRow; row++) {
+                    // Determine what this row represents
+                    const rowType = row % 5;
+                    
+                    // Skip separator rows (rowType === 0)
+                    if (rowType === 0) continue;
+                    
+                    // Map row types to functional units and heights
+                    let functionalUnit, barHeight, rowOffset;
+                    if (rowType === 1) {
+                        // Loader - single row
+                        functionalUnit = 0;
+                        barHeight = this.timingData.processorHeight * 0.667;
+                        rowOffset = 0;
+                    } else if (rowType === 2 || rowType === 3) {
+                        // Consumer - spans 2 rows
+                        functionalUnit = 1;
+                        barHeight = this.timingData.processorHeight * 0.667 * 2; // Double height
+                        rowOffset = 0; // Remove the complex offset calculation
+                    } else if (rowType === 4) {
+                        // Storer - single row
+                        functionalUnit = 2;
+                        barHeight = this.timingData.processorHeight * 0.667;
+                        rowOffset = 0;
+                    }
+                    
+                    // Skip the second consumer row to avoid double-rendering
+                    if (rowType === 3) continue;
+                    
+                    // Determine which SM this row represents
+                    const sm = Math.floor(row / 5);
+                    
+                    if (sm >= this.timingData.numProcessors) continue;
+                    
+                    for (let instr = 0; instr < this.timingData.numInstructions; instr++) {
+                        totalActivitiesChecked++;
+                        const activity = this.timingData.getFunctionalUnitActivity(sm, instr, functionalUnit);
+                        
+                        // Skip if no activity for this functional unit
+                        if (!activity) {
+                            skippedNoActivity++;
+                            continue;
+                        }
+                        
+                        // Skip if outside time bounds or too small
+                        if (activity.end < bounds.left || activity.start > bounds.right) {
+                            skippedOutsideTime++;
+                            continue;
+                        }
+                        if (activity.end - activity.start < minBarWidth) {
+                            skippedTooSmall++;
+                            continue;
+                        }
+                        if (barHeight < minBarHeight) {
+                            skippedTooSmall++;
+                            continue;
+                        }
+                        
+                        // Calculate Y position based on bar type
+                        let y;
+                        if (functionalUnit === 1) {
+                            // Consumer bars - center them across rows 2 and 3 of the SM
+                            const sm = Math.floor(row / 5);
+                            const row2Start = (sm * 5 + 2) * this.timingData.processorHeight;
+                            y = row2Start + (this.timingData.processorHeight * (1-0.667));
+                        } else {
+                            // Loader and Storer bars - standard positioning
+                            y = row * this.timingData.processorHeight + (this.timingData.processorHeight * (1-0.667)/2);
+                        }
+                        
+                        // Store bar data for batched rendering
+                        const barData = {
+                            x: activity.start,
+                            y: y,
+                            width: activity.end - activity.start,
+                            height: barHeight,
+                            color: activity.color
+                        };
+
+                        if (!this.instructionBars) this.instructionBars = [];
+                        this.instructionBars.push(barData);
+                        
+                        this.visibleBars++;
+                        rendered++;
+                    }
+                }
+                
+                // Render all instruction bars in batches by color
+                this.renderInstructionBarsBatched();
+            }
+            
+            renderInstructionBarsBatched() {
+                if (!this.instructionBars || this.instructionBars.length === 0) return;
+                
+                // Group bars by color for efficient rendering
+                const colorGroups = new Map();
+                for (const barData of this.instructionBars) {
+                    // Group main bars by color
+                    if (!colorGroups.has(barData.color)) {
+                        colorGroups.set(barData.color, []);
+                    }
+                    colorGroups.get(barData.color).push(barData);
+                }
+                
+                // Render instruction bars grouped by color using persistent graphics
+                for (const [color, bars] of colorGroups) {
+                    this.barGraphics.beginFill(color);
+                    for (const bar of bars) {
+                        this.barGraphics.drawRect(bar.x, bar.y, bar.width, bar.height);
+                    }
+                    this.barGraphics.endFill();
+                }
+            }
+            
+            renderSimplifiedBars(bounds, minBarWidth, minBarHeight) {
+                // When zoomed out, show one bar per SM per instruction using consumer data
+                // This gives a high-level overview without overwhelming detail
+                
+                // In simplified mode, we want to use the SAME coordinate system as detailed mode
+                // but just render one bar per SM. This ensures consistency between zoom levels.
+                const smHeight = this.timingData.processorHeight * 5; // Each SM takes 5 rows in detailed view
+                const maxWorldY = this.timingData.numProcessors * smHeight;
+                
+                // Constrain bounds to actual data range
+                const constrainedTop = Math.max(0, Math.min(bounds.top, maxWorldY));
+                const constrainedBottom = Math.max(0, Math.min(bounds.bottom, maxWorldY));
+                
+                const startSM = Math.max(0, Math.floor(constrainedTop / smHeight));
+                const endSM = Math.min(this.timingData.numProcessors, Math.ceil(constrainedBottom / smHeight));
+                
+                let totalActivitiesChecked = 0;
+                let rendered = 0;
+                this.instructionBars = []; // Reset for batching
+                
+                for (let sm = startSM; sm < endSM; sm++) {
+                    for (let instr = 0; instr < this.timingData.numInstructions; instr++) {
+                        totalActivitiesChecked++;
+                        
+                        // Use main functional unit as the representative
+                        const mainUnit = this.timingData.config.main_functional_unit;
+                        const activity = this.timingData.getFunctionalUnitActivity(sm, instr, mainUnit);
+                        
+                        if (!activity) continue;
+                        
+                        // Skip if outside time bounds or too small
+                        if (activity.end < bounds.left || activity.start > bounds.right) continue;
+                        if (activity.end - activity.start < minBarWidth) continue;
+                        
+                        // Position: use the SAME coordinate system as detailed mode
+                        // This ensures the bars appear in the right place when zooming
+                        const smBaseY = sm * smHeight; // SM starts at this Y coordinate
+                        
+                        // In detailed mode, consumer would be at rows (sm*5 + 2) and (sm*5 + 3), so let's use row 2
+                        const consumerRowY = smBaseY + (2 * this.timingData.processorHeight); // Row 2 of the SM
+                        const barHeight = this.timingData.processorHeight * 3;
+                        const y = consumerRowY - barHeight / 2;
+                        
+                        if (rendered < 3) { // Only log first few bars to avoid spam
+                            console.log(`Simplified bar: SM=${sm}, smBaseY=${smBaseY}, consumerRowY=${consumerRowY}, finalY=${y}, barHeight=${barHeight}`);
+                            console.log(`Activity: start=${activity.start}, end=${activity.end}, duration=${activity.end - activity.start}`);
+                        }
+                        
+                        // Store bar data for batched rendering
+                        const barData = {
+                            x: activity.start,
+                            y: y,
+                            width: activity.end - activity.start,
+                            height: barHeight,
+                            color: activity.color
+                        };
+                        
+                        this.instructionBars.push(barData);
+                        rendered++;
+                    }
+                }
+                
+                // Use the same batched rendering method
+                this.renderInstructionBarsBatched();
+                this.visibleBars = rendered;
+            }
+            
+            renderControllerEvents(bounds) {
+                if (!this.timingData.allEvents) return;
+                
+                // Controller event indices
+                const controllerEventIndices = [5, 6, 7]; // START, READY, CLEANUP
+                
+                // Calculate which SMs are visible
+                const smHeight = this.timingData.processorHeight * 5; // 5 rows per SM
+                const startSM = Math.max(0, Math.floor(bounds.top / smHeight));
+                const endSM = Math.min(this.timingData.numProcessors, Math.ceil(bounds.bottom / smHeight));
+                
+                for (let sm = startSM; sm < endSM; sm++) {
+                    for (let instr = 0; instr < this.timingData.numInstructions; instr++) {
+                        const instruction = this.timingData.getInstruction(sm, instr);
+                        
+                        // Skip invalid instructions
+                        if (instruction.start <= 0 || instruction.end <= instruction.start) continue;
+                        
+                        // Skip instructions outside time bounds
+                        if (instruction.end < bounds.left || instruction.start > bounds.right) continue;
+                        
+                        // Check for controller events
+                        for (const eventIndex of controllerEventIndices) {
+                            const instrIdx = sm * this.timingData.numInstructions + instr;
+                            const timingLength = this.timingData.config.instruction_format.timing_length;
+                            const arrayIdx = instrIdx * timingLength + eventIndex;
+                            const rawData = this.timingData.allEvents[arrayIdx];
+                            
+                            if (!rawData || rawData === 0) continue;
+                            
+                            const decoded = this.timingData.decodeEvent(rawData);
+                            if (!decoded || decoded.timestamp <= 0) continue;
+                            
+                            // Skip if event is outside visible time bounds
+                            if (decoded.timestamp < bounds.left || decoded.timestamp > bounds.right) continue;
+                            
+                            // For controller events, use the separate controller event mapping
+                            const mapping = this.controllerEventMapping[eventIndex];
+                            if (!mapping) continue;
+                            
+                            // Calculate SM functional unit area (rows 1-4 of the SM: loader + consumer + consumer + storer)
+                            const smBaseY = sm * smHeight;
+                            const functionalAreaTop = smBaseY + this.timingData.processorHeight; // Skip separator row
+                            const functionalAreaHeight = this.timingData.processorHeight * 4; // 4 functional unit rows
+                            
+                            // Render vertical line spanning the functional unit area
+                            const lineWidth = Math.max(4.0 / this.scale.x, this.timingData.processorHeight * 0.1);
+                            this.controllerEventGraphics.lineStyle(lineWidth, mapping.color, 0.8); // Slightly transparent
+                            this.controllerEventGraphics.moveTo(decoded.timestamp, functionalAreaTop);
+                            this.controllerEventGraphics.lineTo(decoded.timestamp, functionalAreaTop + functionalAreaHeight);
+                        }
+                    }
+                }
+            }
+            
+            renderEventMarkers(events, y, bounds, markerHeight) {
+                // Pre-filter events that are outside time bounds
+                const visibleEvents = events.filter(event => 
+                    event.timestamp >= bounds.left && event.timestamp <= bounds.right
+                );
+                
+                if (visibleEvents.length === 0) return;
+                
+                // Limit number of events to prevent performance issues
+                const maxEventsPerRow = 1000;
+                const eventsToRender = visibleEvents.length > maxEventsPerRow ? 
+                    visibleEvents.slice(0, maxEventsPerRow) : visibleEvents;
+                
+                // Group events by type for efficient rendering
+                const eventsByType = new Map();
+                for (const event of eventsToRender) {
+                    // Special handling for error events
+                    if (event.eventType === 7) {
+                        if (!eventsByType.has(7)) {
+                            eventsByType.set(7, []);
+                        }
+                        eventsByType.get(7).push(event);
+                    } else {
+                        const mapping = this.eventMapping[event.eventType];
+                        if (!mapping) continue;
+                        
+                        if (!eventsByType.has(event.eventType)) {
+                            eventsByType.set(event.eventType, []);
+                        }
+                        eventsByType.get(event.eventType).push(event);
+                    }
+                }
+                
+                // Render each event type using the persistent graphics object
+                const markerWidth = markerHeight * 0.667 * this.scale.y / this.scale.x;
+                
+                for (const [eventType, eventList] of eventsByType) {
+                    const mapping = this.eventMapping[eventType];
+                    if (!mapping) continue;
+                    
+                    const color = mapping.color;
+                    
+                    // Render vertical lines
+                    const lineWidth = Math.max(6.0 / this.scale.x, markerHeight * 0.15);
+                    this.eventGraphics.lineStyle(lineWidth, color, 1);
+                    for (const event of eventList) {
+                        this.eventGraphics.moveTo(event.timestamp, y - markerHeight / 2);
+                        this.eventGraphics.lineTo(event.timestamp, y + markerHeight / 2);
+                    }
+                    
+                    this.visibleEvents += eventList.length;
+                }
+            }
+            
+            updatePerformanceInfo() {
+                document.getElementById('visibleInfo').textContent = 
+                    `${this.visibleBars} bars, ${this.visibleEvents} events`;
+                document.getElementById('perfInfo').textContent = 
+                    `${this.lastRenderTime.toFixed(2)}ms`;
+            }
+            
+            drawXAxis(bounds) {
+                const axisHeightPx = 50;
+                const screenBottomY = this.app.screen.height;
+                const axisYScreen = screenBottomY - axisHeightPx;
+                const tickHeightScreen = 20;
+                const minorTickHeightScreen = 12;
+                const labelOffsetScreen = 12; // pixels above axis line
+                
+                // Helper function to convert world X to screen X
+                const worldToScreenX = (worldX) => {
+                    return worldX * this.scale.x + this.position.x * this.scale.x;
+                };
+
+                // Tick spacing based on visible range
+                const timeRange = bounds.right - bounds.left;
+                let majorTickSpacing;
+                if (timeRange > 250e6) { // > 250ms
+                    majorTickSpacing = 100e6; // 100ms
+                } else if (timeRange > 100e6) { // > 100ms
+                    majorTickSpacing = 50e6; // 100ms
+                } else if (timeRange > 25e6) { // > 25ms
+                    majorTickSpacing = 10e6; // 10ms
+                } else if (timeRange > 10e6) { // > 10ms
+                    majorTickSpacing = 5e6; // 10ms
+                } else if (timeRange > 2.5e6) { // > 25ms
+                    majorTickSpacing = 1e6; // 1ms
+                } else if (timeRange > 1e6) { // > 1ms
+                    majorTickSpacing = 500e3; // 1ms
+                } else if (timeRange > 250e3) { // > 250us
+                    majorTickSpacing = 100e3;  // 100us
+                } else if (timeRange > 100e3) { // > 10us
+                    majorTickSpacing = 50e3;   // 10us
+                } else if (timeRange > 25e3) { // > 25us
+                    majorTickSpacing = 10e3;   // 10us
+                } else if (timeRange > 10e3) { // > 1us
+                    majorTickSpacing = 5e3; // 1us
+                } else if (timeRange > 2.5e3) { // > 2.5us
+                    majorTickSpacing = 1e3;    // 1us
+                } else if (timeRange > 1e3) { // > 1us
+                    majorTickSpacing = 500; // 1us
+                } else if (timeRange > 250) { // > 250ns
+                    majorTickSpacing = 100;     // 100ns
+                } else if (timeRange > 100) { // > 10ns
+                    majorTickSpacing = 50; // 10ns
+                } else if (timeRange > 25) { // > 25ns
+                    majorTickSpacing = 10;      // 10ns
+                }
+                const minorTickSpacing = Math.round(Math.pow(10, Math.ceil(Math.log10(majorTickSpacing / 10))));
+
+                // Axis line (full screen width)
+                this.axesGraphics.lineStyle(1.5, 0xFFFFFF, 0.8);
+                this.axesGraphics.moveTo(0, axisYScreen);
+                this.axesGraphics.lineTo(this.app.screen.width, axisYScreen);
+
+                // Minor ticks
+                const minorStart = Math.ceil(bounds.left / minorTickSpacing) * minorTickSpacing;
+                this.axesGraphics.lineStyle(1.0, 0xFFFFFF, 1.0);
+                for (let t = minorStart; t <= bounds.right; t += minorTickSpacing) {
+                    if (t % majorTickSpacing !== 0) {
+                        const screenX = worldToScreenX(t);
+                        if (screenX >= 0 && screenX <= this.app.screen.width) {
+                            this.axesGraphics.moveTo(screenX, axisYScreen - minorTickHeightScreen/2);
+                            this.axesGraphics.lineTo(screenX, axisYScreen + minorTickHeightScreen/2);
+                        }
+                    }
+                }
+                // Only draw vertical grid lines for every other minor tick (i.e., every 2*minorTickSpacing)
+                this.axesGraphics.lineStyle(1.0, 0xFFFFFF, 0.2);
+                for (let t = minorStart; t <= bounds.right; t += minorTickSpacing) {
+                    const screenX = worldToScreenX(t);
+                    if (screenX >= 0 && screenX <= this.app.screen.width) {
+                        this.axesGraphics.moveTo(screenX, 0);
+                        this.axesGraphics.lineTo(screenX, this.app.screen.height);
+                    }
+                }
+                this.axesGraphics.lineStyle(1.0, 0xFFFFFF, 0.4);
+                for (let t = minorStart; t <= bounds.right; t += minorTickSpacing) {
+                    if (t % majorTickSpacing === 0) {
+                        const screenX = worldToScreenX(t);
+                        if (screenX >= 0 && screenX <= this.app.screen.width) {
+                            this.axesGraphics.moveTo(screenX, 0);
+                            this.axesGraphics.lineTo(screenX, this.app.screen.height);
+                        }
+                    }
+                }
+
+                // Major ticks
+                const majorStart = Math.ceil(bounds.left / majorTickSpacing) * majorTickSpacing;
+                this.axesGraphics.lineStyle(1.0, 0xFFFFFF, 1.0);
+                for (let t = majorStart; t <= bounds.right; t += majorTickSpacing) {
+                    const screenX = worldToScreenX(t);
+                    if (screenX >= 0 && screenX <= this.app.screen.width) {
+                        this.axesGraphics.moveTo(screenX, axisYScreen - tickHeightScreen/2);
+                        this.axesGraphics.lineTo(screenX, axisYScreen + tickHeightScreen/2);
+                    }
+                }
+
+                // Labels: ring buffer strategy. Only reposition; relabel only for entering ticks or spacing change.
+                if (!this.axisLabels) this.axisLabels = [];
+                if (this.axisLabelSpacing === undefined) this.axisLabelSpacing = 0;
+                if (this.axisLabelStartTick === undefined) this.axisLabelStartTick = majorStart;
+                if (this.axisLabelRingStart === undefined) this.axisLabelRingStart = 0; // index into axisLabels
+
+                const maxLabels = 100; // safety cap
+                const desiredCount = Math.min(maxLabels, Math.floor((bounds.right - majorStart) / majorTickSpacing) + 1);
+
+                // Ensure pool size (do not remove once added)
+                while (this.axisLabels.length < desiredCount) {
+                    const text = new PIXI.BitmapText('', { fontName: 'AxisFont3', fontSize: 32, tint: 0xFFFFFF });
+                    text.anchor = new PIXI.Point(0.5, 0);
+                    text.roundPixels = true;
+                    this.axisContainer.addChild(text);
+                    this.axisLabels.push(text);
+                }
+
+                // Helper: format label with precision based on tick spacing
+                const formatLabel = (ns, spacingNs) => {
+                    const abs = Math.abs(ns);
+                    const sign = ns < 0 ? '-' : '';
+                    // Format label based on spacing, with comma separation and up to 3 decimals
+                    let val, unit;
+                    if (spacingNs >= 1e3) {
+                        // Milliseconds
+                        val = abs / 1e6;
+                        unit = 'ms';
+                    } else {
+                        // Microseconds
+                        val = abs / 1e3;
+                        unit = 'μs';
+                    }
+                    // Determine decimals: always at most 3, but don't show trailing zeros
+                    let decimals = 0;
+                    if (spacingNs >= 1e3) {
+                        // ms
+                        if (spacingNs < 1e6) decimals = 1;
+                        if (spacingNs < 1e5) decimals = 2;
+                        if (spacingNs < 1e4) decimals = 3;
+                    } else {
+                        // μs
+                        if (spacingNs < 1e3) decimals = 1;
+                        if (spacingNs < 1e2) decimals = 2;
+                        if (spacingNs < 1e1) decimals = 3;
+                    }
+                    decimals = Math.min(decimals, 3);
+
+                    // Format with commas before decimal, up to 3 decimals
+                    function formatWithCommas(num, decimals) {
+                        let parts = num.toFixed(decimals).split('.');
+                        parts[0] = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+                        return parts.join('.');
+                    }
+                    return `${sign}${formatWithCommas(val, decimals)}${unit}`;
+                };
+
+                const fontSize = 16; // Fixed screen-space font size
+
+                // If spacing changed or visible count changed, relabel all once and reset ring mapping
+                if (this.axisLabelSpacing !== majorTickSpacing || this.axisLabelVisibleCount !== desiredCount) {
+                    this.axisLabelSpacing = majorTickSpacing;
+                    this.axisLabelStartTick = majorStart;
+                    this.axisLabelRingStart = 0;
+                    this.axisLabelVisibleCount = desiredCount;
+                    for (let i = 0; i < this.axisLabels.length; i++) this.axisLabels[i].visible = false;
+                    for (let i = 0; i < desiredCount; i++) {
+                        const t = majorStart + i * majorTickSpacing;
+                        const idx = (this.axisLabelRingStart + i) % this.axisLabels.length;
+                        const lbl = this.axisLabels[idx];
+                        const txt = formatLabel(t, this.axisLabelSpacing);
+                        if (lbl.text !== txt) {
+                            console.log(`Setting label text: "${txt}" for time ${t}`);
+                            lbl.text = txt;
+                        }
+                        const screenX = worldToScreenX(t);
+                        lbl.position.set(screenX, axisYScreen + labelOffsetScreen);
+                        lbl.visible = screenX >= -50 && screenX <= this.app.screen.width + 50; // Show labels slightly outside screen
+                        
+                        // Debug: check if label is actually visible and positioned correctly
+                        if (i < 5) { // Only log first few to avoid spam
+                            console.log(`Label ${i}: text="${lbl.text}", pos=(${lbl.position.x}, ${lbl.position.y}), visible=${lbl.visible}, parent=${lbl.parent ? 'yes' : 'no'}`);
+                        }
+                    }
+                } else {
+                    // Compute how many major ticks the start moved
+                    const deltaTicks = Math.round((majorStart - this.axisLabelStartTick) / this.axisLabelSpacing);
+                    if (deltaTicks !== 0) {
+                        // Update start tick and rotate ring
+                        this.axisLabelStartTick += deltaTicks * this.axisLabelSpacing;
+                        const poolLen = this.axisLabels.length;
+                        if (poolLen > 0) {
+                            this.axisLabelRingStart = (this.axisLabelRingStart + deltaTicks % poolLen + poolLen) % poolLen;
+                        }
+                        // Update text only for entering labels
+                        if (desiredCount > 0 && poolLen > 0) {
+                            if (deltaTicks > 0) {
+                                // New labels appeared on the right edge
+                                const count = Math.min(deltaTicks, desiredCount);
+                                for (let i = desiredCount - count; i < desiredCount; i++) {
+                                    const t = majorStart + i * this.axisLabelSpacing;
+                                    const idx = (this.axisLabelRingStart + i) % poolLen;
+                                    const lbl = this.axisLabels[idx];
+                                    const txt = formatLabel(t, this.axisLabelSpacing);
+                                    if (lbl.text !== txt) lbl.text = txt;
+                                }
+                            } else if (deltaTicks < 0) {
+                                // New labels appeared on the left edge
+                                const count = Math.min(-deltaTicks, desiredCount);
+                                for (let i = 0; i < count; i++) {
+                                    const t = majorStart + i * this.axisLabelSpacing;
+                                    const idx = (this.axisLabelRingStart + i) % poolLen;
+                                    const lbl = this.axisLabels[idx];
+                                    const txt = formatLabel(t, this.axisLabelSpacing);
+                                    if (lbl.text !== txt) lbl.text = txt;
+                                }
+                            }
+                        }
+                    }
+                    // Positions and visibility for visible window; update stored visible count
+                    this.axisLabelVisibleCount = desiredCount;
+                    for (let i = 0; i < this.axisLabels.length; i++) this.axisLabels[i].visible = false;
+                    for (let i = 0; i < desiredCount; i++) {
+                        const t = majorStart + i * this.axisLabelSpacing;
+                        const idx = (this.axisLabelRingStart + i) % this.axisLabels.length;
+                        const lbl = this.axisLabels[idx];
+                        // Adjust bitmap font size proportionally with limits
+                        const targetPx = fontSize;
+                        if (lbl.fontSize !== targetPx) lbl.fontSize = targetPx;
+                        const screenX = worldToScreenX(t);
+                        lbl.position.set(screenX, axisYScreen + labelOffsetScreen);
+                        lbl.visible = screenX >= -50 && screenX <= this.app.screen.width + 50; // Show labels slightly outside screen
+                    }
+                }
+            }
+        }
+
+        // Initialize the application
+        const ganttChart = new GanttChart();
+        
+        // Handle window resize
+        window.addEventListener('resize', () => {
+            ganttChart.app.renderer.resize(window.innerWidth, window.innerHeight);
+            ganttChart.markDirty();
+        });
+    </script>
+</body>
+</html>
