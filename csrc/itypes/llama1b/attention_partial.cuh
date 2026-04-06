@@ -296,10 +296,14 @@ struct AttentionPartial {
             o_sv (&O_smem)[4] = get_O_smem(s);
             l_sv &L_smem = get_L_smem(s);
 
-            if (kittens::warp::elect_leader())
+            if (kittens::warp::elect_leader()) {
+                s.record(TEVENT_AT_GMEM_WAIT);
                 all_input_barrier_wait<Config>(g, s.instruction());
+                s.record(TEVENT_DONE_GMEM_WAIT);
+            }
             kittens::warp::sync();
 
+            s.record(TEVENT_CONSUMER_START);
             s.page_wait(qol_pid(s));
             q_st &Q_smem = get_Q_smem(s);
             load_Q_async(Q_smem, g, q_head_start_idx);
@@ -359,6 +363,7 @@ struct AttentionPartial {
                 kittens::warp::neg_infty(L_reg);
             }
 
+            s.record(TEVENT_OUTPUT_READY);
             store_4_rows(O_smem, O_reg, q_head_local_idx);
             kittens::warp::sync();
             kittens::warp::arrive(O_arrived(s));
