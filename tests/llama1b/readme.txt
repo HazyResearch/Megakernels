@@ -25,5 +25,5 @@ down_proj_residual         78.8         4.20          426.0
 rms_lm_head               103.9        65.70         5056.3
 
 Full decode (16 layers + lm_head, seq_len=128)
-Megakernel:   998.7 us  (2479.2 GB/s)
+Megakernel:   995.2 us  (2488.0 GB/s)
 Roofline:      309.5 us

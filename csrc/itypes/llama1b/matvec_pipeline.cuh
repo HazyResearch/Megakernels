@@ -285,22 +285,22 @@ struct rms_matvec_pipeline
         if (kittens::warp::elect_leader()) {
             s.page_wait(pipeline::get_activation_page(s));
 
+            // RMS scale does not depend on previous instruction finishing
+            auto &rms_scale = get_rms_scale(s);
+            auto &rms_sem = rms_scale_arrived(s);
+            kittens::tma::expect_bytes(rms_sem, sizeof(rms_scale));
+            kittens::tma::load_async<kittens::cache_policy::EVICT_LAST>(rms_scale, g.template gls<SRC_NORM>(), {0, 0, norm_layer_idx, 0}, rms_sem);
+
             // Wait for upstream (e.g. last downproj)
             s.record(TEVENT_AT_GMEM_WAIT);
             pipeline_specifics::gmem_wait(g, s);
             s.record(TEVENT_DONE_GMEM_WAIT);
 
-            // TMA load hidden_states and RMS scale into activation page
+            // TMA load hidden_states into activation page
             auto &activations = pipeline::get_activations(s);
-            auto &rms_scale   = get_rms_scale(s);
-
             auto &act_sem = pipeline::activations_arrived(s);
             kittens::tma::expect_bytes(act_sem, sizeof(activations));
             kittens::tma::load_async<kittens::cache_policy::EVICT_LAST>(activations, g.template gls<SRC_ACT>(), {0, 0}, act_sem);
-
-            auto &rms_sem = rms_scale_arrived(s);
-            kittens::tma::expect_bytes(rms_sem, sizeof(rms_scale));
-            kittens::tma::load_async<kittens::cache_policy::EVICT_LAST>(rms_scale, g.template gls<SRC_NORM>(), {0, 0, norm_layer_idx, 0}, rms_sem);
         }
         pipeline::loader_loop(s, g);
     }
