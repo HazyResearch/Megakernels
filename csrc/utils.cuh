@@ -71,5 +71,7 @@ constexpr int TEVENT_CONSUMER_START  = 9;
 constexpr int TEVENT_OUTPUT_READY    = 10;
 constexpr int TEVENT_AT_CTRL_WAIT    = 11;
 constexpr int TEVENT_DONE_CTRL_WAIT  = 12;
+constexpr int TEVENT_AT_GMEM_STORE   = 13;
+constexpr int TEVENT_DONE_GMEM_STORE = 14;
 
 } // namespace megakittens
