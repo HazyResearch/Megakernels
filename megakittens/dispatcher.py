@@ -37,6 +37,7 @@ class ScalarField:
 from .jit.cuda_utils import (
     get_kernel_from_cubin_module,
     get_sm_arch,
+    get_sm_count,
     initialize_cuda_context,
     launch_kernel,
     load_cubin_module,
@@ -138,6 +139,7 @@ class Dispatcher:
     DYNAMIC_SHARED_MEMORY_ALIGN = 1024
     NUM_PAGES = (227*1024 - STATIC_SHARED_MEMORY_BASE - DYNAMIC_SHARED_MEMORY_ALIGN) // PAGE_SIZE
     DYNAMIC_SHARED_MEMORY = NUM_PAGES*PAGE_SIZE + DYNAMIC_SHARED_MEMORY_ALIGN
+    TIMING_WIDTH = 16
 
     def __init__(
         self,
@@ -149,6 +151,7 @@ class Dispatcher:
         output_tensor_indices: Sequence[int],
         use_jit_cache: bool = True,
         scalar_fields: list[ScalarField] | None = None,
+        profile: bool = False,
     ) -> None:
         if not tensor_metas:
             raise RuntimeError("[MegaKittens] 'tensor_metas' must not be empty")
@@ -206,8 +209,10 @@ class Dispatcher:
         self.all_tensors: list[torch.Tensor | None] = [None] * (2 + len(tensor_metas))
         self.gls: list[gl | None] = [None] * len(self.all_tensors)
         self.use_jit_cache = use_jit_cache
+        self.profile = profile
         self.scalar_fields: list[ScalarField] = scalar_fields or []
         self.scalars: dict[str, Any] = {sf.name: 0 for sf in self.scalar_fields}
+        self.timings_tensor: torch.Tensor | None = None
 
     def __del__(self) -> None:
         if self._cubin_module is not None:
@@ -265,6 +270,18 @@ class Dispatcher:
         self.barrier_tensor = torch.zeros(
             max(self.num_barriers, 1), dtype=torch.int32, device=str(self.device),
         )
+
+        # Allocate timings buffer: [num_sms, max_iters_per_sm, TIMING_WIDTH]
+        device_index = self.device.index if self.device.index else torch.cuda.current_device()
+        num_sms = get_sm_count(device_index)
+        self._timings_max_iters = -(-len(self.instructions) // num_sms) + 8
+        if self.profile:
+            self.timings_tensor = torch.zeros(
+                num_sms, self._timings_max_iters, self.TIMING_WIDTH,
+                dtype=torch.int32, device=str(self.device),
+            )
+        else:
+            self.timings_tensor = None
 
         # Collect TMA types per tensor index from instruction metas
         tensor_tma_types: dict[int, list[st | sv]] = {}
@@ -332,6 +349,8 @@ class Dispatcher:
                     {self.gls[1].cpp_type} barriers;
                     {gl_fields}
                     {scalar_fields_str}
+                    int *timings_ptr;
+                    int timings_stride;
                     template <int I> __device__ __forceinline__ auto& gls() const {{{gls_body}}}
                 }};
                 template <WorkerType worker_type, typename T, typename Config, typename Globals, typename... Args>
@@ -358,9 +377,19 @@ class Dispatcher:
         # Reset barriers before each launch
         if self.num_barriers > 0:
             self.barrier_tensor.zero_()
+        if self.timings_tensor is not None:
+            self.timings_tensor.zero_()
         fields = [(g.tensor_to_gl(t), g.size, g.align) for g, t in zip(self.gls, self.all_tensors)]
         for sf in self.scalar_fields:
             fields.append((sf.pack(self.scalars[sf.name]), sf.size, sf.align))
+        if self.timings_tensor is not None:
+            timings_ptr = self.timings_tensor.data_ptr()
+            timings_stride = self._timings_max_iters * self.TIMING_WIDTH
+        else:
+            timings_ptr = 0
+            timings_stride = 0
+        fields.append((struct.pack('<Q', timings_ptr), 8, 8))
+        fields.append((c_int(timings_stride), 4, 4))
         _globals_holder, globals_packed = pack_args(fields)
         stream = torch.cuda.current_stream(device_index).cuda_stream
         launch_kernel(
