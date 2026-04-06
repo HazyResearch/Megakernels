@@ -31,7 +31,8 @@ void kernel(const __grid_constant__ Globals g) {
     state_t<Config> s{0, 0, clc_handle, clc_arrived,
                       instruction_states, instruction_arrived, instruction_finished,
                       pages, page_finished, tensor_finished, tensor_alloc,
-                      g.timings_ptr, g.timings_stride, clock64()};
+                      g.timings_ptr, g.timings_stride,
+                      Config::PROFILE ? (uint64_t)clock64() : 0ULL};
 
     // Initialize common semaphores
     if (threadIdx.x < Config::INSTRUCTION_PIPE_STAGES) {

@@ -345,11 +345,14 @@ class Dispatcher:
             op = template.format(tensors=tensor_args)
             dispatch_cases.append(f"case {inst_meta.icode}: return dispatch_instruction<{op}, worker_type, T>(args...);")
         dispatch_cases = "\n".join(dispatch_cases)
+        profile_str = "true" if self.profile else "false"
         source = f"""
             #include "megakittens.cuh"
             {itype_includes}
             namespace megakittens {{
-                struct MKConfig : default_config {{}};
+                struct MKConfig : default_config {{
+                    static constexpr bool PROFILE = {profile_str};
+                }};
                 struct MKGlobals {{
                     {self.gls[0].cpp_type} instructions;
                     {self.gls[1].cpp_type} barriers;

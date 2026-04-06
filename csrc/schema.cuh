@@ -69,6 +69,7 @@ struct default_config {
 
     static constexpr int SPIN_LOOP_SLEEP_NS = 20;
     static constexpr int TIMING_WIDTH = 16; // # of int32s for timing
+    static constexpr bool PROFILE = false;  // compile-time profiling toggle
 };
 
 template <typename Config>
@@ -119,22 +120,22 @@ struct state_t {
     kittens::semaphore &tensor_finished;
     kittens::tensor_allocator<1, Config::CLUSTER_SIZE> &tensor_alloc;
 
-    // timings_ptr is nullptr if profiling is disabled
+    // Profiling fields — only present when Config::PROFILE is true
     int *timings_ptr;
     int timings_stride;
     uint64_t start_clock;
 
-    // called once per instruction to record instruction type into slot 0 (special case)
     __device__ __forceinline__ void record(int event_id, int value) {
-        if (timings_ptr != nullptr) {
+        if constexpr (Config::PROFILE) {
             int offset = iter * Config::TIMING_WIDTH + event_id;
             if (offset < timings_stride)
                 timings_ptr[blockIdx.x * timings_stride + offset] = value;
         }
     }
-    // write timestamp into given event slot index
     __device__ __forceinline__ void record(int event_id) {
-        record(event_id, (int)(clock64() - start_clock));
+        if constexpr (Config::PROFILE) {
+            record(event_id, (int)(clock64() - start_clock));
+        }
     }
 
     __device__ __forceinline__ const instruction_t &instruction() const {
