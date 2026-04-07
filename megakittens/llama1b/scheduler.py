@@ -107,7 +107,8 @@ QKV_TARGET_PER_SUB = BLOCKS_PER_HEAD                                    # 4
 UPGATE_TARGET_PER_SUB = HIDDEN_DIM // MATVEC_BLOCK_SIZE                 # 128
 ATTN_RED_TARGET = NUM_ATTENTION_HEADS                                   # 32
 OPROJ_TARGET = HIDDEN_DIM // MATVEC_BLOCK_SIZE                          # 128
-DOWNPROJ_TARGET = INTERMEDIATE_DIM // MATVEC_BLOCK_SIZE                 # 512
+DOWNPROJ_INSTS_PER_CHUNK = 32  # 128 blocks / 32 = 4 blocks each
+DOWNPROJ_TARGET = INTERMEDIATE_DIM // MATVEC_BLOCK_SIZE  # 512
 
 
 def _barrier_index(layer_idx: int, opcode_slot: int, sub_idx: int = 0) -> int:
@@ -295,12 +296,14 @@ def _schedule_downproj(
         reduction_col_offset = chunk * HIDDEN_DIM
         # Fine-grained consumer: wait on the upgate sub-barrier for this chunk
         upgate_sub = _barrier_index(layer_idx, 4, chunk)
-        for block in range(num_blocks):
+        for i in range(DOWNPROJ_INSTS_PER_CHUNK):
+            start = round(i * num_blocks / DOWNPROJ_INSTS_PER_CHUNK)
+            end = round((i + 1) * num_blocks / DOWNPROJ_INSTS_PER_CHUNK)
             instructions.append(Instruction(
                 icode=icode,
                 src_tensors=(T.SILU_OUT, T.DOWN_WEIGHTS),
                 dst_tensors=(T.HIDDEN_STATES,),
-                indices=(layer_idx, block, block + 1, reduction_col_offset),
+                indices=(layer_idx, start, end, reduction_col_offset),
                 src_barriers=(upgate_sub,),
                 src_barrier_targets=(UPGATE_TARGET_PER_SUB,),
                 num_input_barriers=1,

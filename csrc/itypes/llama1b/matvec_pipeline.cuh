@@ -291,16 +291,7 @@ struct rms_matvec_pipeline
             kittens::tma::expect_bytes(rms_sem, sizeof(rms_scale));
             kittens::tma::load_async<kittens::cache_policy::EVICT_LAST>(rms_scale, g.template gls<SRC_NORM>(), {0, 0, norm_layer_idx, 0}, rms_sem);
 
-            // Wait for upstream (e.g. last downproj)
-            s.record(TEVENT_AT_GMEM_WAIT);
-            pipeline_specifics::gmem_wait(g, s);
-            s.record(TEVENT_DONE_GMEM_WAIT);
-
-            // TMA load hidden_states into activation page
-            auto &activations = pipeline::get_activations(s);
-            auto &act_sem = pipeline::activations_arrived(s);
-            kittens::tma::expect_bytes(act_sem, sizeof(activations));
-            kittens::tma::load_async<kittens::cache_policy::EVICT_LAST>(activations, g.template gls<SRC_ACT>(), {0, 0}, act_sem);
+            // upstream barrier wait and activation load now in consumer
         }
         pipeline::loader_loop(s, g);
     }
@@ -308,17 +299,35 @@ struct rms_matvec_pipeline
     __device__ static inline void consumer_loop(state_t<Config> &s, const Globals &g) {
         constexpr int ELEMS_PER_WARP = N / Config::NUM_CONSUMER_WARPS;
         using sv_slice_t = kittens::sv_bf<ELEMS_PER_WARP>;
+        using rv_t = kittens::rv_fl<ELEMS_PER_WARP>;
 
-        kittens::wait(pipeline::activations_arrived(s), 0);
+        // barrier wait 
+        if (kittens::warpid() == 0 && kittens::warp::elect_leader()) {
+            s.record(TEVENT_AT_GMEM_WAIT);
+            pipeline_specifics::gmem_wait(g, s);
+            s.record(TEVENT_DONE_GMEM_WAIT);
+        }
+        kittens::group<Config::NUM_CONSUMER_WARPS>::sync(4);
+        // b/c we have 8 warps 
+        asm volatile("{fence.acquire.gpu;}" ::: "memory");
+
+        // consumers load activations so loader can fetch weights earlier
+        rv_t activations_vec;
+        const kittens::bf16 *act_src = reinterpret_cast<const kittens::bf16 *>(
+            g.template gls<SRC_ACT>().raw_ptr) + kittens::warpid() * ELEMS_PER_WARP;
+        #pragma unroll
+        for (int w = 0; w < rv_t::outer_dim; w++) {
+            activations_vec.data[w][0] = __bfloat162float(
+                act_src[w * kittens::WARP_THREADS + kittens::laneid()]);
+        }
+
         kittens::wait(rms_scale_arrived(s), 0);
 
-        auto &rms_scale_smem   = reinterpret_cast<sv_slice_t *>(&get_rms_scale(s))[kittens::warpid()];
-        auto &activations_smem = reinterpret_cast<sv_slice_t *>(&pipeline::get_activations(s))[kittens::warpid()];
-
+        auto &rms_scale_smem = reinterpret_cast<sv_slice_t *>(&get_rms_scale(s))[kittens::warpid()];
         float *rms_scratch = reinterpret_cast<float *>(
             s.pages[pipeline::get_activation_page(s)].ptr(RMS_SCRATCH_OFFSET));
-        auto activations_vec = llama1b::rms_norm<Config, N>(
-            rms_scale_smem, activations_smem, g.rms_norm_eps, rms_scratch);
+        activations_vec = llama1b::rms_norm<Config, N>(
+            activations_vec, rms_scale_smem, g.rms_norm_eps, rms_scratch);
 
         kittens::warp::sync();
 

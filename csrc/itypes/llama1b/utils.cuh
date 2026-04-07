@@ -7,15 +7,14 @@ namespace llama1b {
 
 template <typename Config, int N>
 __device__ static inline auto
-rms_norm(const kittens::sv_bf<N / Config::NUM_CONSUMER_WARPS> &rms_scale_smem,
-         const kittens::sv_bf<N / Config::NUM_CONSUMER_WARPS> &activations_smem,
+rms_norm(kittens::rv_fl<N / Config::NUM_CONSUMER_WARPS> activations_vec,
+         const kittens::sv_bf<N / Config::NUM_CONSUMER_WARPS> &rms_scale_smem,
          float rms_norm_eps, float *scratch_memory) {
 
     constexpr int ELEMS_PER_WARP = N / Config::NUM_CONSUMER_WARPS;
     using rv_t = kittens::rv_fl<ELEMS_PER_WARP>;
-    rv_t activations_vec, sq_activations_vec, rms_scale_vec;
+    rv_t sq_activations_vec, rms_scale_vec;
 
-    kittens::warp::load(activations_vec, activations_smem);
     kittens::warp::copy(sq_activations_vec, activations_vec);
     kittens::warp::mul(sq_activations_vec, sq_activations_vec, sq_activations_vec);
     float partial_sum = kittens::warp::sum(sq_activations_vec);
@@ -39,6 +38,21 @@ rms_norm(const kittens::sv_bf<N / Config::NUM_CONSUMER_WARPS> &rms_scale_smem,
     kittens::warp::mul(activations_vec, activations_vec, rms_scale_vec);
 
     return activations_vec;
+}
+
+// overload: activations in smem — loads into registers then calls above
+template <typename Config, int N>
+__device__ static inline auto
+rms_norm(const kittens::sv_bf<N / Config::NUM_CONSUMER_WARPS> &rms_scale_smem,
+         const kittens::sv_bf<N / Config::NUM_CONSUMER_WARPS> &activations_smem,
+         float rms_norm_eps, float *scratch_memory) {
+
+    constexpr int ELEMS_PER_WARP = N / Config::NUM_CONSUMER_WARPS;
+    using rv_t = kittens::rv_fl<ELEMS_PER_WARP>;
+    rv_t activations_vec;
+
+    kittens::warp::load(activations_vec, activations_smem);
+    return rms_norm<Config, N>(activations_vec, rms_scale_smem, rms_norm_eps, scratch_memory);
 }
 
 #ifdef KITTENS_BLACKWELL

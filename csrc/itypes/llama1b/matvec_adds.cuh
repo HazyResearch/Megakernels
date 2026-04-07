@@ -57,8 +57,12 @@ struct MatVecAdds {
             if (kittens::warp::elect_leader()) {
                 s.record(TEVENT_AT_GMEM_STORE);
                 kittens::tma::store_add_async<kittens::cache_policy::EVICT_LAST>(g.template gls<DST>(), output_smem_bf, {0, block_idx});
-                kittens::tma::store_async_read_wait();
+                kittens::tma::store_async_wait();
                 s.record(TEVENT_DONE_GMEM_STORE);
+
+                // fine-grained
+                const auto &instr = s.instruction();
+                barrier_arrive<Config>(&g.barriers.raw_ptr[instr.dst_barriers[0]], 1);
             }
             kittens::warp::sync();
         }
@@ -122,10 +126,6 @@ struct MatVecAdds {
     struct storer {
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
             pipeline::storer_loop(s, g);
-            if (kittens::warp::elect_leader()) {
-                __threadfence();
-                all_barrier_arrive<Config>(g, s.instruction());
-            }
         }
     };
 };
