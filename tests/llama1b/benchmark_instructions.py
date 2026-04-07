@@ -668,9 +668,7 @@ def benchmark_tok_per_sec(prompt="Hello, my name is", max_new_tokens=200, warmup
 
     def _decode_step(pos_id):
         dispatcher(*mk_tensors, pos_id, attn_scale, 1e-5)
-        # Sample + embed, matching gpt-fast's decode loop
-        probs = torch.nn.functional.softmax(logits.float(), dim=-1)
-        next_token = torch.argmax(probs, dim=-1)
+        next_token = torch.argmax(logits, dim=-1)
         hidden_states.copy_(embed_weight[next_token])
 
     # Warmup: 5 full generation runs like gpt-fast

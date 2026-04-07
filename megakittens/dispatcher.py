@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ctypes
 import struct
 from dataclasses import dataclass
 from typing import Any, Sequence
@@ -11,7 +12,7 @@ from .schema.device import Device
 from .schema.dtype import DType
 from .schema.tensor import TensorMeta
 from .schema.instruction import Instruction, InstructionMeta
-from .jit.c_utils import c_int, c_float, pack_args
+from .jit.c_utils import c_int, c_float, align_up, pack_struct, pack_args
 from .jit.pykittens import gl
 
 
@@ -213,6 +214,13 @@ class Dispatcher:
         self.scalar_fields: list[ScalarField] = scalar_fields or []
         self.scalars: dict[str, Any] = {sf.name: 0 for sf in self.scalar_fields}
         self.timings_tensor: torch.Tensor | None = None
+        # Launch cache: avoids rebuilding gl structs + TMA descriptors every call
+        self._cached_globals_buf: bytearray | None = None
+        self._cached_scalar_offsets: list[int] = []
+        self._cached_c_buf: ctypes.Array | None = None
+        self._cached_packed_params: ctypes.Array | None = None
+        self._cached_grid: tuple[int, ...] | None = None
+        self._cached_device_index: int | None = None
 
     def __del__(self) -> None:
         try:
@@ -324,6 +332,9 @@ class Dispatcher:
             _validate_tensor_against_meta(
                 src, self.tensor_metas[tensor_idx], f"Input {input_arg_idx}"
             )
+            # Invalidate launch cache if a different tensor is passed
+            if self._cached_globals_buf is not None and self.all_tensors[2 + tensor_idx] is not src:
+                self._cached_globals_buf = None
             self.tensors[tensor_idx] = src
             self.all_tensors[2 + tensor_idx] = src  # TODO: if input dims change, all other dims + gls should change
 
@@ -382,13 +393,33 @@ class Dispatcher:
     def _launch(self) -> None:
         if self._kernel_fn is None:
             self._compile_kernel()
-        device_index = self.device.index if self.device.index else torch.cuda.current_device()
+
         # Reset barriers before each launch
         if self.num_barriers > 0:
             self.barrier_tensor.zero_()
         if self.timings_tensor is not None:
             self.timings_tensor.zero_()
+
+        if self._cached_globals_buf is not None:
+            # Fast path: patch only scalar fields into cached buffer
+            for sf, sf_offset in zip(self.scalar_fields, self._cached_scalar_offsets):
+                self._cached_globals_buf[sf_offset:sf_offset + sf.size] = sf.pack(self.scalars[sf.name])
+            stream = torch.cuda.current_stream(self._cached_device_index).cuda_stream
+            launch_kernel(
+                self._kernel_fn,
+                self._cached_packed_params,
+                grid=self._cached_grid,
+                block=(self.NUM_THREADS,),
+                dynamic_smem_bytes=self.DYNAMIC_SHARED_MEMORY,
+                stream=stream,
+                cluster=(self.CLUSTER_SIZE,),
+            )
+            return
+
+        # First call: build everything and cache
+        device_index = self.device.index if self.device.index else torch.cuda.current_device()
         fields = [(g.tensor_to_gl(t), g.size, g.align) for g, t in zip(self.gls, self.all_tensors)]
+        num_gl_fields = len(fields)
         for sf in self.scalar_fields:
             fields.append((sf.pack(self.scalars[sf.name]), sf.size, sf.align))
         if self.timings_tensor is not None:
@@ -399,12 +430,30 @@ class Dispatcher:
             timings_stride = 0
         fields.append((struct.pack('<Q', timings_ptr), 8, 8))
         fields.append((c_int(timings_stride), 4, 4))
-        _globals_holder, globals_packed = pack_args(fields)
+
+        # Compute scalar field byte offsets within packed struct
+        scalar_offsets = []
+        offset = 0
+        for i, (_, size, field_align) in enumerate(fields):
+            offset = align_up(offset, field_align)
+            if num_gl_fields <= i < num_gl_fields + len(self.scalar_fields):
+                scalar_offsets.append(offset)
+            offset += size
+
+        # Build packed buffer and cache
+        buf = pack_struct(fields)
+        self._cached_globals_buf = buf
+        self._cached_scalar_offsets = scalar_offsets
+        self._cached_c_buf = (ctypes.c_char * len(buf)).from_buffer(buf)
+        self._cached_packed_params = (ctypes.c_void_p * 1)(ctypes.addressof(self._cached_c_buf))
+        self._cached_grid = (-(-len(self.instructions) // self.CLUSTER_SIZE) * self.CLUSTER_SIZE,)
+        self._cached_device_index = device_index
+
         stream = torch.cuda.current_stream(device_index).cuda_stream
         launch_kernel(
             self._kernel_fn,
-            globals_packed,
-            grid=(-(-len(self.instructions) // self.CLUSTER_SIZE) * self.CLUSTER_SIZE,),  # round up to CLUSTER_SIZE
+            self._cached_packed_params,
+            grid=self._cached_grid,
             block=(self.NUM_THREADS,),
             dynamic_smem_bytes=self.DYNAMIC_SHARED_MEMORY,
             stream=stream,
