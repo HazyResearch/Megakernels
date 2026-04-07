@@ -595,11 +595,11 @@ def benchmark_decode_e2e():
 
 
 def benchmark_tok_per_sec(prompt="Hello, my name is", max_new_tokens=200, warmup=5):
-    """Benchmark decode tokens/sec matching gpt-fast methodology.
+    """Benchmark decode throughput (tokens/sec) with real HF weights.
 
-    Loads real Llama-3.2-1B weights from HuggingFace, tokenizes the same default
-    prompt as gpt-fast, and times 199 decode steps (max_new_tokens - 1, first
-    token comes from prefill) with host perf_counter + cuda.synchronize.
+    Loads Llama-3.2-1B-Instruct from HuggingFace, runs repeated decode steps
+    (max_new_tokens - 1; the first new token is treated as coming from prefill),
+    timed with perf_counter and cuda.synchronize.
     """
     import time
     import sys, os
@@ -620,7 +620,6 @@ def benchmark_tok_per_sec(prompt="Hello, my name is", max_new_tokens=200, warmup
     rope_cos, rope_sin = make_rope_table(hf_model.config, MAX_SEQ_LEN, D)
     embed_weight = weights["embed_weight"]
 
-    # Tokenize the same prompt as gpt-fast
     tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-1B-Instruct")
     input_ids = tokenizer(prompt, return_tensors="pt", add_special_tokens=True)["input_ids"][0]
     prompt_len = input_ids.shape[0]
@@ -690,12 +689,12 @@ def benchmark_tok_per_sec(prompt="Hello, my name is", max_new_tokens=200, warmup
     decode_time = t1 - t0
     tok_per_sec = num_decode_tokens / decode_time
 
-    # Model size (non-embedding weights, same as gpt-fast _get_model_size)
+    # Non-embedding weight tensors only (for bandwidth estimate)
     model_bytes = sum(t.nelement() * t.element_size() for t in mk_tensors[:9])
     bandwidth_gbs = model_bytes * tok_per_sec / 1e9
 
     print()
-    print(f"Llama 3.2 1B tok/s benchmark (gpt-fast style)")
+    print("Llama 3.2 1B decode tokens/sec benchmark")
     print(f"  Prompt length: {prompt_len}")
     print(f"  Decode tokens: {num_decode_tokens}")
     print(f"  Decode time: {decode_time:.3f} sec")
