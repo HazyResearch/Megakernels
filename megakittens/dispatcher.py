@@ -459,3 +459,29 @@ class Dispatcher:
             stream=stream,
             cluster=(self.CLUSTER_SIZE,),
         )
+
+    def relaunch(self, **scalars: Any) -> None:
+        """Minimal-overhead relaunch using cached globals. Only patches the given scalars.
+
+        Must be called after at least one regular call() to build the cache.
+        Skips tensor validation, arg unpacking, and output construction.
+        """
+        if self._cached_globals_buf is None:
+            raise RuntimeError(
+                "[MegaKittens] relaunch() requires a prior call() to build the launch cache"
+            )
+        if self.num_barriers > 0:
+            self.barrier_tensor.zero_()
+        for sf, sf_offset in zip(self.scalar_fields, self._cached_scalar_offsets):
+            if sf.name in scalars:
+                self._cached_globals_buf[sf_offset:sf_offset + sf.size] = sf.pack(scalars[sf.name])
+        stream = torch.cuda.current_stream(self._cached_device_index).cuda_stream
+        launch_kernel(
+            self._kernel_fn,
+            self._cached_packed_params,
+            grid=self._cached_grid,
+            block=(self.NUM_THREADS,),
+            dynamic_smem_bytes=self.DYNAMIC_SHARED_MEMORY,
+            stream=stream,
+            cluster=(self.CLUSTER_SIZE,),
+        )

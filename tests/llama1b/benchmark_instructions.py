@@ -667,12 +667,13 @@ def benchmark_tok_per_sec(prompt="Hello, my name is", max_new_tokens=200, warmup
     ]
 
     def _decode_step(pos_id):
-        dispatcher(*mk_tensors, pos_id, attn_scale, 1e-5)
+        dispatcher.relaunch(pos_id=pos_id)
         next_token = torch.argmax(logits, dim=-1)
         hidden_states.copy_(embed_weight[next_token])
 
-    # Warmup: 5 full generation runs like gpt-fast
+    # Warmup: first call via call() to build cache, then relaunch
     num_decode_tokens = max_new_tokens - 1  # 199, first token comes from prefill
+    dispatcher(*mk_tensors, prompt_len, attn_scale, 1e-5)
     for _ in range(warmup):
         for pos_id in range(prompt_len, prompt_len + num_decode_tokens):
             _decode_step(pos_id)
