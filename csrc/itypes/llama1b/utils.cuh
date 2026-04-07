@@ -5,6 +5,7 @@
 namespace megakittens {
 namespace llama1b {
 
+// rmsnorm, activations already in registers (used by rms_matvec_pipeline consumer)
 template <typename Config, int N>
 __device__ static inline auto
 rms_norm(kittens::rv_fl<N / Config::NUM_CONSUMER_WARPS> activations_vec,
@@ -40,7 +41,7 @@ rms_norm(kittens::rv_fl<N / Config::NUM_CONSUMER_WARPS> activations_vec,
     return activations_vec;
 }
 
-// overload: activations in smem — loads into registers then calls above
+// rmsnorm, activations in smem (oriiginal path)
 template <typename Config, int N>
 __device__ static inline auto
 rms_norm(const kittens::sv_bf<N / Config::NUM_CONSUMER_WARPS> &rms_scale_smem,
