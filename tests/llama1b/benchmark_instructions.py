@@ -665,24 +665,36 @@ def benchmark_tok_per_sec(prompt="Hello, my name is", max_new_tokens=200, warmup
         rope_sin,                       # T.ROPE_SIN
     ]
 
-    def _decode_step(pos_id):
+    embedding = torch.nn.Embedding(VOCAB_SIZE, HIDDEN_DIM, device=D, dtype=torch.bfloat16)
+    embedding.weight.data.copy_(embed_weight)
+    output_tokens = torch.zeros(max_new_tokens, dtype=torch.long, device=D)
+
+    def _decode_step(pos_id, input_token):
+        hidden_states.copy_(embedding(input_token))
         dispatcher.relaunch(pos_id=pos_id)
         next_token = torch.argmax(logits, dim=-1)
-        hidden_states.copy_(embed_weight[next_token])
+        return next_token
 
     # Warmup: first call via call() to build cache, then relaunch
     num_decode_tokens = max_new_tokens - 1  # 199, first token comes from prefill
     dispatcher(*mk_tensors, prompt_len, attn_scale, 1e-5)
+    output_tokens[0] = input_ids[-1]
     for _ in range(warmup):
-        for pos_id in range(prompt_len, prompt_len + num_decode_tokens):
-            _decode_step(pos_id)
+        token = output_tokens[0]
+        for i in range(num_decode_tokens):
+            pos_id = prompt_len + i
+            token = _decode_step(pos_id, token)
+            output_tokens[i + 1] = token
     torch.cuda.synchronize()
 
     # Timed run: 199 decode steps starting after prompt, incrementing pos_id
     torch.cuda.synchronize()
     t0 = time.perf_counter()
-    for pos_id in range(prompt_len, prompt_len + num_decode_tokens):
-        _decode_step(pos_id)
+    token = output_tokens[0]
+    for i in range(num_decode_tokens):
+        pos_id = prompt_len + i
+        token = _decode_step(pos_id, token)
+        output_tokens[i + 1] = token
     torch.cuda.synchronize()
     t1 = time.perf_counter()
 
