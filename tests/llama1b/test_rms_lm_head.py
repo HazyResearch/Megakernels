@@ -1,5 +1,5 @@
 """
-Standalone test for the pipelined RmsLmHead kernel.
+Standalone test for the RmsLmHead kernel.
 Schedules ONLY lm_head instructions (no other layers), feeds known inputs,
 compares against PyTorch reference.
 """
@@ -105,7 +105,7 @@ def rmsnorm(x, weight, eps):
 
 
 @torch.inference_mode()
-def test_rms_lm_head_pipelined():
+def test_rms_lm_head():
     torch.manual_seed(42)
 
     hidden_states = torch.randn(HIDDEN_DIM, device=DEVICE, dtype=DTYPE)
@@ -151,4 +151,4 @@ def test_rms_lm_head_pipelined():
 
 
 if __name__ == "__main__":
-    test_rms_lm_head_pipelined()
+    test_rms_lm_head()

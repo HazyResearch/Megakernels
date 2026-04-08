@@ -43,12 +43,6 @@ struct instruction_t {
 };
 static_assert(sizeof(instruction_t) == 256);
 
-__device__ __forceinline__ unsigned int get_smid() {
-    unsigned int ret;
-    asm volatile("mov.u32 %0, %%smid;" : "=r"(ret));
-    return ret;
-}
-
 struct default_config {
     static constexpr int INSTRUCTION_PIPE_STAGES = 2;
     static constexpr int CLUSTER_SIZE = 1;
@@ -132,7 +126,7 @@ struct state_t {
         if constexpr (Config::PROFILE) {
             int offset = iter * Config::TIMING_WIDTH + event_id;
             if (offset < timings_stride)
-                timings_ptr[get_smid() * timings_stride + offset] = value;
+                timings_ptr[blockIdx.x * timings_stride + offset] = value;
         }
     }
     __device__ __forceinline__ void record(int event_id) {

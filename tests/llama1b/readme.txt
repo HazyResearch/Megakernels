@@ -9,7 +9,6 @@ o_proj_residual          0.015625   0.000011
 down_proj_residual       2.000000    0.221401
 rms_upgate_silu         64.000000    1.433940
 rms_lm_head              0.5000      0.000077
-rms_lm_head_pipelined   0.5000      0.000077
 
 End-to-end decode correctness
 MK vs PyTorch ref:  max_diff=0.1406  mean_diff=0.0250

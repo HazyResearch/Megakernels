@@ -7,7 +7,6 @@ namespace megakittens {
 template <typename Config, typename Globals>
 __device__ __forceinline__ void controller_loop(const Globals &g, megakittens::state_t<Config> &s) {
     const int lane_id = ::kittens::laneid();
-    const unsigned int sm_id = get_smid();
     int num_semaphores[Config::INSTRUCTION_PIPE_STAGES];
     int last_stage = -1;
     const unsigned int num_iters = g.instructions.rows();
@@ -27,7 +26,7 @@ __device__ __forceinline__ void controller_loop(const Globals &g, megakittens::s
 
         // Step 1. Load instruction from per-SM queue
         static_assert(sizeof(instruction_t)/sizeof(int) == 64); // 2 warp-wide loads
-        int *inst_src = &g.instructions[{(int)sm_id, (int)s.iter, 0}];
+        int *inst_src = &g.instructions[{(int)blockIdx.x, (int)s.iter, 0}];
         int *inst_dst = reinterpret_cast<int*>(&s.instruction_states[s.stage].instruction);
         inst_dst[lane_id + 0]  = inst_src[lane_id + 0];
         inst_dst[lane_id + 32] = inst_src[lane_id + 32];
