@@ -2,10 +2,6 @@
 
 GPU megakernel runtime that fuses PyTorch operator graphs into a single persistent CUDA kernel, built on top of [ThunderKittens](csrc/ThunderKittens/).
 
-## Environment
-
-Always `conda activate enbao` first. Torch's bundled NVRTC 12.x was symlinked to NVRTC 13.0 (in `nvidia/cu13/lib/`) because B300 (`sm_103a`) requires NVRTC 13.0+. If a pip upgrade restores the old libs, re-symlink `nvidia/cuda_nvrtc/lib/libnvrtc.so.12` → `nvidia/cu13/lib/libnvrtc.so.13`.
-
 ## Running tests
 
 ```

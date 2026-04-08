@@ -60,9 +60,10 @@ struct MatVecAdds {
                 kittens::tma::store_async_wait();
                 s.record(TEVENT_DONE_GMEM_STORE);
 
-                // fine-grained
-                const auto &instr = s.instruction();
-                barrier_arrive<Config>(&g.barriers.raw_ptr[instr.dst_barriers[0]], 1);
+                if (output_idx == inst.iters - 1) {
+                    const auto &instr = s.instruction();
+                    barrier_arrive<Config>(&g.barriers.raw_ptr[instr.dst_barriers[0]], inst.iters);
+                }
             }
             kittens::warp::sync();
         }
