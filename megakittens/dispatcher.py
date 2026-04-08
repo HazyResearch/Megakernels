@@ -96,6 +96,30 @@ def _pack_instructions(instructions: list[Instruction], *, device: str) -> torch
     return torch.tensor(buf, dtype=torch.int32, device=device)
 
 
+_NOOP_INSTRUCTION = Instruction(
+    icode=0, src_tensors=(), dst_tensors=(), indices=(),
+    src_barriers=(), src_barrier_targets=(),
+    num_input_barriers=0, num_reuse_barriers=0, num_dst_barriers=0,
+    dst_barriers=(),
+)
+
+
+def _pack_sm_queues(instructions: list[Instruction], sm_count: int, *, device: str) -> torch.Tensor:
+    """Assign instructions round-robin to SMs, pad with NoOps, return (num_sms, max_queue_len, 64) tensor."""
+    sm_queues: list[list[Instruction]] = [[] for _ in range(sm_count)]
+    for i, inst in enumerate(instructions):
+        sm_queues[i % sm_count].append(inst)
+    max_queue_len = max(len(q) for q in sm_queues) if sm_queues else 0
+    buf: list[list[int]] = []
+    for queue in sm_queues:
+        for inst in queue:
+            buf.append(_pack_instruction(inst))
+        for _ in range(max_queue_len - len(queue)):
+            buf.append(_pack_instruction(_NOOP_INSTRUCTION))
+    t = torch.tensor(buf, dtype=torch.int32, device=device)
+    return t.view(sm_count, max_queue_len, 64)
+
+
 def _validate_tensor_against_meta(
     tensor: torch.Tensor, meta: TensorMeta, label: str,
 ) -> None:
@@ -130,7 +154,7 @@ class Dispatcher:
 
     # Must match default_config in csrc/schema.cuh
     INSTRUCTION_PIPE_STAGES = 2
-    CLUSTER_SIZE = 2
+    CLUSTER_SIZE = 1
     NUM_CONSUMER_WARPS = 8
     NUM_WARPS = 4 + NUM_CONSUMER_WARPS
     NUM_THREADS = NUM_WARPS * 32
@@ -276,22 +300,21 @@ class Dispatcher:
                 meta.shape, dtype=meta.dtype.torch_dtype, device=str(meta.device),
             )
 
-        # Allocate instruction and barrier tensors
-        self.instruction_tensor = _pack_instructions(self.instructions, device=str(self.device))
+        # Allocate instruction and barrier tensors (per-SM queues)
+        device_index = self.device.index if self.device.index else torch.cuda.current_device()
+        num_sms = get_sm_count(device_index)
+        self.instruction_tensor = _pack_sm_queues(self.instructions, num_sms, device=str(self.device))
+        self._num_sms = num_sms
         self.barrier_tensor = torch.zeros(
             max(self.num_barriers, 1), dtype=torch.int32, device=str(self.device),
         )
 
-        # Allocate timings buffer: [num_blocks, max_iters_per_block, TIMING_WIDTH]
-        # CLC with CLUSTER_SIZE=2: num_sms * CLUSTER_SIZE blocks are active,
-        # each running ~num_instructions / (num_sms * CLUSTER_SIZE) instructions.
-        device_index = self.device.index if self.device.index else torch.cuda.current_device()
-        num_sms = get_sm_count(device_index)
-        num_blocks = num_sms * self.CLUSTER_SIZE
-        self._timings_max_iters = -(-len(self.instructions) // num_sms) + 8
+        # Allocate timings buffer: [num_sms, max_queue_len, TIMING_WIDTH]
+        max_queue_len = self.instruction_tensor.shape[1]
+        self._timings_max_iters = max_queue_len
         if self.profile:
             self.timings_tensor = torch.zeros(
-                num_blocks, self._timings_max_iters, self.TIMING_WIDTH,
+                num_sms, self._timings_max_iters, self.TIMING_WIDTH,
                 dtype=torch.int32, device=str(self.device),
             )
         else:
@@ -312,7 +335,9 @@ class Dispatcher:
         self.all_tensors = [self.instruction_tensor, self.barrier_tensor] + self.tensors
         for i, t in enumerate(self.all_tensors):
             mk_dtype = DType.from_torch(t.dtype)
-            if i < 2:  # instructions and barriers
+            if i == 0:  # instructions: 3D (num_sms, max_queue_len, 64)
+                self.gls[i] = gl(dtype=mk_dtype, b=1, d=-1, r=-1, c=64)
+            elif i == 1:  # barriers
                 self.gls[i] = gl(dtype=mk_dtype, b=1, d=1, r=-1, c=-1)
             else:
                 tma = tensor_tma_types.get(i - 2, [])
@@ -342,6 +367,14 @@ class Dispatcher:
         device_index = self.device.index if self.device.index else torch.cuda.current_device()  # TODO: handle multi-GPU case
         initialize_cuda_context(device_index)
         major, minor = get_sm_arch(device_index)  # TODO: Generate config and globals correctly based on instructions
+
+        # megakittens.cuh pulls in Blackwell-only ThunderKittens (CLC handles, tcgen05 tensor_allocator).
+        # NVRTC uses KITTENS_HOPPER on sm_90, which omits those symbols — compilation fails on H100.
+        if major < 10:
+            raise RuntimeError(
+                "[MegaKittens] These kernels require NVIDIA Blackwell (compute capability sm_100+). "
+                "Hopper (H100) and earlier GPUs are not supported. Use B200/B300-class hardware."
+            )
 
         itype_includes = "\n".join(f'#include "{inst_meta.itype.cpp_include}"' for inst_meta in self.instruction_metas if inst_meta.itype.cpp_include)
         gl_fields = "\n".join(f"{self.gls[i + 2].cpp_type} tensor_{i};" for i in range(len(self.gls) - 2))
@@ -412,7 +445,7 @@ class Dispatcher:
                 block=(self.NUM_THREADS,),
                 dynamic_smem_bytes=self.DYNAMIC_SHARED_MEMORY,
                 stream=stream,
-                cluster=(self.CLUSTER_SIZE,),
+                cluster=None,
             )
             return
 
@@ -446,7 +479,7 @@ class Dispatcher:
         self._cached_scalar_offsets = scalar_offsets
         self._cached_c_buf = (ctypes.c_char * len(buf)).from_buffer(buf)
         self._cached_packed_params = (ctypes.c_void_p * 1)(ctypes.addressof(self._cached_c_buf))
-        self._cached_grid = (-(-len(self.instructions) // self.CLUSTER_SIZE) * self.CLUSTER_SIZE,)
+        self._cached_grid = (self._num_sms,)
         self._cached_device_index = device_index
 
         stream = torch.cuda.current_stream(device_index).cuda_stream
@@ -457,7 +490,7 @@ class Dispatcher:
             block=(self.NUM_THREADS,),
             dynamic_smem_bytes=self.DYNAMIC_SHARED_MEMORY,
             stream=stream,
-            cluster=(self.CLUSTER_SIZE,),
+            cluster=None,
         )
 
     def relaunch(self, **scalars: Any) -> None:
@@ -483,5 +516,5 @@ class Dispatcher:
             block=(self.NUM_THREADS,),
             dynamic_smem_bytes=self.DYNAMIC_SHARED_MEMORY,
             stream=stream,
-            cluster=(self.CLUSTER_SIZE,),
+            cluster=None,
         )

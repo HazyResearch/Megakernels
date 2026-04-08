@@ -6,12 +6,13 @@ namespace megakittens {
 
 template <typename Config, typename Globals>
 __device__ __forceinline__ void controller_loop(const Globals &g, megakittens::state_t<Config> &s) {
-    const int cta_rank = ::kittens::cluster_ctarank();
     const int lane_id = ::kittens::laneid();
+    const unsigned int sm_id = get_smid();
     int num_semaphores[Config::INSTRUCTION_PIPE_STAGES];
     int last_stage = -1;
+    const unsigned int num_iters = g.instructions.rows();
 
-    for (s.iter = 0, s.stage = 0; true; ++s.iter) {
+    for (s.iter = 0, s.stage = 0; s.iter < num_iters; ++s.iter) {
         // Step 0. If this is not the first time the slot is being used, wait for the
         //         previous instruction to complete and invalidate its semaphores
         if (s.iter >= Config::INSTRUCTION_PIPE_STAGES) {
@@ -24,38 +25,15 @@ __device__ __forceinline__ void controller_loop(const Globals &g, megakittens::s
             kittens::warp::sync();
         }
 
-        // Step 1. Query the CLC scheduler for the next instruction index
-        int instruction_index;
-        if (s.iter == 0) {
-            instruction_index = blockIdx.x;
-        } else {
-            const int phasebit = ((s.iter - 1) / Config::INSTRUCTION_PIPE_STAGES) & 0b1;
-            if (kittens::warp::elect_leader()) {
-                if (cta_rank == 0) kittens::clc::schedule(s.clc_handle[s.stage], s.clc_arrived[s.stage]);
-                kittens::tma::expect_bytes(s.clc_arrived[s.stage], sizeof(s.clc_handle[s.stage]));
-            }
-            kittens::wait(s.clc_arrived[s.stage], phasebit);
-            auto schedule = kittens::clc::query(s.clc_handle[s.stage]);
-            if (!schedule.success) instruction_index = 0x7FFFFFFF; // signal to stop
-            else                   instruction_index = schedule.x + cta_rank; // we only use 1D grid
-        }
-
-        // Step 2. Load the specific instruction from global to shared memory
-        if (instruction_index >= g.instructions.rows()) {
-            if (kittens::warp::elect_leader()) {
-                s.instruction_states[s.stage].instruction.icode = -1; // signal to stop.
-                kittens::tensor_commit<Config::CLUSTER_SIZE>(s.instruction_arrived[s.stage]); // hack: use tcgen05.commit for mbarrier broadcast
-            }
-            break;
-        }
+        // Step 1. Load instruction from per-SM queue
         static_assert(sizeof(instruction_t)/sizeof(int) == 64); // 2 warp-wide loads
-        int *inst_src = &g.instructions[{instruction_index, 0}];
+        int *inst_src = &g.instructions[{sm_id, s.iter, 0}];
         int *inst_dst = reinterpret_cast<int*>(&s.instruction_states[s.stage].instruction);
         inst_dst[lane_id + 0]  = inst_src[lane_id + 0];
         inst_dst[lane_id + 32] = inst_src[lane_id + 32];
         kittens::warp::sync();
 
-        // Step 3. Establish physical page order
+        // Step 2. Establish physical page order
         if (s.iter == 0) {
             if (lane_id < Config::NUM_PAGES)
                 s.instruction_states[s.stage].pid_order[lane_id] = lane_id;
@@ -70,16 +48,19 @@ __device__ __forceinline__ void controller_loop(const Globals &g, megakittens::s
             }
         }
 
-        // Step 4. Initialize dynamic semaphores
+        // Step 3. Initialize dynamic semaphores
         const int icode = s.instruction_states[s.stage].instruction.icode;
         if (lane_id == 0) s.record(TEVENT_ICODE, icode);
-        num_semaphores[s.stage] = dispatch_instruction<WorkerType::semaphore_manager, int, Config, Globals>(icode, g, s);
-        asm volatile("{fence.proxy.async.shared::cta;\n}" ::: "memory"); // TODO: is this really needed?
+        if (icode == 0) {
+            num_semaphores[s.stage] = 0;
+        } else {
+            num_semaphores[s.stage] = dispatch_instruction<WorkerType::semaphore_manager, int, Config, Globals>(icode, g, s);
+        }
+        asm volatile("fence.proxy.async.shared::cta;\n" ::: "memory");
 
-        // Step 5. Signal other workers that the instruction/pages/semaphores are ready
-        kittens::warp::sync();
-        if (kittens::warp::elect_leader())
-            kittens::tensor_commit<Config::CLUSTER_SIZE>(s.instruction_arrived[s.stage]); // hack: use tcgen05.commit for mbarrier broadcast
+        // Step 4. Signal other workers that the instruction/pages/semaphores are ready
+        if (lane_id == 0)
+            kittens::arrive(s.instruction_arrived[s.stage]);
 
         // Update bookkeeping variables
         last_stage = s.stage;
