@@ -27,7 +27,7 @@ __device__ __forceinline__ void controller_loop(const Globals &g, megakittens::s
 
         // Step 1. Load instruction from per-SM queue
         static_assert(sizeof(instruction_t)/sizeof(int) == 64); // 2 warp-wide loads
-        int *inst_src = &g.instructions[{sm_id, s.iter, 0}];
+        int *inst_src = &g.instructions[{(int)sm_id, (int)s.iter, 0}];
         int *inst_dst = reinterpret_cast<int*>(&s.instruction_states[s.stage].instruction);
         inst_dst[lane_id + 0]  = inst_src[lane_id + 0];
         inst_dst[lane_id + 32] = inst_src[lane_id + 32];
