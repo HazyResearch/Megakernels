@@ -28,8 +28,6 @@ Only two files need to be touched:
 
 - Cross-SM barriers use global memory atomics. Source barriers check `target > 0` (unused targets are 0). Destination barriers use `0xFF` padding for unused slots.
 
-- **Barrier granularity differs from reference.** The reference (`csrc/itypes/reference/`) calls `store_async_wait()` per block then signals a per-block/per-head barrier via `atomicAdd` inside each store function — this lets downstream ops start consuming individual blocks as they finish. The MK port (`csrc/itypes/llama1b/`) calls `store_async_read_wait()` per block (just frees shared memory), then defers `store_async_wait()` + `all_barrier_arrive()` to end-of-storer — downstream must wait for ALL blocks. Both are correct as long as consumers wait for the barrier before reading global data. The MK approach is faster for the storer but prevents fine-grained downstream overlap.
-
 - `compile_source_to_cubin` has both an in-memory `@functools.cache` and a file-backed cache (`~/.cache/megakittens/cubin/`). Pass `use_jit_cache=False` to skip file cache; in-memory cache still applies per-process.
 
 ## Rules for writing a CUDA instruction type (`csrc/itypes/*.cuh`)
@@ -49,8 +47,6 @@ Only two files need to be touched:
 - Barrier wait/arrive are single-thread operations. Call `all_barrier_wait` and `all_barrier_arrive` from one elected thread only (e.g. inside `warp::elect_leader()`).
 
 - Consumer is multiple warps unlike the other workers.
-
-- **`fence.acquire` is per-warp, not per-SM.** If the launcher waits on a cross-SM barrier (`all_input_barrier_wait`), its `fence.acquire.gpu` only makes prior writes visible to the launcher warp. Other warps (e.g. the consumer) reading global memory written by a previous instruction must do their own barrier wait or fence. This was the cause of a stale-Q-read bug in `attention_partial` — the consumer loaded Q from `raw_ptr` without waiting for the QKV barrier, so it could read zeros/stale data.
 
 - TMA tile type in C++ must match the Python `TensorSpec.tma_types`. If the C++ `tile_t` is `st<bf16, 128, 128>` (swizzled), the Python side must create `st(dtype=DType.bf16, rows=128, cols=128)` (swizzle=True is default).
 
