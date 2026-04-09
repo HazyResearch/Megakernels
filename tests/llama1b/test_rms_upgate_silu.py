@@ -94,13 +94,11 @@ def test_rms_upgate_silu():
     sm_count = 32
     instructions = []
     for sm in range(sm_count):
-        start = round(sm * num_blocks / sm_count)
-        end = round((sm + 1) * num_blocks / sm_count)
         instructions.append(Instruction(
             icode=1,
             src_tensors=(T_HIDDEN, T_NORM_W, T_UP_W, T_GATE_W),
             dst_tensors=(T_SILU_OUT,),
-            indices=(layer_idx, start, end),
+            indices=(layer_idx, sm, sm_count, num_blocks, 0),
             src_barriers=(),
             src_barrier_targets=(),
             num_input_barriers=0,

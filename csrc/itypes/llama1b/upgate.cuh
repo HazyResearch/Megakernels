@@ -11,16 +11,20 @@ template <typename Config, typename Globals, int N, int SRC_ACT, int SRC_NORM, i
 struct RmsUpgateSilu {
 
     struct parsed_instruction {
-        int layer_idx, start_block_idx, end_block_idx, iters, barrier_base;
+        int layer_idx, sm_idx, sm_count, total_blocks, barrier_base, iters;
         __device__ inline parsed_instruction(const instruction_t &instruction) {
-            layer_idx       = instruction.indices[0];
-            start_block_idx = instruction.indices[1];
-            end_block_idx   = instruction.indices[2];
-            barrier_base    = instruction.indices[3];
-            iters           = 2 * (end_block_idx - start_block_idx);
+            layer_idx    = instruction.indices[0];
+            sm_idx       = instruction.indices[1];
+            sm_count     = instruction.indices[2];
+            total_blocks = instruction.indices[3];
+            barrier_base = instruction.indices[4];
+            iters        = 2 * ((total_blocks - sm_idx + sm_count - 1) / sm_count);
         }
         __device__ inline parsed_instruction(state_t<Config> &s)
             : parsed_instruction(s.instruction()) {}
+        __device__ inline int block_at(int i) const {
+            return sm_idx + i * sm_count;
+        }
     };
 
     struct pipeline_specifics {
@@ -33,7 +37,7 @@ struct RmsUpgateSilu {
                   int iter, int col_idx,
                   kittens::st_bf<16, 512> &weight_chunk,
                   kittens::semaphore &sem) {
-            int block_idx = inst.start_block_idx + iter / 2;
+            int block_idx = inst.block_at(iter / 2);
             if (iter % 2 == 0) {
                 kittens::tma::load_async<kittens::dim::ROW, kittens::cache_policy::EVICT_FIRST>(
                     weight_chunk, g.template gls<SRC_UP>(),
@@ -58,7 +62,7 @@ struct RmsUpgateSilu {
             int prev_output_idx = (output_idx - 1);
             int prev_output_stage = prev_output_idx % 3;
 
-            int block_idx = inst.start_block_idx + true_output_idx;
+            int block_idx = inst.block_at(true_output_idx);
 
             uint8_t *output_scratch = pipeline::get_output_start(s, output_stage);
             uint8_t *prev_output_scratch = pipeline::get_output_start(s, prev_output_stage);

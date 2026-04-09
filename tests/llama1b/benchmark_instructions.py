@@ -322,10 +322,9 @@ def _setup_rms_upgate_silu(sm_count):
     num_blocks = INTERMEDIATE_DIM // BLOCK_SIZE
     instructions = []
     for sm in range(sm_count):
-        s = round(sm * num_blocks / sm_count)
-        e = round((sm + 1) * num_blocks / sm_count)
         instructions.append(Instruction(
-            icode=1, src_tensors=src, dst_tensors=dst, indices=(layer_idx, s, e),
+            icode=1, src_tensors=src, dst_tensors=dst,
+            indices=(layer_idx, sm, sm_count, num_blocks, 0),
             src_barriers=(), src_barrier_targets=(),
             num_input_barriers=0, num_reuse_barriers=0, num_dst_barriers=0,
             dst_barriers=(),

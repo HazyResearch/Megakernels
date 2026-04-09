@@ -264,13 +264,11 @@ def _schedule_upgate(
     num_blocks = INTERMEDIATE_DIM // MATVEC_BLOCK_SIZE  # 512
     instructions = []
     for sm in range(sm_count):
-        start = round(sm * num_blocks / sm_count)
-        end = round((sm + 1) * num_blocks / sm_count)
         instructions.append(Instruction(
             icode=icode,
             src_tensors=(T.HIDDEN_STATES, T.MLP_NORM_WEIGHTS, T.UP_WEIGHTS, T.GATE_WEIGHTS),
             dst_tensors=(T.SILU_OUT,),
-            indices=(layer_idx, start, end, upgate_barrier_base),
+            indices=(layer_idx, sm, sm_count, num_blocks, upgate_barrier_base),
             src_barriers=(oproj_barrier,),
             src_barrier_targets=(OPROJ_TARGET,),
             num_input_barriers=1,
