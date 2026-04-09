@@ -1,11 +1,25 @@
 from abc import ABC, abstractmethod
 from typing import List, Tuple
 
+from .optype import register_optype
 from .tensor import TensorMeta, TensorSpec
 
 
 class IType(ABC):
     """Instruction type. Inherit with a subclass to define a new instruction type."""
+
+    torch_functions: list = []      # e.g. [torch.add, operator.add, torch.ops.aten.add, ...]
+    torch_methods: list[str] = []   # e.g. ["add"]
+    torch_modules: list[type] = []  # e.g. [torch.nn.ReLU]
+
+    test_shapes: list[tuple] = []
+    test_atol: float = 0.0
+    test_rtol: float = 0.0
+    bench_shapes: list[tuple] = []
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        register_optype(cls)
 
     @property
     @abstractmethod
@@ -44,6 +58,17 @@ class IType(ABC):
     @abstractmethod
     def outputs(self) -> list[TensorSpec]:
         """Specs for each output tensor."""
+        ...
+
+    @staticmethod
+    @abstractmethod
+    def test_fn(*args):
+        """Function to compile with MegaKittens and use as reference for correctness tests."""
+        ...
+
+    @abstractmethod
+    def make_args(self, shape: tuple) -> tuple:
+        """Create input tensors for a given test/benchmark shape."""
         ...
 
     @abstractmethod
