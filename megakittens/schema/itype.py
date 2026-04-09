@@ -67,7 +67,7 @@ class IType(ABC):
         ...
 
     @abstractmethod
-    def make_args(self, shape: tuple) -> tuple:
+    def test_args(self, shape: tuple) -> tuple:
         """Create input tensors for a given test/benchmark shape."""
         ...
 

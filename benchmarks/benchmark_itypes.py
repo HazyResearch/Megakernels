@@ -17,10 +17,10 @@ def collect_benchmark_cases(names=None):
             raise RuntimeError(f"{cls.__name__} has bench_shapes but no test_fn")
         if not callable(cls.__dict__["test_fn"]):
             raise RuntimeError(f"{cls.__name__}.test_fn must be callable")
-        if "make_args" not in cls.__dict__:
-            raise RuntimeError(f"{cls.__name__} has bench_shapes but no make_args")
-        if not callable(cls.__dict__["make_args"]):
-            raise RuntimeError(f"{cls.__name__}.make_args must be callable")
+        if "test_args" not in cls.__dict__:
+            raise RuntimeError(f"{cls.__name__} has bench_shapes but no test_args")
+        if not callable(cls.__dict__["test_args"]):
+            raise RuntimeError(f"{cls.__name__}.test_args must be callable")
         itype = cls()
         if names and itype.name not in names:
             continue
@@ -44,7 +44,7 @@ def benchmark_one(itype):
     print("-" * len(header))
 
     for shape in itype.bench_shapes:
-        mk_ms, pt_ms = benchmark(itype.test_fn, itype.make_args(shape))
+        mk_ms, pt_ms = benchmark(itype.test_fn, itype.test_args(shape))
         line = f"{str(shape):>28}  {mk_ms*1000:>10.1f}  {pt_ms*1000:>10.1f}"
         if has_flops:
             flops = itype.bench_flops(shape)
