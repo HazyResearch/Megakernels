@@ -168,21 +168,16 @@ struct RmsQkvRopeAppend {
             if (kittens::warp::elect_leader()) {
                 s.page_wait(pipeline::get_activation_page(s));
 
-                const float *cos_gmem = reinterpret_cast<const float *>(
-                    g.template gls<SRC_ROPE_COS>().raw_ptr)
-                    + static_cast<int>(g.pos_id) * HEAD_DIM;
-                const float *sin_gmem = reinterpret_cast<const float *>(
-                    g.template gls<SRC_ROPE_SIN>().raw_ptr)
-                    + static_cast<int>(g.pos_id) * HEAD_DIM;
-                float *cos_smem = reinterpret_cast<float *>(get_rope_cos_ptr(s));
-                float *sin_smem = reinterpret_cast<float *>(get_rope_sin_ptr(s));
-                #pragma unroll
-                for (int i = 0; i < HEAD_DIM; i++) {
-                    cos_smem[i] = cos_gmem[i];
-                    sin_smem[i] = sin_gmem[i];
-                }
-                __threadfence_block();
-                kittens::arrive(rope_arrived(s));
+                rope_t &rope_cos_smem = *reinterpret_cast<rope_t *>(get_rope_cos_ptr(s));
+                rope_t &rope_sin_smem = *reinterpret_cast<rope_t *>(get_rope_sin_ptr(s));
+                auto &sem = rope_arrived(s);
+                kittens::tma::expect_bytes(sem, 2 * HEAD_DIM * sizeof(float));
+                kittens::tma::load_async<kittens::cache_policy::EVICT_LAST>(
+                    rope_cos_smem, g.template gls<SRC_ROPE_COS>(),
+                    {0, 0, static_cast<int>(g.pos_id), 0}, sem);
+                kittens::tma::load_async<kittens::cache_policy::EVICT_LAST>(
+                    rope_sin_smem, g.template gls<SRC_ROPE_SIN>(),
+                    {0, 0, static_cast<int>(g.pos_id), 0}, sem);
             }
 
             parsed_instruction inst{s.instruction()};
