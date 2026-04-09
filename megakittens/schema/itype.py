@@ -2,6 +2,8 @@ from abc import ABC, abstractmethod
 import re
 from typing import List, Tuple
 
+import torch
+
 from .optype import register_optype
 from .tensor import TensorMeta, TensorSpec
 
@@ -20,6 +22,18 @@ class IType(ABC):
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
+        name = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", cls.__name__).lower()
+        mk_op = getattr(torch.ops.megakittens, name, None)
+        if mk_op is None:
+            raise RuntimeError(f"[MegaKittens] {cls.__name__} requires custom op torch.ops.megakittens.{name}")
+        cls.torch_functions = cls.torch_functions + [mk_op, mk_op.default]
+        if "test_fn" not in cls.__dict__:
+            def _make_test_fn(op):
+                def test_fn(*args):
+                    return op(*args)
+                test_fn.__qualname__ = f"{cls.__name__}.test_fn"
+                return test_fn
+            cls.test_fn = staticmethod(_make_test_fn(mk_op))
         register_optype(cls)
 
     @property
@@ -52,12 +66,6 @@ class IType(ABC):
     @abstractmethod
     def outputs(self) -> list[TensorSpec]:
         """Specs for each output tensor."""
-        ...
-
-    @staticmethod
-    @abstractmethod
-    def test_fn(*args):
-        """Function to compile with MegaKittens and use as reference for correctness tests."""
         ...
 
     @abstractmethod

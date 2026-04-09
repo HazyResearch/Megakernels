@@ -28,9 +28,7 @@ class CausalAttention(IType):
     Mb = 128  # Q tile rows (seq dim)
     Db = 128  # head dim
 
-    torch_functions = [
-        torch.ops.megakittens.causal_attention, torch.ops.megakittens.causal_attention.default,
-    ]
+    torch_functions = []
     torch_methods = ["causal_attention"]
 
     # TMA tiles (axis=1 = DEPTH, tiling over seq_len × head_dim)
@@ -43,10 +41,6 @@ class CausalAttention(IType):
     test_atol = 1e-2
     test_rtol = 1e-2
     bench_shapes = [(16, 1024, 16), (16, 2048, 16), (16, 4096, 16), (16, 8192, 16), (16, 16384, 16)]
-
-    @staticmethod
-    def test_fn(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
-        return torch.ops.megakittens.causal_attention(q, k, v)
 
     def test_args(self, shape: tuple) -> tuple[torch.Tensor, ...]:
         B, S, H = shape

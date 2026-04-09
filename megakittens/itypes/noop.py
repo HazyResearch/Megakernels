@@ -16,13 +16,9 @@ def _noop_fake() -> None:
 
 
 class Noop(IType):
-    torch_functions = [torch.ops.megakittens.noop, torch.ops.megakittens.noop.default]
+    torch_functions = []
     test_shapes = []
     bench_shapes = []
-
-    @staticmethod
-    def test_fn():
-        pass
 
     def test_args(self, shape):
         return ()

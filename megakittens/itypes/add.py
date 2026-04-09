@@ -26,16 +26,11 @@ class Add(IType):
     torch_functions = [
         torch.add, operator.add,
         torch.ops.aten.add, torch.ops.aten.add.default, torch.ops.aten.add.Tensor,
-        torch.ops.megakittens.add, torch.ops.megakittens.add.default,
     ]
     torch_methods = ["add"]
 
     test_shapes = [(128, 256), (256, 512), (512, 1024), (1024, 2048), (1280, 2048)]
     bench_shapes = [(4096, 4096), (131072, 4096), (4096, 131072), (16384, 16384), (131072, 131072)]
-
-    @staticmethod
-    def test_fn(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-        return torch.ops.megakittens.add(a, b)
 
     def test_args(self, shape: tuple) -> tuple[torch.Tensor, ...]:
         M, N = shape

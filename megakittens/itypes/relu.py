@@ -25,17 +25,12 @@ class Relu(IType):
     torch_functions = [
         torch.relu,
         torch.ops.aten.relu, torch.ops.aten.relu.default,
-        torch.ops.megakittens.relu, torch.ops.megakittens.relu.default,
     ]
     torch_methods = ["relu"]
     torch_modules = [torch.nn.ReLU, torch.nn.ReLU6]
 
     test_shapes = [(128, 256), (256, 512), (512, 1024), (1024, 2048), (1280, 2048)]
     bench_shapes = [(4096, 4096), (131072, 4096), (4096, 131072), (16384, 16384), (131072, 131072)]
-
-    @staticmethod
-    def test_fn(x: torch.Tensor) -> torch.Tensor:
-        return torch.ops.megakittens.relu(x)
 
     def test_args(self, shape: tuple) -> tuple[torch.Tensor, ...]:
         M, N = shape

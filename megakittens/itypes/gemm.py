@@ -28,7 +28,6 @@ class Gemm(IType):
         torch.matmul, torch.mm, operator.matmul,
         torch.ops.aten.mm, torch.ops.aten.mm.default,
         torch.ops.aten.matmul, torch.ops.aten.matmul.default,
-        torch.ops.megakittens.gemm, torch.ops.megakittens.gemm.default,
     ]
     torch_methods = ["gemm"]
 
@@ -38,10 +37,6 @@ class Gemm(IType):
 
     test_shapes = [(512, 256, 64), (512, 256, 256), (512, 512, 256), (1024, 1024, 512), (2560, 2560, 64)]
     bench_shapes = [(16384, 16384, 16384), (16384, 32768, 16384), (32768, 16384, 16384), (32768, 32768, 16384)]
-
-    @staticmethod
-    def test_fn(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-        return torch.ops.megakittens.gemm(a, b)
 
     def test_args(self, shape: tuple) -> tuple[torch.Tensor, ...]:
         M, N, K = shape
