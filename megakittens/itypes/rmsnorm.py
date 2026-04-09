@@ -65,20 +65,8 @@ class RMSNorm(IType):
         self._n = 0
 
     @property
-    def name(self) -> str:
-        return "rmsnorm"
-
-    @property
     def cpp_template(self) -> str:
         return f"RMSNorm<MKConfig, MKGlobals, {self._n}, {{tensors}}>"
-
-    @property
-    def cpp_include(self) -> str:
-        return "itypes/rmsnorm.cuh"
-
-    @property
-    def op_type(self) -> str:
-        return "rmsnorm"
 
     @property
     def inputs(self) -> list[TensorSpec]:

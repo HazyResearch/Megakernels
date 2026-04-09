@@ -28,20 +28,8 @@ class Noop(IType):
         return ()
 
     @property
-    def name(self) -> str:
-        return "noop"
-
-    @property
     def cpp_template(self) -> str:
         return "Noop<MKConfig, MKGlobals>"
-
-    @property
-    def cpp_include(self) -> str:
-        return "itypes/noop.cuh"
-
-    @property
-    def op_type(self) -> str:
-        return "noop"
 
     @property
     def inputs(self) -> list[TensorSpec]:

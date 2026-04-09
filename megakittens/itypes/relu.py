@@ -46,22 +46,6 @@ class Relu(IType):
         return M * N * 2 * 2  # 2 bytes/bf16, 2 tensors (1 read + 1 write)
 
     @property
-    def name(self) -> str:
-        return "relu"
-
-    @property
-    def cpp_template(self) -> str:
-        return "Relu<MKConfig, MKGlobals, {tensors}>"
-
-    @property
-    def cpp_include(self) -> str:
-        return "itypes/relu.cuh"
-
-    @property
-    def op_type(self) -> str:
-        return "relu"
-
-    @property
     def inputs(self) -> list[TensorSpec]:
         return [
             TensorSpec(dtype=DType.bf16, granularity=(self.TILE_SIZE, self.TILE_SIZE), tma_types=[self.TMA]),

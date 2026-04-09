@@ -49,22 +49,6 @@ class Add(IType):
         return M * N * 2 * 3
 
     @property
-    def name(self) -> str:
-        return "add"
-
-    @property
-    def cpp_template(self) -> str:
-        return "Add<MKConfig, MKGlobals, {tensors}>"
-
-    @property
-    def cpp_include(self) -> str:
-        return "itypes/add.cuh"
-
-    @property
-    def op_type(self) -> str:
-        return "add"
-
-    @property
     def inputs(self) -> list[TensorSpec]:
         return [
             TensorSpec(dtype=DType.bf16, granularity=(self.TILE_SIZE, self.TILE_SIZE), tma_types=[self.TMA]),

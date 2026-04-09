@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+import re
 from typing import List, Tuple
 
 from .optype import register_optype
@@ -22,31 +23,24 @@ class IType(ABC):
         register_optype(cls)
 
     @property
-    @abstractmethod
     def name(self) -> str:
-        ...
+        """Default: snake_case of class name. Override if different."""
+        return re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", type(self).__name__).lower()
 
     @property
-    @abstractmethod
     def cpp_template(self) -> str:
-        """
-        C++ template string for JIT codegen.
-        Use ``{tensors}`` as placeholder for the comma-separated tensor indices.
-        Example: ``"Add<MKConfig, MKGlobals, {tensors}>"``
-        """
-        ...
+        """Default: ``ClassName<MKConfig, MKGlobals, {tensors}>``. Override if different."""
+        return f"{type(self).__name__}<MKConfig, MKGlobals, {{tensors}}>"
 
     @property
-    @abstractmethod
     def cpp_include(self) -> str:
-        """Header to include for this instruction type. Example: ``"itypes/add.cuh"``"""
-        ...
+        """Default: ``itypes/<name>.cuh``. Override if different."""
+        return f"itypes/{self.name}.cuh"
 
     @property
-    @abstractmethod
     def op_type(self) -> str:
-        """The OpType value this instruction implements (e.g. ``"add"``, ``"gemm"``)."""
-        ...
+        """Default: same as name. Override if different."""
+        return self.name
 
     @property
     @abstractmethod

@@ -55,22 +55,6 @@ class Gemm(IType):
         return 2.0 * M * N * K
 
     @property
-    def name(self) -> str:
-        return "gemm"
-
-    @property
-    def cpp_template(self) -> str:
-        return "Gemm<MKConfig, MKGlobals, {tensors}>"
-
-    @property
-    def cpp_include(self) -> str:
-        return "itypes/gemm.cuh"
-
-    @property
-    def op_type(self) -> str:
-        return "gemm"
-
-    @property
     def inputs(self) -> list[TensorSpec]:
         return [
             TensorSpec(dtype=DType.bf16, granularity=(self.TILE_M, self.TILE_K), tma_types=[self.A_TMA]),

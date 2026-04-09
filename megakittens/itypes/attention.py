@@ -61,20 +61,8 @@ class Attention(IType):
         return 4.0 * B * H * S * S * self.Db
 
     @property
-    def name(self) -> str:
-        return "attention"
-
-    @property
     def cpp_template(self) -> str:
         return "Attention<MKConfig, MKGlobals, {tensors}, false>"
-
-    @property
-    def cpp_include(self) -> str:
-        return "itypes/attention.cuh"
-
-    @property
-    def op_type(self) -> str:
-        return "attention"
 
     @property
     def inputs(self) -> list[TensorSpec]:
