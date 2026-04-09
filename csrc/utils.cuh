@@ -29,12 +29,12 @@ __device__ __forceinline__ void barrier_wait(int* barrier_addr, const int target
         asm volatile("{ld.relaxed.gpu.global.u32 %0, [%1];}" // should not spin-loop with acquire
             : "=r"(barrier_val) : "l"(barrier_addr) : "memory"); // TODO: change scope to `sys` for multi-gpu setting
     } while (barrier_val != target);
-    asm volatile("{fence.acquire.gpu;}" ::: "memory"); // TODO: change scope to `sys` for multi-gpu setting
+    //asm volatile("{fence.acquire.gpu;}" ::: "memory"); // TODO: change scope to `sys` for multi-gpu setting
 }
 
 template <typename Config>
 __device__ __forceinline__ void barrier_arrive(int* barrier_addr, const int val) {
-    asm volatile("{red.release.gpu.global.add.u32 [%0], %1;}" // TODO: change scope to `sys` for multi-gpu setting
+    asm volatile("{red.relaxed.gpu.global.add.u32 [%0], %1;}" // TODO: change scope to `sys` for multi-gpu setting
         :: "l"(barrier_addr), "r"(val) : "memory");
 }
 
