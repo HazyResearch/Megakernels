@@ -239,12 +239,14 @@ struct AttentionPartial {
                     s.page_finish(kv_pid(s));
                 }
 
-                all_input_barrier_wait<Config>(g, s.instruction());
-
                 for (int i = 0; i < total_attn_blocks; i++) {
                     int stage = i % NUM_STAGES;
                     kv_st &K_smem = get_K_smem(s, stage);
                     kv_st &V_smem = get_V_smem(s, stage);
+
+                    if (i == total_attn_blocks - 1) {
+                        all_reuse_barrier_wait<Config>(g, s.instruction());
+                    }
 
                     if (i >= NUM_STAGES) {
                         kittens::wait(K_finished(s, stage), (i / NUM_STAGES - 1) % 2);
