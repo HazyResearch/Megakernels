@@ -107,7 +107,6 @@ QKV_TARGET_PER_SUB = BLOCKS_PER_HEAD                                    # 4
 UPGATE_TARGET_PER_SUB = HIDDEN_DIM // MATVEC_BLOCK_SIZE                 # 128
 ATTN_RED_TARGET = NUM_ATTENTION_HEADS                                   # 32
 OPROJ_TARGET = HIDDEN_DIM // MATVEC_BLOCK_SIZE                          # 128
-DOWNPROJ_INSTS_PER_CHUNK = 32  # 128 blocks / 32 = 4 blocks each
 DOWNPROJ_TARGET = INTERMEDIATE_DIM // MATVEC_BLOCK_SIZE  # 512
 
 
@@ -291,26 +290,40 @@ def _schedule_downproj(
     downproj_barrier = _barrier_index(layer_idx, 5, 0)
     num_blocks = HIDDEN_DIM // MATVEC_BLOCK_SIZE  # 128
     num_chunks = INTERMEDIATE_DIM // HIDDEN_DIM   # 4 reduction chunks
+
+    # (chunk, block_idx) jobs distributed across SMs, one instruction per SM
+    jobs = [(c, b) for c in range(num_chunks) for b in range(num_blocks)]
+
     instructions = []
-    for chunk in range(num_chunks):
-        reduction_col_offset = chunk * HIDDEN_DIM
-        # Fine-grained consumer: wait on the upgate sub-barrier for this chunk
-        upgate_sub = _barrier_index(layer_idx, 4, chunk)
-        for i in range(DOWNPROJ_INSTS_PER_CHUNK):
-            start = round(i * num_blocks / DOWNPROJ_INSTS_PER_CHUNK)
-            end = round((i + 1) * num_blocks / DOWNPROJ_INSTS_PER_CHUNK)
-            instructions.append(Instruction(
-                icode=icode,
-                src_tensors=(T.SILU_OUT, T.DOWN_WEIGHTS),
-                dst_tensors=(T.HIDDEN_STATES,),
-                indices=(layer_idx, start, end, reduction_col_offset),
-                src_barriers=(upgate_sub,),
-                src_barrier_targets=(UPGATE_TARGET_PER_SUB,),
-                num_input_barriers=1,
-                num_reuse_barriers=0,
-                num_dst_barriers=1,
-                dst_barriers=(downproj_barrier,),
-            ))
+    num_assigned = 0
+    for sm in range(sm_count):
+        jobs_left = len(jobs) - num_assigned
+        sms_left = sm_count - sm
+        jobs_for_this_sm = round(jobs_left / sms_left)
+
+        raw_slice = jobs[num_assigned : num_assigned + jobs_for_this_sm]
+        chunk_idx = raw_slice[0][0]
+        same_chunk = [j for j in raw_slice if j[0] == chunk_idx]
+
+        start = same_chunk[0][1]
+        end = same_chunk[-1][1] + 1
+        reduction_col_offset = chunk_idx * HIDDEN_DIM
+        upgate_sub = _barrier_index(layer_idx, 4, chunk_idx)
+
+        instructions.append(Instruction(
+            icode=icode,
+            src_tensors=(T.SILU_OUT, T.DOWN_WEIGHTS),
+            dst_tensors=(T.HIDDEN_STATES,),
+            indices=(layer_idx, start, end, reduction_col_offset),
+            src_barriers=(upgate_sub,),
+            src_barrier_targets=(UPGATE_TARGET_PER_SUB,),
+            num_input_barriers=1,
+            num_reuse_barriers=0,
+            num_dst_barriers=1,
+            dst_barriers=(downproj_barrier,),
+        ))
+        num_assigned += len(same_chunk)
+
     _pad_to_cluster(instructions)
     return instructions
 
