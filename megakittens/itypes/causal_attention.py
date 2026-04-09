@@ -28,11 +28,37 @@ class CausalAttention(IType):
     Mb = 128  # Q tile rows (seq dim)
     Db = 128  # head dim
 
+    torch_functions = [
+        torch.ops.megakittens.causal_attention, torch.ops.megakittens.causal_attention.default,
+    ]
+    torch_methods = ["causal_attention"]
+
     # TMA tiles (axis=1 = DEPTH, tiling over seq_len × head_dim)
     Q_TMA = st(dtype=DType.bf16, rows=128, cols=128, axis=1)  # q_tile: st_bf<Mb, Db>
     K_TMA = st(dtype=DType.bf16, rows=64, cols=128, axis=1)   # k_tile: st_bf<Nb/2, Db>
     V_TMA = st(dtype=DType.bf16, rows=128, cols=64, axis=1)   # v_tile: st_bf<Nb, Db/2>
     O_TMA = st(dtype=DType.bf16, rows=128, cols=128, axis=1)  # o_tile: st_bf<Mb, Db>
+
+    test_shapes = [(16, 1024, 16), (16, 2048, 16), (16, 4096, 16), (16, 8192, 16), (16, 16384, 16)]
+    test_atol = 1e-2
+    test_rtol = 1e-2
+    bench_shapes = [(16, 1024, 16), (16, 2048, 16), (16, 4096, 16), (16, 8192, 16), (16, 16384, 16)]
+
+    @staticmethod
+    def test_fn(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+        return torch.ops.megakittens.causal_attention(q, k, v)
+
+    def test_args(self, shape: tuple) -> tuple[torch.Tensor, ...]:
+        B, S, H = shape
+        return (
+            torch.randn(B, S, H, self.Db, dtype=torch.bfloat16, device="cuda"),
+            torch.randn(B, S, H, self.Db, dtype=torch.bfloat16, device="cuda"),
+            torch.randn(B, S, H, self.Db, dtype=torch.bfloat16, device="cuda"),
+        )
+
+    def bench_flops(self, shape: tuple) -> float:
+        B, S, H = shape
+        return 2.0 * B * H * S * S * self.Db
 
     @property
     def name(self) -> str:

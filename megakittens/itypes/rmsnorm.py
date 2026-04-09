@@ -35,6 +35,32 @@ def _rows_per_inst(N: int) -> int:
 
 
 class RMSNorm(IType):
+    torch_functions = [
+        torch.ops.megakittens.rmsnorm, torch.ops.megakittens.rmsnorm.default,
+    ]
+    torch_methods = ["rmsnorm"]
+    torch_modules = [torch.nn.RMSNorm]
+
+    test_shapes = [(1, 2048), (4, 2048), (32, 2048), (16, 4096), (32, 4096), (8, 8192)]
+    test_atol = 1e-2
+    test_rtol = 1e-2
+    bench_shapes = [(32768, 256), (32768, 512), (32768, 1536), (32768, 2048), (32768, 4096), (32768, 8192), (32768, 16384)]
+
+    @staticmethod
+    def test_fn(x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
+        return torch.ops.megakittens.rmsnorm(x, w, 1e-6)
+
+    def test_args(self, shape: tuple) -> tuple[torch.Tensor, ...]:
+        M, N = shape
+        return (
+            torch.randn(M, N, dtype=torch.bfloat16, device="cuda"),
+            torch.randn(N, dtype=torch.bfloat16, device="cuda"),
+        )
+
+    def bench_bytes(self, shape: tuple) -> float:
+        M, N = shape
+        return M * N * 2 * 2 + N * 2
+
     def __init__(self):
         self._n = 0
 

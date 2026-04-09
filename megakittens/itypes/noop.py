@@ -1,10 +1,32 @@
 from typing import List, Tuple
 
+import torch
+
 from ..schema.itype import IType
 from ..schema.tensor import TensorMeta, TensorSpec
 
 
+@torch.library.custom_op("megakittens::noop", mutates_args=())
+def noop_op() -> None:
+    pass
+
+@noop_op.register_fake
+def _noop_fake() -> None:
+    pass
+
+
 class Noop(IType):
+    torch_functions = [torch.ops.megakittens.noop, torch.ops.megakittens.noop.default]
+    test_shapes = []
+    bench_shapes = []
+
+    @staticmethod
+    def test_fn():
+        pass
+
+    def test_args(self, shape):
+        return ()
+
     @property
     def name(self) -> str:
         return "noop"

@@ -1,9 +1,21 @@
+import operator
 from typing import List, Tuple
+
+import torch
 
 from ..schema.dtype import DType
 from ..schema.itype import IType
 from ..schema.tensor import TensorMeta, TensorSpec
 from ..jit.pykittens import st
+
+
+@torch.library.custom_op("megakittens::gemm", mutates_args=())
+def gemm_op(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    return a @ b
+
+@gemm_op.register_fake
+def _gemm_fake(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    return torch.empty(a.shape[0], b.shape[1], dtype=a.dtype, device=a.device)
 
 
 class Gemm(IType):
@@ -12,9 +24,35 @@ class Gemm(IType):
     TILE_K = 64
     SUPERGROUP_SIZE = 8
 
+    torch_functions = [
+        torch.matmul, torch.mm, operator.matmul,
+        torch.ops.aten.mm, torch.ops.aten.mm.default,
+        torch.ops.aten.matmul, torch.ops.aten.matmul.default,
+        torch.ops.megakittens.gemm, torch.ops.megakittens.gemm.default,
+    ]
+    torch_methods = ["gemm"]
+
     A_TMA = st(dtype=DType.bf16, rows=128, cols=64) # st_bf<Mb/2, Kb>
     B_TMA = st(dtype=DType.bf16, rows=64, cols=128) # st_bf<Kb, Nb/2> (B is K×N)
     D_TMA = st(dtype=DType.bf16, rows=128, cols=32) # st_bf<Mb/2, Nb/EPI_PIPE_DEPTH>
+
+    test_shapes = [(512, 256, 64), (512, 256, 256), (512, 512, 256), (1024, 1024, 512), (2560, 2560, 64)]
+    bench_shapes = [(16384, 16384, 16384), (16384, 32768, 16384), (32768, 16384, 16384), (32768, 32768, 16384)]
+
+    @staticmethod
+    def test_fn(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+        return torch.ops.megakittens.gemm(a, b)
+
+    def test_args(self, shape: tuple) -> tuple[torch.Tensor, ...]:
+        M, N, K = shape
+        return (
+            torch.randn(M, K, dtype=torch.bfloat16, device="cuda"),
+            torch.randn(K, N, dtype=torch.bfloat16, device="cuda"),
+        )
+
+    def bench_flops(self, shape: tuple) -> float:
+        M, N, K = shape
+        return 2.0 * M * N * K
 
     @property
     def name(self) -> str:
