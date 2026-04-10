@@ -24,12 +24,26 @@ def _attention_fake(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, causal: b
     return torch.empty_like(q)
 
 
+def _resolve_attention(args, kwargs):
+    causal = bool(args[3]) if len(args) > 3 else bool(kwargs.get("causal", False))
+    return Attention(causal=causal)
+
+
+def _resolve_aten_sdpa(args, kwargs):
+    itype = Attention(causal=bool(args[6]) if len(args) > 6 else False)
+    return itype, [0]
+
+
 class Attention(IType):
     Mb = 128  # Q tile rows (seq dim)
     Db = 128  # head dim
 
-    torch_functions = []
-    torch_methods = ["attention"]
+    torch_functions_map = {
+        torch.ops.aten._scaled_dot_product_cudnn_attention.default: _resolve_aten_sdpa,
+        torch.ops.megakittens.attention: _resolve_attention,
+        torch.ops.megakittens.attention.default: _resolve_attention,
+    }
+    torch_methods_map = {"attention": None}
 
     # TMA tiles (axis=1 = DEPTH, tiling over seq_len × head_dim)
     Q_TMA = st(dtype=DType.bf16, rows=128, cols=128, axis=1)  # q_tile: st_bf<Mb, Db>
