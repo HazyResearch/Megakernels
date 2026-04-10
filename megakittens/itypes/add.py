@@ -71,7 +71,7 @@ class Add(IType):
         cols = dst_metas[0].shape[1] // self.TILE_SIZE
         return rows * ((cols + self.TILES_PER_INST - 1) // self.TILES_PER_INST)
 
-    def tile_regions(self, block_index, src_metas, dst_metas):
+    def access_regions(self, block_index, src_metas, dst_metas):
         row, col, n = block_index
         region = ((row * self.TILE_SIZE, (row + 1) * self.TILE_SIZE), (col * self.TILE_SIZE, (col + n) * self.TILE_SIZE))
         return [region, region], [region]

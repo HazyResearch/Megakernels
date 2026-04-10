@@ -160,7 +160,7 @@ class Attention(IType):
         m_blocks = seq_len // (self.Mb * self.TILES_PER_CLUSTER)
         return batch * num_heads * m_blocks * self.CLUSTER_SIZE
 
-    def tile_regions(self, block_index, src_metas, dst_metas):
+    def access_regions(self, block_index, src_metas, dst_metas):
         b, m, h = block_index
         S = src_metas[0].shape[1]
         seq_start = m * self.Mb * self.TILES_PER_CLUSTER

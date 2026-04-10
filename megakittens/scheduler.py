@@ -178,7 +178,7 @@ def _assign_barriers(
         block_indices = node.itype.block_indices(src_metas, node.out_tensors)
         node_block_indices[node.id] = block_indices
         node_regions[node.id] = [
-            node.itype.tile_regions(block_index, src_metas, node.out_tensors)
+            node.itype.access_regions(block_index, src_metas, node.out_tensors)
             for block_index in block_indices
         ]
 

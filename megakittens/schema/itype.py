@@ -125,7 +125,7 @@ class IType(ABC):
                         )
 
     @abstractmethod
-    def tile_regions(
+    def access_regions(
         self,
         block_index: Tuple[int, ...],
         src_metas: Tuple[TensorMeta, ...],

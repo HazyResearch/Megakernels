@@ -99,7 +99,7 @@ class Gemm(IType):
         N = src_metas[1].shape[1]
         return (M // self.TILE_M) * (N // self.TILE_N) * 2  # x2 for cluster
 
-    def tile_regions(self, block_index, src_metas, dst_metas):
+    def access_regions(self, block_index, src_metas, dst_metas):
         m, n = block_index
         K = src_metas[0].shape[1]
         a_region = ((m * self.TILE_M, (m + 1) * self.TILE_M), (0, K))

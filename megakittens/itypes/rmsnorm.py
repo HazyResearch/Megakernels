@@ -100,7 +100,7 @@ class RMSNorm(IType):
         rpi = _rows_per_inst(N)
         return math.ceil(M / rpi)
 
-    def tile_regions(self, block_index, src_metas, dst_metas):
+    def access_regions(self, block_index, src_metas, dst_metas):
         row_start, rows_this = block_index
         N = src_metas[0].shape[-1]
         x_region = ((row_start, row_start + rows_this), (0, N))
