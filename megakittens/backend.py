@@ -260,6 +260,22 @@ def fx_graph_to_mk_dag(
         and not (n.op == "call_function" and n.target == operator.getitem)
     ]
 
+    # Build map of consumed getitem indices per source node
+    getitem_consumed: Dict[str, set[int]] = {}
+    output_idx_remap: Dict[str, Dict[int, int]] = {}
+    for n in all_graph_nodes:
+        if n.op == "call_function" and n.target == operator.getitem and n.name in valid_names:
+            source = n.args[0]
+            if not isinstance(source, torch.fx.Node) or not isinstance(n.args[1], int):
+                raise RuntimeError(
+                    f"[MegaKittens] Unexpected getitem format for node '{n.name}': "
+                    f"expected (FX Node, int), got ({type(source).__name__}, {type(n.args[1]).__name__})"
+                )
+            getitem_consumed.setdefault(source.name, set()).add(n.args[1])
+    for name, indices in getitem_consumed.items():
+        sorted_indices = sorted(indices)
+        output_idx_remap[name] = {orig: new for new, orig in enumerate(sorted_indices)}
+
     # Extract all DAG nodes
     _input_index: int = 0
     node_by_name: Dict[str, Node] = {}
