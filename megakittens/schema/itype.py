@@ -4,7 +4,6 @@ from typing import List, Tuple
 
 import torch
 
-from .optype import register_optype
 from .tensor import TensorMeta, TensorSpec
 
 
@@ -18,7 +17,7 @@ class IType(ABC):
     test_cases: list[tuple] = []
     test_atol: float = 0.0
     test_rtol: float = 0.0
-    bench_shapes: list[tuple] = []
+    bench_cases: list[tuple] = []
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
@@ -64,7 +63,7 @@ class IType(ABC):
         ...
 
     @abstractmethod
-    def test_args(self, shape: tuple) -> tuple:
+    def test_args(self, case: tuple) -> tuple:
         """Create input tensors for a given test/benchmark shape."""
         ...
 

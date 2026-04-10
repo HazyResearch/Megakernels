@@ -32,12 +32,12 @@ class Relu(IType):
     test_cases = [((), (128, 256)), ((), (256, 512)), ((), (512, 1024)), ((), (1024, 2048)), ((), (1280, 2048))]
     bench_cases = [((), (4096, 4096)), ((), (131072, 4096)), ((), (4096, 131072)), ((), (16384, 16384)), ((), (131072, 131072))]
 
-    def test_args(self, shape: tuple) -> tuple[torch.Tensor, ...]:
-        M, N = shape
+    def test_args(self, case: tuple) -> tuple[torch.Tensor, ...]:
+        M, N = case
         return (torch.randn(M, N, dtype=torch.bfloat16, device="cuda"),)
 
-    def bench_bytes(self, shape: tuple) -> float:
-        M, N = shape
+    def bench_bytes(self, case: tuple) -> float:
+        M, N = case
         return M * N * 2 * 2  # 2 bytes/bf16, 2 tensors (1 read + 1 write)
 
     @property

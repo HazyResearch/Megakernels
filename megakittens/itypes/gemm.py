@@ -38,15 +38,15 @@ class Gemm(IType):
     test_cases = [((), (512, 256, 64)), ((), (512, 256, 256)), ((), (512, 512, 256)), ((), (1024, 1024, 512)), ((), (2560, 2560, 64))]
     bench_cases = [((), (16384, 16384, 16384)), ((), (16384, 32768, 16384)), ((), (32768, 16384, 16384)), ((), (32768, 32768, 16384))]
 
-    def test_args(self, shape: tuple) -> tuple[torch.Tensor, ...]:
-        M, N, K = shape
+    def test_args(self, case: tuple) -> tuple[torch.Tensor, ...]:
+        M, N, K = case
         return (
             torch.randn(M, K, dtype=torch.bfloat16, device="cuda"),
             torch.randn(K, N, dtype=torch.bfloat16, device="cuda"),
         )
 
-    def bench_flops(self, shape: tuple) -> float:
-        M, N, K = shape
+    def bench_flops(self, case: tuple) -> float:
+        M, N, K = case
         return 2.0 * M * N * K
 
     @property

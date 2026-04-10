@@ -20,7 +20,7 @@ class Noop(IType):
     test_cases: list[tuple] = []
     bench_cases: list[tuple] = []
 
-    def test_args(self, shape):
+    def test_args(self, case):
         return ()
 
     @property

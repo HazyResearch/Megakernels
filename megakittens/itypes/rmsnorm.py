@@ -44,16 +44,16 @@ class RMSNorm(IType):
     test_rtol = 1e-2
     bench_cases = [((), (32768, 256)), ((), (32768, 512)), ((), (32768, 1536)), ((), (32768, 2048)), ((), (32768, 4096)), ((), (32768, 8192)), ((), (32768, 16384))]
 
-    def test_args(self, shape: tuple) -> tuple:
-        M, N = shape
+    def test_args(self, case: tuple) -> tuple:
+        M, N = case
         return (
             torch.randn(M, N, dtype=torch.bfloat16, device="cuda"),
             torch.randn(N, dtype=torch.bfloat16, device="cuda"),
             1e-6,
         )
 
-    def bench_bytes(self, shape: tuple) -> float:
-        M, N = shape
+    def bench_bytes(self, case: tuple) -> float:
+        M, N = case
         return M * N * 2 * 2 + N * 2
 
     def __init__(self):
