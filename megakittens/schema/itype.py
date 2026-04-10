@@ -14,6 +14,8 @@ class IType(ABC):
     torch_methods: list[str] = []   # e.g. ["add"]
     torch_modules: list[type] = []  # e.g. [torch.nn.ReLU]
 
+    aten_output_indices: list[int] = []  # Mapping from aten op output indices to IType output indices. Empty means identity.
+
     test_cases: list[tuple] = []
     test_atol: float = 0.0
     test_rtol: float = 0.0

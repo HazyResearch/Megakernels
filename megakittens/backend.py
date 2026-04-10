@@ -18,17 +18,17 @@ from .dispatcher import Dispatcher
 from .scheduler import schedule
 
 
-def _resolve_optype(gm: torch.fx.GraphModule, node: torch.fx.Node) -> OpType:
+def _resolve_itype(gm: torch.fx.GraphModule, node: torch.fx.Node) -> IType:
     if node.op == "call_function":
-        return OpType.from_call_function(node.target)
+        return IType.from_call_function(node.target, args=node.args, kwargs=node.kwargs)
     if node.op == "call_method":
-        return OpType.from_call_method(node.target)
+        return IType.from_call_method(node.target, args=node.args, kwargs=node.kwargs)
     if node.op == "call_module":
         try:
             module = gm.get_submodule(node.target)
         except Exception:
             raise RuntimeError(f"[MegaKittens] Invalid call_module node '{node.name}' target={node.target!r}")
-        return OpType.from_call_module(type(module))
+        return IType.from_call_module(type(module), args=node.args, kwargs=node.kwargs)
     raise RuntimeError(f"[MegaKittens] Unsupported node op '{node.op}' for node '{node.name}'")
 
 
@@ -80,7 +80,7 @@ def _tensor_meta_to_mk_tensor(
     return TensorMeta(dtype=dtype, shape=shape, device=device)
 
 
-def _get_output_tensors(node: torch.fx.Node) -> tuple[TensorMeta, ...]:
+def _get_output_tensors(node: torch.fx.Node, aten_output_indices: list[int] = []) -> tuple[TensorMeta, ...]:
     if "tensor_meta" in node.meta:
         tensor_meta = node.meta["tensor_meta"]
         val = node.meta.get("val")
@@ -148,13 +148,28 @@ def _get_output_tensors(node: torch.fx.Node) -> tuple[TensorMeta, ...]:
         value = node.meta["val"]
         if isinstance(value, (tuple, list)):
             tensors = []
-            for v in value:
-                if not isinstance(v, torch.Tensor):
-                    raise RuntimeError(
-                        f"[MegaKittens] Non-tensor entry in node metadata for node '{node.name}'"
-                        f" (indexed entry type={type(v).__name__})"
-                    )
-                tensors.append(_tensor_to_mk_tensor(node, v))
+            if aten_output_indices:
+                for i in aten_output_indices:
+                    if i >= len(value):
+                        raise RuntimeError(
+                            f"[MegaKittens] aten_output_indices[{i}] out of range for node '{node.name}'"
+                            f" (val has {len(value)} entries)"
+                        )
+                    if not isinstance(value[i], torch.Tensor):
+                        raise RuntimeError(
+                            f"[MegaKittens] Non-tensor entry at index {i} in node metadata for node '{node.name}'"
+                            f" (type={type(value[i]).__name__})"
+                        )
+                    tensors.append(_tensor_to_mk_tensor(node, value[i]))
+                return tuple(tensors)
+            else:
+                for v in value:
+                    if not isinstance(v, torch.Tensor):
+                        raise RuntimeError(
+                            f"[MegaKittens] Non-tensor entry in node metadata for node '{node.name}'"
+                            f" (indexed entry type={type(v).__name__})"
+                        )
+                    tensors.append(_tensor_to_mk_tensor(node, v))
             return tuple(tensors)
         elif isinstance(value, torch.Tensor):
             return (_tensor_to_mk_tensor(node, value),)
@@ -260,21 +275,8 @@ def fx_graph_to_mk_dag(
         and not (n.op == "call_function" and n.target == operator.getitem)
     ]
 
-    # Build map of consumed getitem indices per source node
-    getitem_consumed: Dict[str, set[int]] = {}
+    # Maps FX node name -> {aten_output_idx: itype_output_idx} for multi-output ops
     output_idx_remap: Dict[str, Dict[int, int]] = {}
-    for n in all_graph_nodes:
-        if n.op == "call_function" and n.target == operator.getitem and n.name in valid_names:
-            source = n.args[0]
-            if not isinstance(source, torch.fx.Node) or not isinstance(n.args[1], int):
-                raise RuntimeError(
-                    f"[MegaKittens] Unexpected getitem format for node '{n.name}': "
-                    f"expected (FX Node, int), got ({type(source).__name__}, {type(n.args[1]).__name__})"
-                )
-            getitem_consumed.setdefault(source.name, set()).add(n.args[1])
-    for name, indices in getitem_consumed.items():
-        sorted_indices = sorted(indices)
-        output_idx_remap[name] = {orig: new for new, orig in enumerate(sorted_indices)}
 
     # Extract all DAG nodes
     _input_index: int = 0
@@ -316,7 +318,11 @@ def fx_graph_to_mk_dag(
         elif node.op in {"call_function", "call_module", "call_method"}:
             itype = _resolve_itype(gm, node)
             input_nodes = list(node.all_input_nodes)
-            out_tensors = _get_output_tensors(node)
+            out_tensors = _get_output_tensors(node, aten_output_indices=itype.aten_output_indices)
+            if itype.aten_output_indices:
+                output_idx_remap[node.name] = {
+                    aten_idx: itype_idx for itype_idx, aten_idx in enumerate(itype.aten_output_indices)
+                }
 
         elif node.op == "output":
             is_output = True
@@ -341,6 +347,8 @@ def fx_graph_to_mk_dag(
                     f"[MegaKittens] Invalid input graph edge: node '{node.name}' consumes output node '{input_node.name}'"
                 )
             resolved_node, output_idx = _resolve_input_node_and_output_index(input_node)
+            if resolved_node.name in output_idx_remap:
+                output_idx = output_idx_remap[resolved_node.name][output_idx]
             if resolved_node.name not in node_by_name:
                 raise RuntimeError(f"[MegaKittens] No source node '{resolved_node.name}' exists for '{node.name}'")
             source_node = node_by_name[resolved_node.name]
