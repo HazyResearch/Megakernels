@@ -19,13 +19,10 @@ MAX_BARRIERS = 2**32 - 1
 MAX_TENSOR_ALLOCATIONS = 256
 
 
-def schedule(
+def _get_instruction_count_and_offset(
     dag: DAG,
-) -> Tuple[List[InstructionMeta], List[TensorMeta], List[Instruction], int, Tuple[int, ...], Tuple[int, ...]]:
-    """
-    Convert a validated DAG into a minimal set of tensors and a flat per-SM instruction list.
-    """
-    # Phase 1: Instruction count per node
+) -> Tuple[Dict[int, int], Dict[int, int]]:
+    """Phase 1: Count instructions per node and compute cluster-aligned offsets."""
     node_inst_count: Dict[int, int] = {}
     node_inst_offset: Dict[int, int] = {}
     cumulative_offset = 0
@@ -44,9 +41,16 @@ def schedule(
         count = node.itype.num_instructions(src_metas, node.out_tensors)
         node_inst_count[node.id] = count
         node_inst_offset[node.id] = cumulative_offset
-        cumulative_offset += count + (-count) % Dispatcher.CLUSTER_SIZE
+        cumulative_offset += count + (-count) % Dispatcher.CLUSTER_SIZE  # CTA pairs must get same instruction type
+    return node_inst_count, node_inst_offset
 
-    # Phase 2: Tensor metadata collection
+
+def _assign_tensors(
+    dag: DAG,
+    node_inst_count: Dict[int, int],
+    node_inst_offset: Dict[int, int],
+) -> Tuple[List[TensorMeta], Dict[Tuple[int, int], int], List[int], List[int], List[Tuple[List[int], int, int]]]:
+    """Phase 2: Assign tensor indices, reuse memory where possible, collect I/O indices."""
     tensor_metas: List[TensorMeta] = []
     tensor_index: Dict[Tuple[int, int], int] = {}
     input_tensor_indices: List[int] = []
@@ -100,7 +104,15 @@ def schedule(
     if not output_tensor_indices:
         raise RuntimeError("[MegaKittens] Graph has no output tensors")
 
-    # Phase 3: Barrier assignment
+    return tensor_metas, tensor_index, input_tensor_indices, output_tensor_indices, release_barriers
+
+
+def _assign_barriers(
+    dag: DAG,
+    node_inst_count: Dict[int, int],
+    release_barriers: List[Tuple[List[int], int, int]],
+) -> Tuple[Dict[int, List[int]], Dict[int, List[Tuple[int, int]]], Dict[int, int], Dict[int, int], int]:
+    """Phase 3: Assign barriers for inter-node dependencies and tensor reuse."""
     barrier_counter = 0
     node_dst_barriers: Dict[int, List[int]] = {}
     node_src_barriers: Dict[int, List[Tuple[int, int]]] = {}
@@ -146,7 +158,18 @@ def schedule(
                 f"[MegaKittens] Node has {len(barriers)} src barriers (max {Instruction.MAX_SRC_BARRIERS})"
             )
 
-    # Phase 4: Instruction generation
+    return node_dst_barriers, node_src_barriers, node_num_input_barriers, node_num_reuse_barriers, barrier_counter
+
+
+def _generate_instructions(
+    dag: DAG,
+    tensor_index: Dict[Tuple[int, int], int],
+    node_dst_barriers: Dict[int, List[int]],
+    node_src_barriers: Dict[int, List[Tuple[int, int]]],
+    node_num_input_barriers: Dict[int, int],
+    node_num_reuse_barriers: Dict[int, int],
+) -> Tuple[List[InstructionMeta], List[Instruction]]:
+    """Phase 4: Build flat instruction list with icodes, barriers, and cluster-aligned padding."""
     instructions: List[Instruction] = []
     icode_counter = 1  # icode 0 is reserved for noop
     instruction_metas: List[InstructionMeta] = [InstructionMeta(icode=0, itype=Noop(), src_tensors=(), dst_tensors=())]
@@ -204,6 +227,18 @@ def schedule(
         # Pad to CLUSTER_SIZE with noops so op boundaries are cluster-aligned
         while len(instructions) % Dispatcher.CLUSTER_SIZE != 0:
             instructions.append(noop)
+
+    return instruction_metas, instructions
+
+
+def schedule(
+    dag: DAG,
+) -> Tuple[List[InstructionMeta], List[TensorMeta], List[Instruction], int, Tuple[int, ...], Tuple[int, ...]]:
+    """Convert a validated DAG into a minimal set of tensors and a flat per-SM instruction list."""
+    node_inst_count, node_inst_offset = _get_instruction_count_and_offset(dag)
+    tensor_metas, tensor_index, input_tensor_indices, output_tensor_indices, release_barriers = _assign_tensors(dag, node_inst_count, node_inst_offset)
+    node_dst_barriers, node_src_barriers, node_num_input_barriers, node_num_reuse_barriers, barrier_counter = _assign_barriers(dag, node_inst_count, release_barriers)
+    instruction_metas, instructions = _generate_instructions(dag, tensor_index, node_dst_barriers, node_src_barriers, node_num_input_barriers, node_num_reuse_barriers)
 
     return (
         instruction_metas,
