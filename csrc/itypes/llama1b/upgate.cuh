@@ -52,53 +52,7 @@ struct RmsUpgateSilu {
         __device__ static inline void
         store(state_t<Config> &s, const Globals &g, parsed_instruction &inst,
               int output_idx, int output_stage) {
-            if (output_idx % 2 == 0) {
-                return;
-            }
-
-            int true_output_idx = output_idx / 2;
-
-            // NOTE: hardcoding to 3 output stages for now
-            int prev_output_idx = (output_idx - 1);
-            int prev_output_stage = prev_output_idx % 3;
-
-            int block_idx = inst.block_at(true_output_idx);
-
-            uint8_t *output_scratch = pipeline::get_output_start(s, output_stage);
-            uint8_t *prev_output_scratch = pipeline::get_output_start(s, prev_output_stage);
-
-            kittens::sv_bf<16> &out_smem =
-                *reinterpret_cast<kittens::sv_bf<16> *>(output_scratch);
-
-            kittens::rv_fl<16> up_out, gate_out, gate_scratch;
-
-            // TODO we can do better here and reduce up before gate is ready.
-            llama1b::matvec_reduce<Config, pipeline::SCRATCH_BYTES_PER_WARP>(
-                prev_output_scratch, up_out);
-            llama1b::matvec_reduce<Config, pipeline::SCRATCH_BYTES_PER_WARP>(
-                output_scratch, gate_out);
-
-            kittens::warp::mul(gate_scratch, gate_out, -1.f);
-            kittens::warp::exp(gate_scratch, gate_scratch);
-            kittens::warp::add(gate_scratch, gate_scratch, 1.f);
-            kittens::warp::div(gate_out, gate_out, gate_scratch);
-            kittens::warp::mul(gate_out, up_out, gate_out);
-            kittens::warp::sync();
-            kittens::warp::store(out_smem, gate_out);
-            kittens::warp::sync();
-
-            if (kittens::warp::elect_leader()) {
-                kittens::tma::store_async<kittens::cache_policy::EVICT_LAST>(
-                    g.template gls<DST>(), out_smem, {0, block_idx});
-                kittens::tma::store_async_wait();
-
-                // Per-block fine-grained barrier: signal the sub-barrier for
-                // this block's chunk (block_idx * BLOCK_SIZE / N => 0..3).
-                int sub_idx = block_idx * pipeline::MATVEC_BLOCK_SIZE / N;
-                barrier_arrive<Config>(&g.barriers.raw_ptr[inst.barrier_base + sub_idx], 1);
-            }
-
-            kittens::warp::sync();
+            // unused — storer inlines the loop to cache up_out across iterations
         }
     };
 
@@ -138,9 +92,66 @@ struct RmsUpgateSilu {
 
     struct storer {
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
-            pipeline::template storer_loop<2>(s, g);
-            // Per-block barrier signaling happens inside store().
-            // num_dst_barriers=0 so all_barrier_arrive is not needed.
+            constexpr int OPS = pipeline::OUTPUT_PIPELINE_STAGES;
+            parsed_instruction inst{s};
+            kittens::rv_fl<16> up_out;
+            int output_stage = 0;
+
+            for (int i = 0; i < inst.iters; i++) {
+                kittens::wait(pipeline::outputs_arrived(s, output_stage),
+                    (i % (2 * OPS)) >= OPS);
+
+                if (i == 0) s.record(TEVENT_FIRST_STORE);
+                else if (i == inst.iters - 1) s.record(TEVENT_LAST_STORE);
+
+                if (i % 2 == 0) {
+                    // up iteration: reduce into register now instead of idling
+                    llama1b::matvec_reduce<Config, pipeline::SCRATCH_BYTES_PER_WARP>(
+                        pipeline::get_output_start(s, output_stage), up_out);
+                } else {
+                    // gate iteration: up_out already cached in registers
+                    int block_idx = inst.block_at(i / 2);
+                    uint8_t *scratch = pipeline::get_output_start(s, output_stage);
+                    kittens::sv_bf<16> &out_smem = *reinterpret_cast<kittens::sv_bf<16> *>(scratch);
+
+                    kittens::rv_fl<16> gate_out, gate_scratch;
+                    llama1b::matvec_reduce<Config, pipeline::SCRATCH_BYTES_PER_WARP>(scratch, gate_out);
+
+                    kittens::warp::mul(gate_scratch, gate_out, -1.f);
+                    kittens::warp::exp(gate_scratch, gate_scratch);
+                    kittens::warp::add(gate_scratch, gate_scratch, 1.f);
+                    kittens::warp::div(gate_out, gate_out, gate_scratch);
+                    kittens::warp::mul(gate_out, up_out, gate_out);
+                    kittens::warp::sync();
+                    kittens::warp::store(out_smem, gate_out);
+                    kittens::warp::sync();
+
+                    if (kittens::warp::elect_leader()) {
+                        kittens::tma::store_async<kittens::cache_policy::EVICT_LAST>(
+                            g.template gls<DST>(), out_smem, {0, block_idx});
+                        kittens::tma::store_async_wait();
+
+                        int sub_idx = block_idx * pipeline::MATVEC_BLOCK_SIZE / N;
+                        barrier_arrive<Config>(&g.barriers.raw_ptr[inst.barrier_base + sub_idx], 1);
+                    }
+                    kittens::warp::sync();
+                }
+
+                if ((i + 1) % 2 == 0) {
+                    #pragma unroll
+                    for (int j = 0; j < 2; j++) {
+                        int stage = (output_stage - j + OPS) % OPS;
+                        kittens::warp::arrive(pipeline::outputs_finished(s, stage));
+                    }
+                }
+                output_stage = (output_stage + 1) % OPS;
+            }
+
+            kittens::warp::sync();
+            if (kittens::warp::elect_leader()) {
+                kittens::tma::store_async_wait();
+                s.page_finish(pipeline::get_activation_page(s));
+            }
         }
     };
 };
