@@ -232,17 +232,25 @@ def _schedule_o_proj(
     sm_count: int,
     layer_idx: int,
     icode: int,
+    max_instructions: int | None = None,
 ) -> list[Instruction]:
     attn_red_barrier = _barrier_index(layer_idx, 2, 0)
     oproj_barrier = _barrier_index(layer_idx, 3, 0)
     num_blocks = HIDDEN_DIM // MATVEC_BLOCK_SIZE  # 128
+    num_instructions = min(sm_count, num_blocks)
+    if max_instructions is not None:
+        num_instructions = min(num_instructions, max_instructions)
     instructions = []
-    for sm in range(num_blocks):
+    for i in range(num_instructions):
+        start = round(i * num_blocks / num_instructions)
+        end = round((i + 1) * num_blocks / num_instructions)
+        if start == end:
+            continue
         instructions.append(Instruction(
             icode=icode,
             src_tensors=(T.ATTN_OUT, T.O_WEIGHTS),
             dst_tensors=(T.HIDDEN_STATES,),
-            indices=(layer_idx, sm, sm + 1, 0),
+            indices=(layer_idx, start, end, 0),
             src_barriers=(attn_red_barrier,),
             src_barrier_targets=(ATTN_RED_TARGET,),
             num_input_barriers=1,
@@ -373,6 +381,7 @@ def schedule_decode(
     num_layers: int = NUM_LAYERS,
     device: Device | None = None,
     noop: bool = False,
+    oproj_max_instructions: int | None = 64,
 ) -> ScheduleResult:
     """Build the full decode instruction schedule.
 
@@ -383,6 +392,10 @@ def schedule_decode(
         num_layers: Number of transformer layers (default: 16).
         device: Target device (default: cuda:0).
         noop: If True, all instructions use icode=0 (noop) for plumbing tests.
+        oproj_max_instructions: Cap on o-proj instructions per layer.
+            None (default) uses one instruction per block (128).
+            Lower values batch more blocks per instruction for better
+            pipeline utilization at the cost of fewer active SMs.
     """
     if device is None:
         device = Device(type="cuda", index=0)
@@ -441,7 +454,8 @@ def schedule_decode(
             prev_layer_barrier, prev_layer_target,
         )
         attn_insts = _schedule_attention(layer_idx, icode_attn)
-        oproj_insts = _schedule_o_proj(sm_count, layer_idx, icode_oproj)
+        oproj_insts = _schedule_o_proj(sm_count, layer_idx, icode_oproj,
+                                       max_instructions=oproj_max_instructions)
         upgate_insts = _schedule_upgate(sm_count, layer_idx, icode_upgate)
         downproj_insts = _schedule_downproj(sm_count, layer_idx, icode_downproj)
 
