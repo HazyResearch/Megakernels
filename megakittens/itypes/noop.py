@@ -38,5 +38,8 @@ class Noop(IType):
     def block_indices(self, src_metas: Tuple[TensorMeta, ...], dst_metas: Tuple[TensorMeta, ...]) -> List[Tuple[int, ...]]:
         return [()]
 
+    def tile_regions(self, block_index, src_metas, dst_metas):
+        return [], []
+
     def validate(self, src_metas: Tuple[TensorMeta, ...], dst_metas: Tuple[TensorMeta, ...]) -> None:
         super().validate(src_metas, dst_metas)

@@ -124,6 +124,17 @@ class IType(ABC):
                             f"[MegaKittens] {self.name} {label} {i} dim {dim}: {meta.shape[dim]} not a multiple of {gran}"
                         )
 
+    @abstractmethod
+    def tile_regions(
+        self,
+        block_index: Tuple[int, ...],
+        src_metas: Tuple[TensorMeta, ...],
+        dst_metas: Tuple[TensorMeta, ...],
+    ) -> tuple[list[tuple[tuple[int, int], ...]], list[tuple[tuple[int, int], ...]]]:
+        """Per-instruction tile regions for fine-grained barriers.
+        Returns (src_regions, dst_regions); one tuple of (start, end) ranges per tensor."""
+        ...
+
     @classmethod
     def _resolve(cls, mapping: dict, key, args, kwargs, label: str):
         if key not in mapping:

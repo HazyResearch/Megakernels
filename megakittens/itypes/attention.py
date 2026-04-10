@@ -160,6 +160,17 @@ class Attention(IType):
         m_blocks = seq_len // (self.Mb * self.TILES_PER_CLUSTER)
         return batch * num_heads * m_blocks * self.CLUSTER_SIZE
 
+    def tile_regions(self, block_index, src_metas, dst_metas):
+        b, m, h = block_index
+        S = src_metas[0].shape[1]
+        seq_start = m * self.Mb * self.TILES_PER_CLUSTER
+        seq_end = seq_start + self.Mb * self.TILES_PER_CLUSTER
+        q_region = ((b, b + 1), (seq_start, seq_end), (h, h + 1), (0, self.Db))
+        k_region = ((b, b + 1), (0, S),               (h, h + 1), (0, self.Db))
+        v_region = ((b, b + 1), (0, S),               (h, h + 1), (0, self.Db))
+        o_region = ((b, b + 1), (seq_start, seq_end), (h, h + 1), (0, self.Db))
+        return [q_region, k_region, v_region], [o_region]
+
     def validate(self, src_metas: Tuple[TensorMeta, ...], dst_metas: Tuple[TensorMeta, ...]) -> None:
         super().validate(src_metas, dst_metas)
         q, k, v = src_metas
