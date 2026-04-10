@@ -593,19 +593,117 @@ def benchmark_decode_e2e():
 
 
 
+def _interleave_indices(num_heads, head_dim):
+    half = head_dim // 2
+    indices = []
+    for h in range(num_heads):
+        offset = h * head_dim
+        for i in range(half):
+            indices.append(offset + i)
+            indices.append(offset + half + i)
+    return torch.tensor(indices)
+
+
+def _stack_weights(hf_model):
+    config = hf_model.config
+    model = hf_model.model
+    q_indices = _interleave_indices(config.num_attention_heads, config.head_dim)
+    k_indices = _interleave_indices(config.num_key_value_heads, config.head_dim)
+
+    qkv_weights, o_weights = [], []
+    attn_norm_weights, mlp_norm_weights = [], []
+    up_weights, gate_weights, down_weights = [], [], []
+
+    for layer in model.layers:
+        attn, mlp = layer.self_attn, layer.mlp
+        qkv_weights.append(torch.cat([attn.q_proj.weight[q_indices],
+                                       attn.k_proj.weight[k_indices],
+                                       attn.v_proj.weight], dim=0))
+        o_weights.append(attn.o_proj.weight)
+        attn_norm_weights.append(layer.input_layernorm.weight)
+        mlp_norm_weights.append(layer.post_attention_layernorm.weight)
+        up_weights.append(mlp.up_proj.weight)
+        gate_weights.append(mlp.gate_proj.weight)
+        down_weights.append(mlp.down_proj.weight)
+
+    return {
+        "qkv_weights": torch.stack(qkv_weights),
+        "o_weights": torch.stack(o_weights),
+        "attn_norm_weights": torch.stack(attn_norm_weights),
+        "mlp_norm_weights": torch.stack(mlp_norm_weights),
+        "up_weights": torch.stack(up_weights),
+        "gate_weights": torch.stack(gate_weights),
+        "down_weights": torch.stack(down_weights),
+        "lm_head_norm_weight": model.norm.weight,
+        "lm_head_weight": hf_model.lm_head.weight,
+        "embed_weight": model.embed_tokens.weight,
+    }
+
+
+def _make_rope_table(config, max_seq_len, device):
+    from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding
+    rope = LlamaRotaryEmbedding(config=config)
+    positions = torch.arange(max_seq_len).unsqueeze(0)
+    dummy = torch.empty(0, config.hidden_size, dtype=torch.float32)
+    cos_hf, sin_hf = rope(dummy, positions)
+    cos_hf = cos_hf.squeeze(0).to(device)
+    sin_hf = sin_hf.squeeze(0).to(device)
+    one_head_indices = _interleave_indices(1, config.head_dim)
+    return cos_hf[..., one_head_indices], sin_hf[..., one_head_indices]
+
+
+def _prefill_kv_cache(token_ids, weights, k_cache, v_cache, rope_cos, rope_sin):
+    attn_scale = 1.0 / math.sqrt(HEAD_DIM)
+    for pos in range(len(token_ids)):
+        x = weights["embed_weight"][token_ids[pos]]
+        cos = rope_cos[pos]
+        sin = rope_sin[pos]
+        seq_len = pos + 1
+
+        for layer_idx in range(NUM_LAYERS):
+            normed = _rmsnorm(x, weights["attn_norm_weights"][layer_idx], 1e-5)
+            qkv = weights["qkv_weights"][layer_idx] @ normed
+            q = qkv[:Q_DIM].view(NUM_ATTENTION_HEADS, HEAD_DIM)
+            k = qkv[Q_DIM:Q_DIM + K_DIM].view(NUM_KV_HEADS, HEAD_DIM)
+            v = qkv[Q_DIM + K_DIM:].view(NUM_KV_HEADS, HEAD_DIM)
+
+            q = _apply_rope(q, cos, sin)
+            k = _apply_rope(k, cos, sin)
+            k_cache[layer_idx, pos] = k
+            v_cache[layer_idx, pos] = v
+
+            attn_out = torch.zeros(NUM_ATTENTION_HEADS, HEAD_DIM, device=x.device, dtype=x.dtype)
+            for kv_head in range(NUM_KV_HEADS):
+                k_cached = k_cache[layer_idx, :seq_len, kv_head]
+                v_cached = v_cache[layer_idx, :seq_len, kv_head]
+                gqa_size = NUM_ATTENTION_HEADS // NUM_KV_HEADS
+                for q_head in range(kv_head * gqa_size, (kv_head + 1) * gqa_size):
+                    scores = (q[q_head] @ k_cached.T) * attn_scale
+                    if seq_len > 1:
+                        mask = torch.full((seq_len,), float("-inf"), device=x.device)
+                        mask[:pos + 1] = 0.0
+                        scores = scores + mask
+                    w = F.softmax(scores.float(), dim=-1).to(x.dtype)
+                    attn_out[q_head] = w @ v_cached
+
+            x = x + weights["o_weights"][layer_idx] @ attn_out.reshape(HIDDEN_DIM)
+
+            normed_mlp = _rmsnorm(x, weights["mlp_norm_weights"][layer_idx], 1e-5)
+            gate = weights["gate_weights"][layer_idx] @ normed_mlp
+            up = weights["up_weights"][layer_idx] @ normed_mlp
+            x = x + weights["down_weights"][layer_idx] @ (F.silu(gate) * up)
+
+    return x
+
+
 def benchmark_tok_per_sec(prompt="Hello, my name is", max_new_tokens=200, num_samples=5, warmup=5):
     """Benchmark decode throughput (tokens/sec) with real HF weights.
 
-    Loads Llama-3.2-1B-Instruct from HuggingFace, runs repeated decode steps
-    (max_new_tokens - 1; the first new token is treated as coming from prefill),
-    timed with perf_counter and cuda.synchronize.
+    Loads Llama-3.2-1B-Instruct from HuggingFace, prefills KV cache with
+    prompt, then times decode steps. Matches gpt-fast --greedy methodology.
     """
     import time
-    import itertools
-    import sys, os
-    sys.path.insert(0, os.path.dirname(__file__))
     from transformers import AutoModelForCausalLM, AutoTokenizer
-    from test_hf_reference import stack_weights, make_rope_table
 
     sm_count = get_sm_count()
     attn_scale = 1.0 / math.sqrt(HEAD_DIM)
@@ -616,8 +714,8 @@ def benchmark_tok_per_sec(prompt="Hello, my name is", max_new_tokens=200, num_sa
     hf_model = AutoModelForCausalLM.from_pretrained(
         "meta-llama/Llama-3.2-1B-Instruct", dtype=torch.bfloat16, device_map=D,
     )
-    weights = stack_weights(hf_model)
-    rope_cos, rope_sin = make_rope_table(hf_model.config, MAX_SEQ_LEN, D)
+    weights = _stack_weights(hf_model)
+    rope_cos, rope_sin = _make_rope_table(hf_model.config, MAX_SEQ_LEN, D)
     embed_weight = weights["embed_weight"]
 
     tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-1B-Instruct")
@@ -626,6 +724,19 @@ def benchmark_tok_per_sec(prompt="Hello, my name is", max_new_tokens=200, num_sa
     print(f"Prompt: {prompt!r}, {prompt_len} tokens")
 
     del hf_model  # free HF model memory
+
+    # Prefill KV cache with prompt tokens
+    k_cache = torch.zeros(NUM_LAYERS, MAX_SEQ_LEN, NUM_KV_HEADS, HEAD_DIM, dtype=torch.bfloat16, device=D)
+    v_cache = torch.zeros(NUM_LAYERS, MAX_SEQ_LEN, NUM_KV_HEADS, HEAD_DIM, dtype=torch.bfloat16, device=D)
+    print("Prefilling KV cache...")
+    with torch.inference_mode():
+        last_hidden = _prefill_kv_cache(input_ids, weights, k_cache, v_cache, rope_cos, rope_sin)
+    # First decode token comes from prefill logits
+    prefill_logits = weights["lm_head_weight"] @ _rmsnorm(last_hidden, weights["lm_head_norm_weight"], 1e-5)
+    first_token = torch.argmax(prefill_logits)
+    # Snapshot prefilled cache for reset between runs
+    k_cache_snapshot = k_cache.clone()
+    v_cache_snapshot = v_cache.clone()
 
     # Build megakernel dispatcher
     schedule = schedule_decode(sm_count=sm_count)
@@ -639,10 +750,8 @@ def benchmark_tok_per_sec(prompt="Hello, my name is", max_new_tokens=200, num_sa
     )
 
     # Assemble tensors in scheduler T.* order using real weights
-    hidden_states = embed_weight[input_ids[-1]].clone()  # embed last prompt token
+    hidden_states = embed_weight[first_token].clone()
     logits = torch.zeros(VOCAB_SIZE, dtype=torch.bfloat16, device=D)
-    k_cache = torch.zeros(NUM_LAYERS, MAX_SEQ_LEN, NUM_KV_HEADS, HEAD_DIM, dtype=torch.bfloat16, device=D)
-    v_cache = torch.zeros(NUM_LAYERS, MAX_SEQ_LEN, NUM_KV_HEADS, HEAD_DIM, dtype=torch.bfloat16, device=D)
 
     mk_tensors = [
         weights["qkv_weights"],         # T.QKV_WEIGHTS
@@ -671,24 +780,24 @@ def benchmark_tok_per_sec(prompt="Hello, my name is", max_new_tokens=200, num_sa
 
     embedding = torch.nn.Embedding(VOCAB_SIZE, HIDDEN_DIM, device=D, dtype=torch.bfloat16)
     embedding.weight.data.copy_(embed_weight)
+    num_decode_tokens = max_new_tokens - 1  # 199, first token comes from prefill
     output_tokens = torch.zeros(max_new_tokens, dtype=torch.long, device=D)
 
     def _decode_step(pos_id, input_token):
         hidden_states.copy_(embedding(input_token))
         dispatcher.relaunch(pos_id=pos_id)
-        next_token = torch.argmax(logits, dim=-1)
-        return next_token
+        return torch.argmax(logits, dim=-1)
 
     # Warmup: first call via call() to build cache, then relaunch
-    num_decode_tokens = max_new_tokens - 1  # 199, first token comes from prefill
     dispatcher(*mk_tensors, prompt_len, attn_scale, 1e-5)
-    output_tokens[0] = input_ids[-1]
+    output_tokens[0] = first_token
     print(f"Warming up ({warmup} runs)...")
     for _ in range(warmup):
-        token = output_tokens[0]
+        k_cache.copy_(k_cache_snapshot)
+        v_cache.copy_(v_cache_snapshot)
+        token = first_token
         for i in range(num_decode_tokens):
-            pos_id = prompt_len + i
-            token = _decode_step(pos_id, token)
+            token = _decode_step(prompt_len + i, token)
             output_tokens[i + 1] = token
     torch.cuda.synchronize()
     print("Warmup done.")
@@ -696,12 +805,13 @@ def benchmark_tok_per_sec(prompt="Hello, my name is", max_new_tokens=200, num_sa
     # Timed runs
     decode_tokens_per_sec_list = []
     for sample in range(num_samples):
+        k_cache.copy_(k_cache_snapshot)
+        v_cache.copy_(v_cache_snapshot)
         torch.cuda.synchronize()
         t0 = time.perf_counter()
-        token = output_tokens[0]
+        token = first_token
         for i in range(num_decode_tokens):
-            pos_id = prompt_len + i
-            token = _decode_step(pos_id, token)
+            token = _decode_step(prompt_len + i, token)
             output_tokens[i + 1] = token
         torch.cuda.synchronize()
         t1 = time.perf_counter()
@@ -715,6 +825,11 @@ def benchmark_tok_per_sec(prompt="Hello, my name is", max_new_tokens=200, num_sa
         print(f"Bandwidth achieved: {bandwidth_gbs:.02f} GB/s")
         print(f"FLOPS achieved: {flops_tfs:.02f} TF/s")
         print()
+
+    # Print generated text from last run
+    all_ids = torch.cat([input_ids.to(D), output_tokens[:max_new_tokens]])
+    print(tokenizer.decode(all_ids.tolist()))
+    print()
 
     print("==========")
     print(f"Prompt Length: {prompt_len}")
