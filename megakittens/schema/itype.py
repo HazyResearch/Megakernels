@@ -8,6 +8,31 @@ import torch
 from .tensor import TensorMeta, TensorSpec
 
 
+# Global dispatch maps: target -> IType | list[Callable]
+# Resolvers (Callable) return IType or (IType, list[int]) where list[int] is aten_output_indices.
+_CALL_FUNCTION_MAP: dict[Callable, "IType | list[Callable]"] = {}
+_CALL_METHOD_MAP: dict[str, "IType | list[Callable]"] = {}
+_CALL_MODULE_MAP: dict[type, "IType | list[Callable]"] = {}
+
+
+def _register_itype(cls):
+    for global_map, class_map in [
+        (_CALL_FUNCTION_MAP, cls.torch_functions_map),
+        (_CALL_METHOD_MAP, cls.torch_methods_map),
+        (_CALL_MODULE_MAP, cls.torch_modules_map),
+    ]:
+        for key, value in class_map.items():
+            existing = global_map.get(key)
+            if callable(value):
+                if isinstance(existing, IType):
+                    raise RuntimeError(f"[MegaKittens] Conflict: {key!r} already registered as plain IType, cannot add resolver")
+                global_map.setdefault(key, []).append(value)
+            else:
+                if isinstance(existing, list):
+                    raise RuntimeError(f"[MegaKittens] Conflict: {key!r} already registered as resolver, cannot add plain IType")
+                global_map[key] = cls()
+
+
 class IType(ABC):
     """Instruction type. Inherit with a subclass to define a new instruction type."""
 
@@ -99,22 +124,60 @@ class IType(ABC):
                             f"[MegaKittens] {self.name} {label} {i} dim {dim}: {meta.shape[dim]} not a multiple of {gran}"
                         )
 
-    _itype_cache: dict[str, "IType"] = {}
     @classmethod
-    def from_optype(cls, op_type: str) -> "IType":
-        if not cls._itype_cache:
-            for subclass in cls.__subclasses__():  # TODO: in the future, there will exist multiple itypes per optype
-                itype = subclass()
-                cls._itype_cache[itype.op_type] = itype
-        if op_type not in cls._itype_cache:
-            raise ValueError(f"[MegaKittens] No IType for OpType '{op_type}'")
-        return cls._itype_cache[op_type]
+    def _resolve(cls, mapping: dict, key, args, kwargs, label: str):
+        if key not in mapping:
+            raise RuntimeError(f"[MegaKittens] Unsupported {label}: {key!r}")
+        entry = mapping[key]
+        if isinstance(entry, list):
+            for resolver in entry:
+                if not callable(resolver):
+                    raise RuntimeError(f"[MegaKittens] Resolver for {label} {key!r} is not callable: {resolver!r}")
+                result = resolver(args, kwargs)
+                if result is None:
+                    continue
+                if isinstance(result, tuple):
+                    if len(result) != 2 or not isinstance(result[0], IType) or not isinstance(result[1], list):
+                        raise RuntimeError(
+                            f"[MegaKittens] Resolver for {label} {key!r} returned invalid tuple: {result!r}"
+                        )
+                elif not isinstance(result, IType):
+                    raise RuntimeError(
+                        f"[MegaKittens] Resolver for {label} {key!r} returned invalid type: {type(result).__name__}"
+                    )
+                return result
+            raise RuntimeError(f"[MegaKittens] No matching resolver for {label}: {key!r}")
+        else:
+            if not isinstance(entry, IType):
+                raise RuntimeError(f"[MegaKittens] Invalid entry for {label} {key!r}: expected IType, got {type(entry).__name__}")
+            return entry
+
+    @classmethod
+    def from_call_function(cls, target, args=(), kwargs={}):
+        return cls._resolve(_CALL_FUNCTION_MAP, target, args, kwargs, "call_function target")
+
+    @classmethod
+    def from_call_method(cls, target_str: str, args=(), kwargs={}):
+        return cls._resolve(_CALL_METHOD_MAP, target_str, args, kwargs, "call_method target")
+
+    @classmethod
+    def from_call_module(cls, module_type: type, args=(), kwargs={}):
+        return cls._resolve(_CALL_MODULE_MAP, module_type, args, kwargs, "module type")
+
+    @property
+    def _id(self) -> tuple:
+        return (type(self), tuple(sorted(self.__dict__.items())))
 
     def __repr__(self) -> str:
+        if self.__dict__:
+            fields = ", ".join(f"{k}={v!r}" for k, v in sorted(self.__dict__.items()))
+            return f"{type(self).__name__}({fields})"
         return f"{type(self).__name__}()"
 
     def __eq__(self, other: object) -> bool:
-        return type(self) is type(other)
+        if not isinstance(other, IType):
+            return NotImplemented
+        return self._id == other._id
 
     def __hash__(self) -> int:
-        return hash(type(self))
+        return hash(self._id)

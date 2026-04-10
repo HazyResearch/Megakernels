@@ -18,18 +18,27 @@ from .dispatcher import Dispatcher
 from .scheduler import schedule
 
 
-def _resolve_itype(gm: torch.fx.GraphModule, node: torch.fx.Node) -> IType:
+def _resolve_itype(gm: torch.fx.GraphModule, node: torch.fx.Node) -> tuple[IType, list[int]]:
     if node.op == "call_function":
-        return IType.from_call_function(node.target, args=node.args, kwargs=node.kwargs)
-    if node.op == "call_method":
-        return IType.from_call_method(node.target, args=node.args, kwargs=node.kwargs)
-    if node.op == "call_module":
+        result = IType.from_call_function(node.target, args=node.args, kwargs=node.kwargs)
+    elif node.op == "call_method":
+        result = IType.from_call_method(node.target, args=node.args, kwargs=node.kwargs)
+    elif node.op == "call_module":
         try:
             module = gm.get_submodule(node.target)
         except Exception:
             raise RuntimeError(f"[MegaKittens] Invalid call_module node '{node.name}' target={node.target!r}")
-        return IType.from_call_module(type(module), args=node.args, kwargs=node.kwargs)
-    raise RuntimeError(f"[MegaKittens] Unsupported node op '{node.op}' for node '{node.name}'")
+        result = IType.from_call_module(type(module), args=node.args, kwargs=node.kwargs)
+    else:
+        raise RuntimeError(f"[MegaKittens] Unsupported node op '{node.op}' for node '{node.name}'")
+    if isinstance(result, tuple):
+        itype, aten_output_indices = result
+        if not isinstance(itype, IType) or not isinstance(aten_output_indices, list):
+            raise RuntimeError(f"[MegaKittens] Invalid resolver result for node '{node.name}': {result!r}")
+        return itype, aten_output_indices
+    if not isinstance(result, IType):
+        raise RuntimeError(f"[MegaKittens] Invalid resolve result for node '{node.name}': expected IType, got {type(result).__name__}")
+    return result, []
 
 
 def _tensor_to_mk_tensor(node: torch.fx.Node, value: torch.Tensor) -> TensorMeta:
@@ -316,12 +325,12 @@ def fx_graph_to_mk_dag(
                 raise RuntimeError("[MegaKittens] Non-tensor attributes are not supported")
 
         elif node.op in {"call_function", "call_module", "call_method"}:
-            itype = _resolve_itype(gm, node)
+            itype, aten_output_indices = _resolve_itype(gm, node)
             input_nodes = list(node.all_input_nodes)
-            out_tensors = _get_output_tensors(node, aten_output_indices=itype.aten_output_indices)
-            if itype.aten_output_indices:
+            out_tensors = _get_output_tensors(node, aten_output_indices=aten_output_indices)
+            if aten_output_indices:
                 output_idx_remap[node.name] = {
-                    aten_idx: itype_idx for itype_idx, aten_idx in enumerate(itype.aten_output_indices)
+                    aten_idx: itype_idx for itype_idx, aten_idx in enumerate(aten_output_indices)
                 }
 
         elif node.op == "output":
