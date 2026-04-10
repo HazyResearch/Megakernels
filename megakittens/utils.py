@@ -35,7 +35,7 @@ def save_dag_as_png_as_json(
         "nodes": [
             {
                 "id": idx,
-                "optype": node.optype.value,
+                "optype": "input" if node.is_input else "output" if node.is_output else node.itype.name,
                 "input_index": node.input_index,
                 "in_nodes": [
                     [node_index_by_id[in_node.id], input_slot]
