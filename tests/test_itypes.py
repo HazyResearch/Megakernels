@@ -1,8 +1,10 @@
+import sys
+
 import megakittens
 from .common import check
 
 
-def collect_test_cases():
+def collect_test_cases(names=None):
     test_cases = []
     for cls in megakittens.schema.itype.IType.__subclasses__():
         if "test_cases" not in cls.__dict__:
@@ -20,8 +22,10 @@ def collect_test_cases():
         if not callable(cls.__dict__["test_args"]):
             raise RuntimeError(f"{cls.__name__}.test_args must be callable")
         itype = cls()
-        for shape in itype.test_cases:
-            test_cases.append((itype, shape))
+        if names and itype.name not in names:
+            continue
+        for case in itype.test_cases:
+            test_cases.append((itype, case))
     return test_cases
 
 
@@ -29,17 +33,18 @@ try:
     # Support both standalone & pytest
     import pytest
     @pytest.mark.parametrize(
-        "itype, shape",
+        "itype, case",
         collect_test_cases(),
-        ids=[f"{itype.name}-{shape}" for itype, shape in collect_test_cases()],
+        ids=[f"{itype.name}-{case}" for itype, case in collect_test_cases()],
     )
-    def test_itype(itype, shape):
-        check(itype.test_fn, itype.test_args(shape), atol=itype.test_atol, rtol=itype.test_rtol)
+    def test_itype(itype, case):
+        check(itype.test_fn, itype.test_args(case), atol=itype.test_atol, rtol=itype.test_rtol)
 except ImportError:
     pass
 
 
 if __name__ == "__main__":
-    for itype, shape in collect_test_cases():
-        max_diff, mean_diff = check(itype.test_fn, itype.test_args(shape), atol=itype.test_atol, rtol=itype.test_rtol)
-        print(f"  PASS {itype.name} {shape} | max_diff={max_diff:.6f} mean_diff={mean_diff:.6f}")
+    names = sys.argv[1:] or None
+    for itype, case in collect_test_cases(names):
+        max_diff, mean_diff = check(itype.test_fn, itype.test_args(case), atol=itype.test_atol, rtol=itype.test_rtol)
+        print(f"  PASS {itype.name} {case} | max_diff={max_diff:.6f} mean_diff={mean_diff:.6f}")
