@@ -7,24 +7,25 @@ from .common import benchmark
 def collect_benchmark_cases(names=None):
     benchmark_cases = []
     for cls in megakittens.schema.itype.IType.__subclasses__():
-        if "bench_shapes" not in cls.__dict__:
-            raise RuntimeError(f"{cls.__name__} must define bench_shapes")
-        if not isinstance(cls.__dict__["bench_shapes"], list):
-            raise RuntimeError(f"{cls.__name__}.bench_shapes must be a list, got {type(cls.__dict__['bench_shapes']).__name__}")
-        if not all(isinstance(s, tuple) for s in cls.__dict__["bench_shapes"]):
-            raise RuntimeError(f"{cls.__name__}.bench_shapes entries must be tuples")
+        if "bench_cases" not in cls.__dict__:
+            raise RuntimeError(f"{cls.__name__} must define bench_cases")
+        if not isinstance(cls.__dict__["bench_cases"], list):
+            raise RuntimeError(f"{cls.__name__}.bench_cases must be a list, got {type(cls.__dict__['bench_cases']).__name__}")
+        if not all(isinstance(s, tuple) for s in cls.__dict__["bench_cases"]):
+            raise RuntimeError(f"{cls.__name__}.bench_cases entries must be tuples")
         if "test_fn" not in cls.__dict__:
-            raise RuntimeError(f"{cls.__name__} has bench_shapes but no test_fn")
+            raise RuntimeError(f"{cls.__name__} has bench_cases but no test_fn")
         if not callable(cls.__dict__["test_fn"]):
             raise RuntimeError(f"{cls.__name__}.test_fn must be callable")
         if "test_args" not in cls.__dict__:
-            raise RuntimeError(f"{cls.__name__} has bench_shapes but no test_args")
+            raise RuntimeError(f"{cls.__name__} has bench_cases but no test_args")
         if not callable(cls.__dict__["test_args"]):
             raise RuntimeError(f"{cls.__name__}.test_args must be callable")
-        itype = cls()
-        if names and itype.name not in names:
-            continue
-        benchmark_cases.append(itype)
+        for cls_args, input_args in cls.bench_cases:
+            itype = cls(*cls_args)
+            if names and itype.name not in names:
+                continue
+            benchmark_cases.append((itype, input_args))
     return benchmark_cases
 
 
@@ -39,7 +40,7 @@ def benchmark_one(itype):
         header += f"  {'MK GB/s':>10}  {'PT GB/s':>10}"
     header += f"  {'ratio':>7}"
 
-    print(f"\n{itype.name} (bf16)")
+    print(f"\n{itype!r} (bf16)")
     print(header)
     print("-" * len(header))
 

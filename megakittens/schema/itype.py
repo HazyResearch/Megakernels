@@ -52,11 +52,6 @@ class IType(ABC):
         return f"itypes/{self.name}.cuh"
 
     @property
-    def op_type(self) -> str:
-        """Default: same as name. Override if different."""
-        return self.name
-
-    @property
     @abstractmethod
     def inputs(self) -> list[TensorSpec]:
         """Specs for each input tensor."""

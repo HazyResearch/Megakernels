@@ -38,8 +38,8 @@ class Attention(IType):
     O_TMA = st(dtype=DType.bf16, rows=128, cols=128, axis=1)  # o_tile: st_bf<Mb, Db>
 
     test_cases = [
-        (16, 1024, 16, False), (16, 2048, 16, False), (16, 4096, 16, False),
-        (16, 1024, 16, True),  (16, 2048, 16, True),  (16, 4096, 16, True),
+        ((False,), (16, 1024, 16)), ((False,), (16, 2048, 16)), ((False,), (16, 4096, 16)),
+        ((True,),  (16, 1024, 16)), ((True,),  (16, 2048, 16)), ((True,),  (16, 4096, 16)),
     ]
     test_atol = 1e-2
     test_rtol = 1e-2

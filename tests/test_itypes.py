@@ -21,11 +21,11 @@ def collect_test_cases(names=None):
             raise RuntimeError(f"{cls.__name__} has test_cases but no test_args")
         if not callable(cls.__dict__["test_args"]):
             raise RuntimeError(f"{cls.__name__}.test_args must be callable")
-        itype = cls()
-        if names and itype.name not in names:
-            continue
-        for case in itype.test_cases:
-            test_cases.append((itype, case))
+        for cls_args, input_args in cls.test_cases:
+            itype = cls(*cls_args)
+            if names and itype.name not in names:
+                continue
+            test_cases.append((itype, input_args))
     return test_cases
 
 
@@ -35,7 +35,7 @@ try:
     @pytest.mark.parametrize(
         "itype, case",
         collect_test_cases(),
-        ids=[f"{itype.name}-{case}" for itype, case in collect_test_cases()],
+        ids=[f"{itype!r}-{case}" for itype, case in collect_test_cases()],
     )
     def test_itype(itype, case):
         check(itype.test_fn, itype.test_args(case), atol=itype.test_atol, rtol=itype.test_rtol)
