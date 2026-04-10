@@ -35,9 +35,8 @@ def _rows_per_inst(N: int) -> int:
 
 
 class RMSNorm(IType):
-    torch_functions = []
-    torch_methods = ["rmsnorm"]
-    torch_modules = [torch.nn.RMSNorm]
+    torch_methods_map = {"rmsnorm": None}
+    torch_modules_map = {torch.nn.RMSNorm: None}
 
     test_cases = [((), (1, 2048)), ((), (4, 2048)), ((), (32, 2048)), ((), (16, 4096)), ((), (32, 4096)), ((), (8, 8192))]
     test_atol = 1e-2

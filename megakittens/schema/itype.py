@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 import re
 from typing import List, Tuple
 
@@ -10,11 +11,9 @@ from .tensor import TensorMeta, TensorSpec
 class IType(ABC):
     """Instruction type. Inherit with a subclass to define a new instruction type."""
 
-    torch_functions: list = []      # e.g. [torch.add, operator.add, torch.ops.aten.add, ...]
-    torch_methods: list[str] = []   # e.g. ["add"]
-    torch_modules: list[type] = []  # e.g. [torch.nn.ReLU]
-
-    aten_output_indices: list[int] = []  # Mapping from aten op output indices to IType output indices. Empty means identity.
+    torch_functions_map: dict[Callable, Callable | None] = {}
+    torch_methods_map: dict[str, Callable | None] = {}
+    torch_modules_map: dict[type, Callable | None] = {}
 
     test_cases: list[tuple] = []
     test_atol: float = 0.0
@@ -27,7 +26,7 @@ class IType(ABC):
         mk_op = getattr(torch.ops.megakittens, name, None)
         if mk_op is None:
             raise RuntimeError(f"[MegaKittens] {cls.__name__} requires custom op torch.ops.megakittens.{name}")
-        cls.torch_functions = cls.torch_functions + [mk_op, mk_op.default]
+        cls.torch_functions_map = {mk_op: None, mk_op.default: None, **cls.torch_functions_map}
         if "test_fn" not in cls.__dict__:
             def _make_test_fn(op):
                 def test_fn(*args):
@@ -35,7 +34,7 @@ class IType(ABC):
                 test_fn.__qualname__ = f"{cls.__name__}.test_fn"
                 return test_fn
             cls.test_fn = staticmethod(_make_test_fn(mk_op))
-        register_optype(cls)
+        _register_itype(cls)
 
     @property
     def name(self) -> str:

@@ -24,12 +24,12 @@ class Gemm(IType):
     TILE_K = 64
     SUPERGROUP_SIZE = 8
 
-    torch_functions = [
-        torch.matmul, torch.mm, operator.matmul,
-        torch.ops.aten.mm, torch.ops.aten.mm.default,
-        torch.ops.aten.matmul, torch.ops.aten.matmul.default,
-    ]
-    torch_methods = ["gemm"]
+    torch_functions_map = {
+        torch.matmul: None, torch.mm: None, operator.matmul: None,
+        torch.ops.aten.mm: None, torch.ops.aten.mm.default: None,
+        torch.ops.aten.matmul: None, torch.ops.aten.matmul.default: None,
+    }
+    torch_methods_map = {"gemm": None}
 
     A_TMA = st(dtype=DType.bf16, rows=128, cols=64) # st_bf<Mb/2, Kb>
     B_TMA = st(dtype=DType.bf16, rows=64, cols=128) # st_bf<Kb, Nb/2> (B is K×N)

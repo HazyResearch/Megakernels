@@ -22,12 +22,12 @@ class Relu(IType):
     TILES_PER_INST = 7
     TMA = st(dtype=DType.bf16, rows=128, cols=128)
 
-    torch_functions = [
-        torch.relu,
-        torch.ops.aten.relu, torch.ops.aten.relu.default,
-    ]
-    torch_methods = ["relu"]
-    torch_modules = [torch.nn.ReLU, torch.nn.ReLU6]
+    torch_functions_map = {
+        torch.relu: None,
+        torch.ops.aten.relu: None, torch.ops.aten.relu.default: None,
+    }
+    torch_methods_map = {"relu": None}
+    torch_modules_map = {torch.nn.ReLU: None, torch.nn.ReLU6: None}
 
     test_cases = [((), (128, 256)), ((), (256, 512)), ((), (512, 1024)), ((), (1024, 2048)), ((), (1280, 2048))]
     bench_cases = [((), (4096, 4096)), ((), (131072, 4096)), ((), (4096, 131072)), ((), (16384, 16384)), ((), (131072, 131072))]

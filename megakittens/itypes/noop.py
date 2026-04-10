@@ -16,7 +16,7 @@ def _noop_fake() -> None:
 
 
 class Noop(IType):
-    torch_functions = []
+    torch_functions_map: dict = {}
     test_cases: list[tuple] = []
     bench_cases: list[tuple] = []
 

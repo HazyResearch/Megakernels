@@ -23,11 +23,11 @@ class Add(IType):
     TILES_PER_INST = 3
     TMA = st(dtype=DType.bf16, rows=128, cols=128)
 
-    torch_functions = [
-        torch.add, operator.add,
-        torch.ops.aten.add, torch.ops.aten.add.default, torch.ops.aten.add.Tensor,
-    ]
-    torch_methods = ["add"]
+    torch_functions_map = {
+        torch.add: None, operator.add: None,
+        torch.ops.aten.add: None, torch.ops.aten.add.default: None, torch.ops.aten.add.Tensor: None,
+    }
+    torch_methods_map = {"add": None}
 
     test_cases = [((), (128, 256)), ((), (256, 512)), ((), (512, 1024)), ((), (1024, 2048)), ((), (1280, 2048))]
     bench_cases = [((), (4096, 4096)), ((), (131072, 4096)), ((), (4096, 131072)), ((), (16384, 16384)), ((), (131072, 131072))]
