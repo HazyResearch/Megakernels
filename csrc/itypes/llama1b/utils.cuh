@@ -23,7 +23,7 @@ rms_norm(kittens::rv_fl<N / Config::NUM_CONSUMER_WARPS> activations_vec,
     if (kittens::warp::elect_leader()) {
         scratch_memory[kittens::warpid()] = partial_sum;
     }
-    kittens::group<Config::NUM_CONSUMER_WARPS>::sync(0);
+    kittens::group<Config::NUM_CONSUMER_WARPS>::sync(1);
 
     float full_sum = 0.f;
     #pragma unroll
@@ -34,8 +34,8 @@ rms_norm(kittens::rv_fl<N / Config::NUM_CONSUMER_WARPS> activations_vec,
     float variance = full_sum / static_cast<float>(N);
     float rms_scale = rsqrtf(variance + rms_norm_eps);
 
-    kittens::warp::mul(activations_vec, activations_vec, rms_scale);
     kittens::warp::load(rms_scale_vec, rms_scale_smem);
+    kittens::warp::mul(rms_scale_vec, rms_scale_vec, rms_scale);
     kittens::warp::mul(activations_vec, activations_vec, rms_scale_vec);
 
     return activations_vec;
