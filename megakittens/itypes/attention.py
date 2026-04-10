@@ -43,18 +43,25 @@ class Attention(IType):
     ]
     test_atol = 1e-2
     test_rtol = 1e-2
-    bench_shapes = [(16, 1024, 16), (16, 2048, 16), (16, 4096, 16), (16, 8192, 16), (16, 16384, 16)]
+    bench_cases = [
+        ((False,), (16, 1024, 16)), ((False,), (16, 2048, 16)), ((False,), (16, 4096, 16)), ((False,), (16, 8192, 16)), ((False,), (16, 16384, 16)),
+        ((True,),  (16, 1024, 16)), ((True,),  (16, 2048, 16)), ((True,),  (16, 4096, 16)), ((True,),  (16, 8192, 16)), ((True,),  (16, 16384, 16)),
+    ]
 
-    def test_args(self, shape: tuple) -> tuple[torch.Tensor, ...]:
-        B, S, H = shape
+    def __init__(self, causal: bool = False):
+        self.causal = causal
+
+    def test_args(self, case: tuple) -> tuple:
+        B, S, H = case
         return (
             torch.randn(B, S, H, self.Db, dtype=torch.bfloat16, device="cuda"),
             torch.randn(B, S, H, self.Db, dtype=torch.bfloat16, device="cuda"),
             torch.randn(B, S, H, self.Db, dtype=torch.bfloat16, device="cuda"),
+            self.causal,
         )
 
-    def bench_flops(self, shape: tuple) -> float:
-        B, S, H = shape[:3]
+    def bench_flops(self, case: tuple) -> float:
+        B, S, H = case
         return (2.0 if self.causal else 4.0) * B * H * S * S * self.Db
 
     @property
