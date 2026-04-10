@@ -22,7 +22,16 @@ MAX_TENSOR_ALLOCATIONS = 256
 def _get_instruction_count_and_offset(
     dag: DAG,
 ) -> Tuple[Dict[int, int], Dict[int, int]]:
-    """Phase 1: Count instructions per node and compute cluster-aligned offsets."""
+    """Phase 1: Count instructions per node and compute cluster-aligned offsets.
+
+    Args:
+        dag: validated DAG of input, and output, and compute nodes.
+
+    Returns:
+        (node_inst_count, node_inst_offset) where:
+        - node_inst_count: Dict[int, int], node_id -> number of instructions this node generates.
+        - node_inst_offset: Dict[int, int], node_id -> starting index in the global instruction list.
+    """
     node_inst_count: Dict[int, int] = {}
     node_inst_offset: Dict[int, int] = {}
     cumulative_offset = 0
@@ -50,7 +59,21 @@ def _assign_tensors(
     node_inst_count: Dict[int, int],
     node_inst_offset: Dict[int, int],
 ) -> Tuple[List[TensorMeta], Dict[Tuple[int, int], int], List[int], List[int], List[Tuple[List[int], int, int]]]:
-    """Phase 2: Assign tensor indices, reuse memory where possible, collect I/O indices."""
+    """Phase 2: Assign tensor indices, reuse memory where possible, collect I/O indices.
+
+    Args:
+        dag: validated DAG of input, and output, and compute nodes.
+        node_inst_count: Dict[int, int], node_id -> number of instructions this node generates.
+        node_inst_offset: Dict[int, int], node_id -> starting index in the global instruction list.
+
+    Returns:
+        (tensor_metas, tensor_index, input_tensor_indices, output_tensor_indices, release_barriers) where:
+        - tensor_metas: List[TensorMeta], flat list of unique tensor metadata.
+        - tensor_index: Dict[Tuple[int, int], int], (node_id, output_slot) -> index into tensor_metas.
+        - input_tensor_indices: List[int], tensor_metas indices for graph inputs, in order.
+        - output_tensor_indices: List[int], tensor_metas indices for graph outputs, in order.
+        - release_barriers: List[Tuple[List[int], int, int]], each is (consumer_node_ids, num_consumer_insts, reuser_node_id) for tensor reuse.
+    """
     tensor_metas: List[TensorMeta] = []
     tensor_index: Dict[Tuple[int, int], int] = {}
     input_tensor_indices: List[int] = []
@@ -164,12 +187,28 @@ def _assign_barriers(
 def _generate_instructions(
     dag: DAG,
     tensor_index: Dict[Tuple[int, int], int],
-    node_dst_barriers: Dict[int, List[int]],
-    node_src_barriers: Dict[int, List[Tuple[int, int]]],
-    node_num_input_barriers: Dict[int, int],
-    node_num_reuse_barriers: Dict[int, int],
+    node_block_indices: Dict[int, list],
+    inst_dst_barriers: Dict[Tuple[int, int], List[int]],
+    inst_src_barriers: Dict[Tuple[int, int], List[Tuple[int, int]]],
+    inst_num_input_barriers: Dict[Tuple[int, int], int],
+    inst_num_reuse_barriers: Dict[Tuple[int, int], int],
 ) -> Tuple[List[InstructionMeta], List[Instruction]]:
-    """Phase 4: Build flat instruction list with icodes, barriers, and cluster-aligned padding."""
+    """Phase 4: Build flat instruction list with icodes, barriers, and cluster-aligned padding.
+
+    Args:
+        dag: validated DAG of input, and output, and compute nodes.
+        tensor_index: Dict[Tuple[int, int], int], (node_id, output_slot) -> index into tensor_metas.
+        node_block_indices: Dict[int, list], node_id -> list of per-instruction tile coordinate tuples from block_indices().
+        inst_dst_barriers: Dict[Tuple[int, int], List[int]], (node_id, local_inst_idx) -> barrier IDs this instruction arrives on after completion.
+        inst_src_barriers: Dict[Tuple[int, int], List[Tuple[int, int]]], (node_id, local_inst_idx) -> (barrier_id, target_count) pairs to wait on before starting.
+        inst_num_input_barriers: Dict[Tuple[int, int], int], (node_id, local_inst_idx) -> how many of src_barriers are data dependency barriers.
+        inst_num_reuse_barriers: Dict[Tuple[int, int], int], (node_id, local_inst_idx) -> how many of src_barriers are tensor reuse barriers.
+
+    Returns:
+        (instruction_metas, instructions) where:
+        - instruction_metas: List[InstructionMeta], one per unique icode. Index 0 is always noop.
+        - instructions: List[Instruction], padded to CLUSTER_SIZE with noops.
+    """
     instructions: List[Instruction] = []
     icode_counter = 1  # icode 0 is reserved for noop
     instruction_metas: List[InstructionMeta] = [InstructionMeta(icode=0, itype=Noop(), src_tensors=(), dst_tensors=())]
@@ -203,25 +242,23 @@ def _generate_instructions(
         else:
             icode = icode_map[key]
 
-        src_bar_list = node_src_barriers.get(node.id, [])
-        src_barriers = tuple(bid for bid, _ in src_bar_list)
-        src_barrier_targets = tuple(tgt for _, tgt in src_bar_list)
-        dst_barriers = tuple(node_dst_barriers.get(node.id, []))
-        num_input_barriers = node_num_input_barriers.get(node.id, 0)
-        num_reuse_barriers = node_num_reuse_barriers.get(node.id, 0)
+        for local_idx, block_index in enumerate(node_block_indices[node.id]):
+            src_bar_list = inst_src_barriers.get((node.id, local_idx), [])
+            dst_bariers = inst_dst_barriers.get((node.id, local_idx), [])
+            num_input_barriers = inst_num_input_barriers.get((node.id, local_idx), 0)
+            num_reuse_barriers = inst_num_reuse_barriers.get((node.id, local_idx), 0)
 
-        for block_index in node.itype.block_indices(src_metas, node.out_tensors):
             instructions.append(Instruction(
                 icode=icode,
                 src_tensors=src_tensors,
                 dst_tensors=dst_tensors,
                 indices=block_index,
-                src_barriers=src_barriers,
-                src_barrier_targets=src_barrier_targets,
+                src_barriers=tuple(bid for bid, _ in src_bar_list),
+                src_barrier_targets=tuple(tgt for _, tgt in src_bar_list),
                 num_input_barriers=num_input_barriers,
                 num_reuse_barriers=num_reuse_barriers,
-                num_dst_barriers=len(dst_barriers),
-                dst_barriers=dst_barriers,
+                num_dst_barriers=len(dst_bariers),
+                dst_barriers=tuple(dst_bariers),
             ))
 
         # Pad to CLUSTER_SIZE with noops so op boundaries are cluster-aligned
