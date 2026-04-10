@@ -5,7 +5,7 @@ from typing import Dict, List, Tuple
 from .dispatcher import Dispatcher
 from .itypes.noop import Noop
 from .jit.cuda_utils import get_sm_count
-from .schema.dag import DAG, OpType
+from .schema.dag import DAG
 from .schema.tensor import TensorMeta
 from .schema.instruction import (
     IType,
@@ -30,7 +30,7 @@ def schedule(
     node_inst_offset: Dict[int, int] = {}
     cumulative_offset = 0
     for node in dag.nodes:
-        if node.optype in (OpType.input, OpType.output):
+        if node.is_input or node.is_output:
             continue
         if len(node.in_nodes) > Instruction.MAX_SRC_TENSORS:
             raise RuntimeError(
@@ -40,9 +40,8 @@ def schedule(
             raise RuntimeError(
                 f"[MegaKittens] Node has {len(node.out_tensors)} dst tensors (max {Instruction.MAX_DST_TENSORS})"
             )
-        itype = IType.from_optype(node.optype.value)
         src_metas = tuple(in_node.out_tensors[slot_idx] for in_node, slot_idx in node.in_nodes)
-        count = itype.num_instructions(src_metas, node.out_tensors)
+        count = node.itype.num_instructions(src_metas, node.out_tensors)
         node_inst_count[node.id] = count
         node_inst_offset[node.id] = cumulative_offset
         cumulative_offset += count + (-count) % Dispatcher.CLUSTER_SIZE
@@ -58,7 +57,7 @@ def schedule(
     for node in dag.nodes:
         for out_idx, tensor_meta in enumerate(node.out_tensors):
             reused = False
-            if node.optype != OpType.input and node.optype != OpType.output:
+            if not node.is_input and not node.is_output:
                 free_tensors = tensor_pool.get(tensor_meta, [])
                 for i, (consumer_node_ids, last_consumer_inst, num_consumer_insts, tid) in enumerate(free_tensors):
                     if node_inst_offset[node.id] - last_consumer_inst >= get_sm_count():
@@ -77,20 +76,20 @@ def schedule(
                 tensor_metas.append(tensor_meta)
 
             consumer_nodes = [node] + node.out_nodes[out_idx]
-            if node.optype == OpType.input or any(c.optype == OpType.output for c in consumer_nodes):
+            if node.is_input or any(c.is_output for c in consumer_nodes):
                 continue
             consumer_node_ids = [c.id for c in consumer_nodes]
             num_consumer_insts = sum(node_inst_count[cid] for cid in consumer_node_ids)
             last_consumer_inst = max(node_inst_offset[c.id] + node_inst_count[c.id] + (-node_inst_count[c.id]) % Dispatcher.CLUSTER_SIZE for c in consumer_nodes)
             tensor_pool.setdefault(tensor_meta, []).append((consumer_node_ids, last_consumer_inst, num_consumer_insts, tensor_index[(node.id, out_idx)]))
 
-        if node.optype == OpType.input:
+        if node.is_input:
             if len(node.out_tensors) != 1:
                 raise RuntimeError(
                     f"[MegaKittens] Input node has {len(node.out_tensors)} outputs (expected 1)"
                 )
             input_tensor_indices.append(tensor_index[(node.id, 0)])
-        elif node.optype == OpType.output:
+        elif node.is_output:
             if len(output_tensor_indices) != 0:
                 raise RuntimeError("[MegaKittens] Expected 1 output node")
             output_tensor_indices.extend(
@@ -111,10 +110,10 @@ def schedule(
     # TODO: reuse barriers
     # Input dependency barriers
     for node in dag.nodes:
-        if node.optype in (OpType.input, OpType.output):
+        if node.is_input or node.is_output:
             continue
         for in_node, _slot_idx in node.in_nodes:
-            if in_node.optype in (OpType.input, OpType.output):
+            if in_node.is_input or in_node.is_output:
                 continue
             if barrier_counter >= MAX_BARRIERS:
                 raise RuntimeError(f"[MegaKittens] Barrier count exceeds {MAX_BARRIERS}")
@@ -155,10 +154,8 @@ def schedule(
     noop = Instruction(icode=0, src_tensors=(), dst_tensors=(), indices=(), src_barriers=(), src_barrier_targets=(), num_input_barriers=0, num_reuse_barriers=0, num_dst_barriers=0, dst_barriers=())
 
     for node in dag.nodes:
-        if node.optype in (OpType.input, OpType.output):
+        if node.is_input or node.is_output:
             continue
-
-        itype = IType.from_optype(node.optype.value)
 
         src_tensors = tuple(
             tensor_index[(in_node.id, slot_idx)]
@@ -172,14 +169,14 @@ def schedule(
 
         src_metas = tuple(in_node.out_tensors[slot_idx] for in_node, slot_idx in node.in_nodes)
         dst_metas = node.out_tensors
-        itype.validate(src_metas, dst_metas)
+        node.itype.validate(src_metas, dst_metas)
 
-        key = (itype, src_tensors, dst_tensors)
+        key = (node.itype, src_tensors, dst_tensors)
         if key not in icode_map:
             icode = icode_counter
             icode_counter += 1
             icode_map[key] = icode
-            instruction_metas.append(InstructionMeta(icode=icode, itype=itype, src_tensors=src_tensors, dst_tensors=dst_tensors))
+            instruction_metas.append(InstructionMeta(icode=icode, itype=node.itype, src_tensors=src_tensors, dst_tensors=dst_tensors))
         else:
             icode = icode_map[key]
 
@@ -190,7 +187,7 @@ def schedule(
         num_input_barriers = node_num_input_barriers.get(node.id, 0)
         num_reuse_barriers = node_num_reuse_barriers.get(node.id, 0)
 
-        for block_index in itype.block_indices(src_metas, node.out_tensors):
+        for block_index in node.itype.block_indices(src_metas, node.out_tensors):
             instructions.append(Instruction(
                 icode=icode,
                 src_tensors=src_tensors,

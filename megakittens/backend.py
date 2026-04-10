@@ -9,7 +9,8 @@ from torch._dynamo.backends.common import aot_autograd
 from torch.fx.passes.shape_prop import TensorMetadata
 
 from . import utils
-from .schema.dag import DAG, Node, OpType
+from .schema.dag import DAG, Node
+from .schema.itype import IType
 from .schema.device import Device
 from .schema.dtype import DType
 from .schema.tensor import TensorMeta
