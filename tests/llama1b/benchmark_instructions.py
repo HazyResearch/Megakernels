@@ -593,7 +593,7 @@ def benchmark_decode_e2e():
 
 
 
-def benchmark_tok_per_sec(prompt="Hello, my name is", max_new_tokens=200, warmup=5):
+def benchmark_tok_per_sec(prompt="Hello, my name is", max_new_tokens=200, num_samples=5, warmup=5):
     """Benchmark decode throughput (tokens/sec) with real HF weights.
 
     Loads Llama-3.2-1B-Instruct from HuggingFace, runs repeated decode steps
@@ -601,6 +601,7 @@ def benchmark_tok_per_sec(prompt="Hello, my name is", max_new_tokens=200, warmup
     timed with perf_counter and cuda.synchronize.
     """
     import time
+    import itertools
     import sys, os
     sys.path.insert(0, os.path.dirname(__file__))
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -664,6 +665,10 @@ def benchmark_tok_per_sec(prompt="Hello, my name is", max_new_tokens=200, warmup
         rope_sin,                       # T.ROPE_SIN
     ]
 
+    # Model size: non-embedding params only (matches gpt-fast _get_model_size)
+    model_size = sum(t.nelement() * t.element_size() for t in mk_tensors[:9])
+    params = sum(t.nelement() for t in mk_tensors[:9])
+
     embedding = torch.nn.Embedding(VOCAB_SIZE, HIDDEN_DIM, device=D, dtype=torch.bfloat16)
     embedding.weight.data.copy_(embed_weight)
     output_tokens = torch.zeros(max_new_tokens, dtype=torch.long, device=D)
@@ -678,6 +683,7 @@ def benchmark_tok_per_sec(prompt="Hello, my name is", max_new_tokens=200, warmup
     num_decode_tokens = max_new_tokens - 1  # 199, first token comes from prefill
     dispatcher(*mk_tensors, prompt_len, attn_scale, 1e-5)
     output_tokens[0] = input_ids[-1]
+    print(f"Warming up ({warmup} runs)...")
     for _ in range(warmup):
         token = output_tokens[0]
         for i in range(num_decode_tokens):
@@ -685,34 +691,36 @@ def benchmark_tok_per_sec(prompt="Hello, my name is", max_new_tokens=200, warmup
             token = _decode_step(pos_id, token)
             output_tokens[i + 1] = token
     torch.cuda.synchronize()
+    print("Warmup done.")
 
-    # Timed run: 199 decode steps starting after prompt, incrementing pos_id
-    torch.cuda.synchronize()
-    t0 = time.perf_counter()
-    token = output_tokens[0]
-    for i in range(num_decode_tokens):
-        pos_id = prompt_len + i
-        token = _decode_step(pos_id, token)
-        output_tokens[i + 1] = token
-    torch.cuda.synchronize()
-    t1 = time.perf_counter()
+    # Timed runs
+    decode_tokens_per_sec_list = []
+    for sample in range(num_samples):
+        torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        token = output_tokens[0]
+        for i in range(num_decode_tokens):
+            pos_id = prompt_len + i
+            token = _decode_step(pos_id, token)
+            output_tokens[i + 1] = token
+        torch.cuda.synchronize()
+        t1 = time.perf_counter()
 
-    decode_time = t1 - t0
-    tok_per_sec = num_decode_tokens / decode_time
+        decode_time = t1 - t0
+        decode_tok_sec = num_decode_tokens / decode_time
+        decode_tokens_per_sec_list.append(decode_tok_sec)
+        bandwidth_gbs = model_size * decode_tok_sec / 1e9
+        flops_tfs = params * decode_tok_sec * 2 / 1e12
+        print(f"Time for inference {sample + 1}: {decode_time:.02f} sec total, {decode_tok_sec:.02f} tokens/sec")
+        print(f"Bandwidth achieved: {bandwidth_gbs:.02f} GB/s")
+        print(f"FLOPS achieved: {flops_tfs:.02f} TF/s")
+        print()
 
-    # Non-embedding weight tensors only (for bandwidth estimate)
-    model_bytes = sum(t.nelement() * t.element_size() for t in mk_tensors[:9])
-    bandwidth_gbs = model_bytes * tok_per_sec / 1e9
-
-    print()
-    print("Llama 3.2 1B decode tokens/sec benchmark")
-    print(f"  Prompt length: {prompt_len}")
-    print(f"  Decode tokens: {num_decode_tokens}")
-    print(f"  Decode time: {decode_time:.3f} sec")
-    print(f"  Tokens/sec: {tok_per_sec:.1f}")
-    print(f"  Bandwidth: {bandwidth_gbs:.1f} GB/s")
-    print(f"  Model size: {model_bytes / 1e9:.2f} GB")
-    print(f"  us/token: {decode_time / num_decode_tokens * 1e6:.1f}")
+    print("==========")
+    print(f"Prompt Length: {prompt_len}")
+    print(f"Generated tokens: {max_new_tokens}")
+    print(f"Average tokens/sec (decode only): {torch.mean(torch.tensor(decode_tokens_per_sec_list)).item():.2f}")
+    print(f"Memory used: {torch.cuda.max_memory_reserved() / 1e9:.02f} GB")
 
 
 if __name__ == "__main__":
