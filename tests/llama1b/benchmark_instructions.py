@@ -17,26 +17,30 @@ from megakittens.itypes.matvec_adds import MatVecAdds
 from megakittens.itypes.rms_lm_head import RmsLmHead
 from megakittens.itypes.rms_qkv_rope_append import RmsQkvRopeAppend
 from megakittens.itypes.rms_upgate_silu import RmsUpgateSilu
-from megakittens.llama1b.scheduler import T, schedule_decode
+from megakittens.llama1b.scheduler import (
+    GQA_RATIO,
+    HEAD_DIM,
+    HIDDEN_DIM,
+    INTERMEDIATE_DIM,
+    K_DIM,
+    MATVEC_BLOCK_SIZE,
+    MAX_SEQ_LEN,
+    NUM_ATTENTION_HEADS,
+    NUM_KV_HEADS,
+    NUM_LAYERS,
+    Q_DIM,
+    QKV_DIM,
+    RMS_NORM_EPS,
+    VOCAB_SIZE,
+    schedule_decode,
+)
 
 initialize_cuda_context()
 
-HIDDEN_DIM = 2048
-NUM_LAYERS = 16
-NUM_ATTENTION_HEADS = 32
-NUM_KV_HEADS = 8
-HEAD_DIM = 64
-GQA_RATIO = NUM_ATTENTION_HEADS // NUM_KV_HEADS  # 4
-QKV_DIM = (NUM_ATTENTION_HEADS + 2 * NUM_KV_HEADS) * HEAD_DIM
-Q_DIM = NUM_ATTENTION_HEADS * HEAD_DIM
-K_DIM = NUM_KV_HEADS * HEAD_DIM
-INTERMEDIATE_DIM = 8192
-VOCAB_SIZE = 128256
-MAX_SEQ_LEN = 512
-BLOCK_SIZE = 16
 SEQ_LEN = 128  # decode position for attention benchmark
 
 B300_BW_BYTES_PER_SEC = 8_000_000_000_000
+ATTN_SCALE = 1.0 / math.sqrt(HEAD_DIM)
 
 SCALARS = [
     ScalarField("pos_id", "unsigned int", 4, 4),
@@ -104,7 +108,8 @@ def _print_results(results):
         )
 
 
-# ── Unfused PyTorch references ──────────────────────────────
+# --- pytorch refs
+
 
 def _apply_rope(x, cos, sin):
     x1 = x[..., ::2]
@@ -121,7 +126,7 @@ def _rmsnorm(x, weight, eps):
 
 
 def _pt_rms_qkv_rope_append(hidden, norm_w, qkv_w, rope_cos, rope_sin, k_buf, v_buf):
-    h = torch.rms_norm(hidden, [hidden.shape[-1]], norm_w, 1e-5)
+    h = torch.rms_norm(hidden, [hidden.shape[-1]], norm_w, RMS_NORM_EPS)
     qkv = qkv_w @ h
     q = qkv[:Q_DIM].view(NUM_ATTENTION_HEADS, HEAD_DIM)
     k = qkv[Q_DIM:Q_DIM + K_DIM].view(NUM_KV_HEADS, HEAD_DIM)
@@ -136,13 +141,12 @@ def _pt_rms_qkv_rope_append(hidden, norm_w, qkv_w, rope_cos, rope_sin, k_buf, v_
 
 
 def _pt_attention_partial(q, k_cache, v_cache, layer_idx, seq_len, attn_scale):
-    q_heads = q.view(NUM_KV_HEADS, GQA_RATIO, HEAD_DIM)  # [8, 4, 64]
-    k = k_cache[layer_idx, :seq_len].permute(1, 2, 0)     # [8, 64, seq_len]
-    v = v_cache[layer_idx, :seq_len].permute(1, 0, 2)     # [8, seq_len, 64]
-    scores = torch.bmm(q_heads, k) * attn_scale           # [8, 4, seq_len]
+    qh = q.view(NUM_KV_HEADS, GQA_RATIO, HEAD_DIM)
+    k = k_cache[layer_idx, :seq_len].permute(1, 2, 0)
+    v = v_cache[layer_idx, :seq_len].permute(1, 0, 2)
+    scores = torch.bmm(qh, k) * attn_scale
     w = F.softmax(scores.float(), dim=-1).to(q.dtype)
-    out = torch.bmm(w, v)                                 # [8, 4, 64]
-    return out.reshape(-1)
+    return torch.bmm(w, v).reshape(-1)
 
 
 def _pt_proj_residual(input_vec, weights, residual):
@@ -150,19 +154,19 @@ def _pt_proj_residual(input_vec, weights, residual):
 
 
 def _pt_rms_upgate_silu(x, norm_weight, up_weights, gate_weights):
-    normed = _rmsnorm(x, norm_weight, 1e-5)
+    normed = _rmsnorm(x, norm_weight, RMS_NORM_EPS)
     gate = gate_weights @ normed
     up = up_weights @ normed
     return F.silu(gate) * up
 
 
 def _pt_rms_lm_head(x, norm_weight, lm_head_weight):
-    normed = _rmsnorm(x, norm_weight, 1e-5)
+    normed = _rmsnorm(x, norm_weight, RMS_NORM_EPS)
     return lm_head_weight @ normed
 
 
-# ── Instruction setups ──────────────────────────────────────
-# Each returns (name, mk_fn, pt_fn, roofline_bytes).
+# --- per-instruction dispatchers + roofline byte counts
+
 
 def _setup_rms_qkv_rope_append(sm_count):
     itype = RmsQkvRopeAppend(n=HIDDEN_DIM, head_dim=HEAD_DIM, num_kv_heads=NUM_KV_HEADS)
@@ -180,7 +184,7 @@ def _setup_rms_qkv_rope_append(sm_count):
         TensorMeta(dtype=DType.bf16, shape=(Q_DIM,), device=_DEVICE),
     ]
 
-    num_blocks = QKV_DIM // BLOCK_SIZE
+    num_blocks = QKV_DIM // MATVEC_BLOCK_SIZE
     instructions = []
     for sm in range(sm_count):
         s = round(sm * num_blocks / sm_count)
@@ -208,7 +212,7 @@ def _setup_rms_qkv_rope_append(sm_count):
         torch.zeros(Q_DIM, dtype=torch.bfloat16, device=D),
     ]
 
-    mk_fn = lambda: dispatcher(*tensors, 0, 0.125, 1e-5)
+    mk_fn = lambda: dispatcher(*tensors, 0, ATTN_SCALE, RMS_NORM_EPS)
 
     hidden, norm_w, qkv_w = tensors[0], tensors[1][0], tensors[2][0]
     cos, sin = tensors[3], tensors[4]
@@ -255,9 +259,8 @@ def _setup_attention_partial(sm_count):
     attn_out = torch.zeros(Q_DIM, dtype=torch.bfloat16, device=D)
 
     pos_id = SEQ_LEN - 1
-    attn_scale = 1.0 / math.sqrt(HEAD_DIM)
-    mk_fn = lambda: dispatcher(q, k_cache, v_cache, attn_out, pos_id, attn_scale, 1e-5)
-    pt_fn = lambda: _pt_attention_partial(q, k_cache, v_cache, layer_idx, SEQ_LEN, attn_scale)
+    mk_fn = lambda: dispatcher(q, k_cache, v_cache, attn_out, pos_id, ATTN_SCALE, RMS_NORM_EPS)
+    pt_fn = lambda: _pt_attention_partial(q, k_cache, v_cache, layer_idx, SEQ_LEN, ATTN_SCALE)
 
     roofline_bytes = Q_DIM * 2 \
                    + 2 * SEQ_LEN * NUM_KV_HEADS * HEAD_DIM * 2 \
@@ -278,7 +281,7 @@ def _setup_o_proj_residual(sm_count):
     ]
 
     layer_idx = 0
-    num_blocks = HIDDEN_DIM // BLOCK_SIZE  # 128
+    num_blocks = HIDDEN_DIM // MATVEC_BLOCK_SIZE
     instructions = []
     for b in range(num_blocks):
         instructions.append(Instruction(
@@ -297,7 +300,7 @@ def _setup_o_proj_residual(sm_count):
     o_weights = torch.randn(NUM_LAYERS, HIDDEN_DIM, HIDDEN_DIM, dtype=torch.bfloat16, device=D)
     hidden_states = torch.randn(HIDDEN_DIM, dtype=torch.bfloat16, device=D)
 
-    mk_fn = lambda: dispatcher(attn_out_vec, o_weights, hidden_states, 0, 0.125, 1e-5)
+    mk_fn = lambda: dispatcher(attn_out_vec, o_weights, hidden_states, 0, ATTN_SCALE, RMS_NORM_EPS)
     pt_fn = lambda: _pt_proj_residual(attn_out_vec, o_weights[layer_idx], hidden_states)
 
     roofline_bytes = HIDDEN_DIM * 2 + HIDDEN_DIM * HIDDEN_DIM * 2 + HIDDEN_DIM * 2
@@ -319,7 +322,7 @@ def _setup_rms_upgate_silu(sm_count):
     ]
 
     layer_idx = 0
-    num_blocks = INTERMEDIATE_DIM // BLOCK_SIZE
+    num_blocks = INTERMEDIATE_DIM // MATVEC_BLOCK_SIZE
     instructions = []
     for sm in range(sm_count):
         instructions.append(Instruction(
@@ -343,7 +346,7 @@ def _setup_rms_upgate_silu(sm_count):
         torch.zeros(INTERMEDIATE_DIM, dtype=torch.bfloat16, device=D),
     ]
 
-    mk_fn = lambda: dispatcher(*tensors, 0, 0.125, 1e-5)
+    mk_fn = lambda: dispatcher(*tensors, 0, ATTN_SCALE, RMS_NORM_EPS)
 
     x, norm_w = tensors[0], tensors[1][layer_idx]
     up_w, gate_w = tensors[2][layer_idx], tensors[3][layer_idx]
@@ -357,8 +360,8 @@ def _setup_rms_upgate_silu(sm_count):
 
 
 def _setup_down_proj_residual(sm_count):
-    N = HIDDEN_DIM  # pipeline reduction capacity
-    num_chunks = INTERMEDIATE_DIM // N  # 4
+    N = HIDDEN_DIM
+    num_chunks = INTERMEDIATE_DIM // N
     itype = MatVecAdds(n=N)
     src, dst = (0, 1), (2,)
     inst_meta = InstructionMeta(icode=1, itype=itype, src_tensors=src, dst_tensors=dst)
@@ -370,7 +373,7 @@ def _setup_down_proj_residual(sm_count):
     ]
 
     layer_idx = 0
-    num_blocks = HIDDEN_DIM // BLOCK_SIZE
+    num_blocks = HIDDEN_DIM // MATVEC_BLOCK_SIZE
     instructions = []
     for chunk in range(num_chunks):
         reduction_col_offset = chunk * N
@@ -392,7 +395,7 @@ def _setup_down_proj_residual(sm_count):
     down_weights = torch.randn(NUM_LAYERS, HIDDEN_DIM, INTERMEDIATE_DIM, dtype=torch.bfloat16, device=D)
     hidden_states = torch.randn(HIDDEN_DIM, dtype=torch.bfloat16, device=D)
 
-    mk_fn = lambda: dispatcher(silu_out, down_weights, hidden_states, 0, 0.125, 1e-5)
+    mk_fn = lambda: dispatcher(silu_out, down_weights, hidden_states, 0, ATTN_SCALE, RMS_NORM_EPS)
     pt_fn = lambda: _pt_proj_residual(silu_out, down_weights[layer_idx], hidden_states)
 
     roofline_bytes = INTERMEDIATE_DIM * 2 + HIDDEN_DIM * INTERMEDIATE_DIM * 2 + HIDDEN_DIM * 2
@@ -412,8 +415,8 @@ def _setup_rms_lm_head(sm_count):
         TensorMeta(dtype=DType.bf16, shape=(VOCAB_SIZE,), device=_DEVICE),
     ]
 
-    num_blocks = VOCAB_SIZE // BLOCK_SIZE
-    if VOCAB_SIZE % BLOCK_SIZE != 0:
+    num_blocks = VOCAB_SIZE // MATVEC_BLOCK_SIZE
+    if VOCAB_SIZE % MATVEC_BLOCK_SIZE != 0:
         num_blocks += 1
     instructions = []
     for sm in range(sm_count):
@@ -436,7 +439,7 @@ def _setup_rms_lm_head(sm_count):
     lm_head_weight = torch.randn(VOCAB_SIZE, HIDDEN_DIM, dtype=torch.bfloat16, device=D)
     logits = torch.zeros(VOCAB_SIZE, dtype=torch.bfloat16, device=D)
 
-    mk_fn = lambda: dispatcher(x, norm_weight, lm_head_weight, logits, 0, 0.125, 1e-5)
+    mk_fn = lambda: dispatcher(x, norm_weight, lm_head_weight, logits, 0, ATTN_SCALE, RMS_NORM_EPS)
     pt_fn = lambda: _pt_rms_lm_head(x, norm_weight, lm_head_weight)
 
     roofline_bytes = (HIDDEN_DIM + HIDDEN_DIM) * 2 + VOCAB_SIZE * HIDDEN_DIM * 2 + VOCAB_SIZE * 2
@@ -462,17 +465,17 @@ def benchmark_instructions():
     _print_results(results)
 
 
-# ── Full decode benchmark ──────────────────────────────────
+# --- full model step (random weights) vs pytorch
+
 
 def _pt_decode(hidden, weights, k_cache, v_cache, rope_cos, rope_sin, pos_id):
     seq_len = pos_id + 1
-    attn_scale = 1.0 / math.sqrt(HEAD_DIM)
     cos = rope_cos[pos_id].bfloat16()
     sin = rope_sin[pos_id].bfloat16()
 
     x = hidden.clone()
     for layer in range(NUM_LAYERS):
-        normed = _rmsnorm(x, weights["attn_norm_weights"][layer], 1e-5)
+        normed = _rmsnorm(x, weights["attn_norm_weights"][layer], RMS_NORM_EPS)
         qkv = weights["qkv_weights"][layer] @ normed
         q = qkv[:Q_DIM].view(NUM_ATTENTION_HEADS, HEAD_DIM)
         k = qkv[Q_DIM:Q_DIM + K_DIM].view(NUM_KV_HEADS, HEAD_DIM)
@@ -485,27 +488,26 @@ def _pt_decode(hidden, weights, k_cache, v_cache, rope_cos, rope_sin, pos_id):
         q_grouped = q.view(NUM_KV_HEADS, GQA_RATIO, HEAD_DIM)
         k_cached = k_cache[layer, :seq_len].permute(1, 2, 0)
         v_cached = v_cache[layer, :seq_len].permute(1, 0, 2)
-        scores = torch.bmm(q_grouped, k_cached) * attn_scale
+        scores = torch.bmm(q_grouped, k_cached) * ATTN_SCALE
         w = F.softmax(scores.float(), dim=-1).to(torch.bfloat16)
         attn_out = torch.bmm(w, v_cached).reshape(-1)
 
         x = x + weights["o_weights"][layer] @ attn_out
 
-        normed = _rmsnorm(x, weights["mlp_norm_weights"][layer], 1e-5)
+        normed = _rmsnorm(x, weights["mlp_norm_weights"][layer], RMS_NORM_EPS)
         gate = weights["gate_weights"][layer] @ normed
         up = weights["up_weights"][layer] @ normed
         silu_out = F.silu(gate) * up
 
         x = x + weights["down_weights"][layer] @ silu_out
 
-    normed = _rmsnorm(x, weights["lm_head_norm_weight"], 1e-5)
+    normed = _rmsnorm(x, weights["lm_head_norm_weight"], RMS_NORM_EPS)
     return weights["lm_head_weight"] @ normed
 
 
 def benchmark_decode_e2e():
     sm_count = get_sm_count()
     pos_id = SEQ_LEN - 1
-    attn_scale = 1.0 / math.sqrt(HEAD_DIM)
 
     schedule = schedule_decode(sm_count=sm_count)
     instruction_metas, tensor_metas, instructions, num_barriers, input_indices, output_indices = schedule
@@ -557,7 +559,7 @@ def benchmark_decode_e2e():
         rope_sin,
     ]
 
-    mk_fn = lambda: dispatcher(*mk_tensors, pos_id, attn_scale, 1e-5)
+    mk_fn = lambda: dispatcher(*mk_tensors, pos_id, ATTN_SCALE, RMS_NORM_EPS)
 
     pt_k_cache = mk_k_cache.clone()
     pt_v_cache = mk_v_cache.clone()
@@ -653,7 +655,6 @@ def _make_rope_table(config, max_seq_len, device):
 
 
 def _prefill_kv_cache(token_ids, weights, k_cache, v_cache, rope_cos, rope_sin):
-    attn_scale = 1.0 / math.sqrt(HEAD_DIM)
     for pos in range(len(token_ids)):
         x = weights["embed_weight"][token_ids[pos]]
         cos = rope_cos[pos]
@@ -661,7 +662,7 @@ def _prefill_kv_cache(token_ids, weights, k_cache, v_cache, rope_cos, rope_sin):
         seq_len = pos + 1
 
         for layer_idx in range(NUM_LAYERS):
-            normed = _rmsnorm(x, weights["attn_norm_weights"][layer_idx], 1e-5)
+            normed = _rmsnorm(x, weights["attn_norm_weights"][layer_idx], RMS_NORM_EPS)
             qkv = weights["qkv_weights"][layer_idx] @ normed
             q = qkv[:Q_DIM].view(NUM_ATTENTION_HEADS, HEAD_DIM)
             k = qkv[Q_DIM:Q_DIM + K_DIM].view(NUM_KV_HEADS, HEAD_DIM)
@@ -678,7 +679,7 @@ def _prefill_kv_cache(token_ids, weights, k_cache, v_cache, rope_cos, rope_sin):
                 v_cached = v_cache[layer_idx, :seq_len, kv_head]
                 gqa_size = NUM_ATTENTION_HEADS // NUM_KV_HEADS
                 for q_head in range(kv_head * gqa_size, (kv_head + 1) * gqa_size):
-                    scores = (q[q_head] @ k_cached.T) * attn_scale
+                    scores = (q[q_head] @ k_cached.T) * ATTN_SCALE
                     if seq_len > 1:
                         mask = torch.full((seq_len,), float("-inf"), device=x.device)
                         mask[:pos + 1] = 0.0
@@ -688,7 +689,7 @@ def _prefill_kv_cache(token_ids, weights, k_cache, v_cache, rope_cos, rope_sin):
 
             x = x + weights["o_weights"][layer_idx] @ attn_out.reshape(HIDDEN_DIM)
 
-            normed_mlp = _rmsnorm(x, weights["mlp_norm_weights"][layer_idx], 1e-5)
+            normed_mlp = _rmsnorm(x, weights["mlp_norm_weights"][layer_idx], RMS_NORM_EPS)
             gate = weights["gate_weights"][layer_idx] @ normed_mlp
             up = weights["up_weights"][layer_idx] @ normed_mlp
             x = x + weights["down_weights"][layer_idx] @ (F.silu(gate) * up)
@@ -697,19 +698,13 @@ def _prefill_kv_cache(token_ids, weights, k_cache, v_cache, rope_cos, rope_sin):
 
 
 def benchmark_tok_per_sec(prompt="Hello, my name is", max_new_tokens=200, num_samples=5, warmup=5):
-    """Benchmark decode throughput (tokens/sec) with real HF weights.
-
-    Loads Llama-3.2-1B-Instruct from HuggingFace, prefills KV cache with
-    prompt, then times decode steps. Matches gpt-fast --greedy methodology.
-    """
+    """tok/s with HF weights + greedy decode."""
     import time
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     sm_count = get_sm_count()
-    attn_scale = 1.0 / math.sqrt(HEAD_DIM)
     D = "cuda"
 
-    # Load real weights from HuggingFace
     print("Loading Llama-3.2-1B weights from HuggingFace...")
     hf_model = AutoModelForCausalLM.from_pretrained(
         "meta-llama/Llama-3.2-1B-Instruct", dtype=torch.bfloat16, device_map=D,
@@ -723,22 +718,18 @@ def benchmark_tok_per_sec(prompt="Hello, my name is", max_new_tokens=200, num_sa
     prompt_len = input_ids.shape[0]
     print(f"Prompt: {prompt!r}, {prompt_len} tokens")
 
-    del hf_model  # free HF model memory
+    del hf_model
 
-    # Prefill KV cache with prompt tokens
     k_cache = torch.zeros(NUM_LAYERS, MAX_SEQ_LEN, NUM_KV_HEADS, HEAD_DIM, dtype=torch.bfloat16, device=D)
     v_cache = torch.zeros(NUM_LAYERS, MAX_SEQ_LEN, NUM_KV_HEADS, HEAD_DIM, dtype=torch.bfloat16, device=D)
     print("Prefilling KV cache...")
     with torch.inference_mode():
         last_hidden = _prefill_kv_cache(input_ids, weights, k_cache, v_cache, rope_cos, rope_sin)
-    # First decode token comes from prefill logits
-    prefill_logits = weights["lm_head_weight"] @ _rmsnorm(last_hidden, weights["lm_head_norm_weight"], 1e-5)
+    prefill_logits = weights["lm_head_weight"] @ _rmsnorm(last_hidden, weights["lm_head_norm_weight"], RMS_NORM_EPS)
     first_token = torch.argmax(prefill_logits)
-    # Snapshot prefilled cache for reset between runs
     k_cache_snapshot = k_cache.clone()
     v_cache_snapshot = v_cache.clone()
 
-    # Build megakernel dispatcher
     schedule = schedule_decode(sm_count=sm_count)
     instruction_metas, tensor_metas, instructions, num_barriers, input_indices, output_indices = schedule
 
@@ -749,38 +740,37 @@ def benchmark_tok_per_sec(prompt="Hello, my name is", max_new_tokens=200, num_sa
         scalar_fields=SCALARS,
     )
 
-    # Assemble tensors in scheduler T.* order using real weights
     hidden_states = embed_weight[first_token].clone()
     logits = torch.zeros(VOCAB_SIZE, dtype=torch.bfloat16, device=D)
 
+    # same order as megakittens.llama1b.scheduler.T
     mk_tensors = [
-        weights["qkv_weights"],         # T.QKV_WEIGHTS
-        weights["o_weights"],           # T.O_WEIGHTS
-        weights["attn_norm_weights"],   # T.ATTN_NORM_WEIGHTS
-        weights["mlp_norm_weights"],    # T.MLP_NORM_WEIGHTS
-        weights["up_weights"],          # T.UP_WEIGHTS
-        weights["gate_weights"],        # T.GATE_WEIGHTS
-        weights["down_weights"],        # T.DOWN_WEIGHTS
-        weights["lm_head_norm_weight"], # T.LM_HEAD_NORM_WEIGHT
-        weights["lm_head_weight"],      # T.LM_HEAD_WEIGHT
-        hidden_states,                  # T.HIDDEN_STATES
-        torch.zeros(Q_DIM, dtype=torch.bfloat16, device=D),           # T.Q_POST_ROPE
-        torch.zeros(HIDDEN_DIM, dtype=torch.bfloat16, device=D),      # T.ATTN_OUT
-        torch.zeros(INTERMEDIATE_DIM, dtype=torch.bfloat16, device=D), # T.SILU_OUT
-        logits,                         # T.LOGITS
-        k_cache,                        # T.K_CACHE
-        v_cache,                        # T.V_CACHE
-        rope_cos,                       # T.ROPE_COS
-        rope_sin,                       # T.ROPE_SIN
+        weights["qkv_weights"],
+        weights["o_weights"],
+        weights["attn_norm_weights"],
+        weights["mlp_norm_weights"],
+        weights["up_weights"],
+        weights["gate_weights"],
+        weights["down_weights"],
+        weights["lm_head_norm_weight"],
+        weights["lm_head_weight"],
+        hidden_states,
+        torch.zeros(Q_DIM, dtype=torch.bfloat16, device=D),
+        torch.zeros(HIDDEN_DIM, dtype=torch.bfloat16, device=D),
+        torch.zeros(INTERMEDIATE_DIM, dtype=torch.bfloat16, device=D),
+        logits,
+        k_cache,
+        v_cache,
+        rope_cos,
+        rope_sin,
     ]
 
-    # Model size: non-embedding params only (matches gpt-fast _get_model_size)
     model_size = sum(t.nelement() * t.element_size() for t in mk_tensors[:9])
     params = sum(t.nelement() for t in mk_tensors[:9])
 
     embedding = torch.nn.Embedding(VOCAB_SIZE, HIDDEN_DIM, device=D, dtype=torch.bfloat16)
     embedding.weight.data.copy_(embed_weight)
-    num_decode_tokens = max_new_tokens - 1  # 199, first token comes from prefill
+    num_decode_tokens = max_new_tokens - 1
     output_tokens = torch.zeros(max_new_tokens, dtype=torch.long, device=D)
 
     def _decode_step(pos_id, input_token):
@@ -788,8 +778,7 @@ def benchmark_tok_per_sec(prompt="Hello, my name is", max_new_tokens=200, num_sa
         dispatcher.relaunch(pos_id=pos_id)
         return torch.argmax(logits, dim=-1)
 
-    # Warmup: first call via call() to build cache, then relaunch
-    dispatcher(*mk_tensors, prompt_len, attn_scale, 1e-5)
+    dispatcher(*mk_tensors, prompt_len, ATTN_SCALE, RMS_NORM_EPS)
     output_tokens[0] = first_token
     print(f"Warming up ({warmup} runs)...")
     for _ in range(warmup):
@@ -802,7 +791,6 @@ def benchmark_tok_per_sec(prompt="Hello, my name is", max_new_tokens=200, num_sa
     torch.cuda.synchronize()
     print("Warmup done.")
 
-    # Timed runs
     decode_tokens_per_sec_list = []
     for sample in range(num_samples):
         k_cache.copy_(k_cache_snapshot)
@@ -826,7 +814,6 @@ def benchmark_tok_per_sec(prompt="Hello, my name is", max_new_tokens=200, num_sa
         print(f"FLOPS achieved: {flops_tfs:.02f} TF/s")
         print()
 
-    # Print generated text from last run
     all_ids = torch.cat([input_ids.to(D), output_tokens[:max_new_tokens]])
     print(tokenizer.decode(all_ids.tolist()))
     print()
