@@ -134,54 +134,118 @@ def _assign_barriers(
     dag: DAG,
     node_inst_count: Dict[int, int],
     release_barriers: List[Tuple[List[int], int, int]],
-) -> Tuple[Dict[int, List[int]], Dict[int, List[Tuple[int, int]]], Dict[int, int], Dict[int, int], int]:
-    """Phase 3: Assign barriers for inter-node dependencies and tensor reuse."""
-    barrier_counter = 0
-    node_dst_barriers: Dict[int, List[int]] = {}
-    node_src_barriers: Dict[int, List[Tuple[int, int]]] = {}
-    node_num_input_barriers: Dict[int, int] = {}
-    node_num_reuse_barriers: Dict[int, int] = {}
+) -> Tuple[Dict[int, list], Dict[int, list], Dict[int, list], Dict[int, list], Dict[Tuple[int, int], List[int]], Dict[Tuple[int, int], List[Tuple[int, int]]], Dict[Tuple[int, int], int], Dict[Tuple[int, int], int], int]:
+    """Phase 3: Compute fine-grained per-instruction barriers via tile region overlap.
 
-    # TODO: reuse barriers
-    # Input dependency barriers
+    Args:
+        dag: validated DAG of input, and output, and compute nodes.
+        node_inst_count: Dict[int, int], node_id -> number of instructions this node generates.
+        release_barriers: List[Tuple[List[int], int, int]], each is (consumer_node_ids, num_consumer_insts, reuser_node_id) for tensor reuse.
+
+    Returns:
+        (node_block_indices, inst_dst_barriers, inst_src_barriers, inst_num_input_barriers, inst_num_reuse_barriers, barrier_counter) where:
+        - node_block_indices: Dict[int, list], node_id -> list of per-instruction tile coordinate tuples from block_indices().
+        - inst_dst_barriers: Dict[Tuple[int, int], List[int]], (node_id, local_inst_idx) -> barrier IDs this instruction arrives on after completion.
+        - inst_src_barriers: Dict[Tuple[int, int], List[Tuple[int, int]]], (node_id, local_inst_idx) -> (barrier_id, target_count) pairs to wait on before starting.
+        - inst_num_input_barriers: Dict[Tuple[int, int], int], (node_id, local_inst_idx) -> how many of src_barriers are data dependency barriers.
+        - inst_num_reuse_barriers: Dict[Tuple[int, int], int], (node_id, local_inst_idx) -> how many of src_barriers are tensor reuse barriers.
+        - barrier_counter: int, total number of barriers allocated.
+    """
+    def regions_overlap(a: tuple[tuple[int, int], ...], b: tuple[tuple[int, int], ...]) -> bool:
+        """True if two axis-aligned bounding boxes overlap in all dimensions."""
+        if len(a) != len(b):
+            raise RuntimeError("[MegaKittens] Bounding boxes have different dimensionalities.")
+        for (a_start, a_end), (b_start, b_end) in zip(a, b):
+            if a_end <= b_start or b_end <= a_start:
+                return False
+        return True
+
+    barrier_counter = 0
+
+    # Per-instruction barriers, keyed by (node_id, local_inst_idx)
+    inst_src_barriers: Dict[Tuple[int, int], List[Tuple[int, int]]] = {}
+    inst_dst_barriers: Dict[Tuple[int, int], List[int]] = {}
+    inst_num_input_barriers: Dict[Tuple[int, int], int] = {}
+    inst_num_reuse_barriers: Dict[Tuple[int, int], int] = {}
+
+    # Step 1. Collect per-instruction tile regions for each compute node
+    node_regions: Dict[int, list] = {}  # node_id -> list of (src_regions, dst_regions) per instruction
+    node_block_indices: Dict[int, list] = {}
     for node in dag.nodes:
         if node.is_input or node.is_output:
             continue
-        for in_node, _slot_idx in node.in_nodes:
+        src_metas = tuple(in_node.out_tensors[slot_idx] for in_node, slot_idx in node.in_nodes)
+        block_indices = node.itype.block_indices(src_metas, node.out_tensors)
+        node_block_indices[node.id] = block_indices
+        node_regions[node.id] = [
+            node.itype.tile_regions(block_index, src_metas, node.out_tensors)
+            for block_index in block_indices
+        ]
+
+    # Step 2. Input dependency barriers
+    for node in dag.nodes:
+        if node.is_input or node.is_output:
+            continue
+        for edge_idx, (in_node, slot_idx) in enumerate(node.in_nodes):
             if in_node.is_input or in_node.is_output:
                 continue
-            if barrier_counter >= MAX_BARRIERS:
-                raise RuntimeError(f"[MegaKittens] Barrier count exceeds {MAX_BARRIERS}")
-            bid = barrier_counter
-            barrier_counter += 1
-            node_dst_barriers.setdefault(in_node.id, []).append(bid)
-            target = node_inst_count[in_node.id]
-            node_src_barriers.setdefault(node.id, []).append((bid, target))
-            node_num_input_barriers[node.id] = node_num_input_barriers.get(node.id, 0) + 1
 
-    # Tensor reuse barriers
+            producer_regions = node_regions[in_node.id]
+            consumer_regions = node_regions[node.id]
+
+            # For each consumer instruction, find which producer instructions it depends on
+            dependency_map: Dict[frozenset[int], List[int]] = {}  # (set of producer local indices) -> (list of consumer local indices)
+            for c_block_index, (c_src_regions, c_dst_regions) in enumerate(consumer_regions):
+                c_region = c_src_regions[edge_idx]
+                dependent_p_local_indices = set()
+                for p_block_idx, (p_src_regions, p_dst_regions) in enumerate(producer_regions):
+                    p_region = p_dst_regions[slot_idx]
+                    if regions_overlap(c_region, p_region):
+                        dependent_p_local_indices.add(p_block_idx)
+                p_local_indices = frozenset(dependent_p_local_indices)
+                dependency_map.setdefault(p_local_indices, []).append(c_block_index)
+
+            # Each unique dependency set becomes one barrier
+            for p_local_indices, c_local_indices in dependency_map.items():
+                if not p_local_indices:
+                    continue
+                if barrier_counter >= MAX_BARRIERS:
+                    raise RuntimeError(f"[MegaKittens] Barrier count exceeds {MAX_BARRIERS}")
+                bid = barrier_counter
+                barrier_counter += 1
+                target = len(p_local_indices)
+                for p_local_index in p_local_indices:
+                    inst_dst_barriers.setdefault((in_node.id, p_local_index), []).append(bid)
+                for c_local_index in c_local_indices:
+                    inst_src_barriers.setdefault((node.id, c_local_index), []).append((bid, target))
+                    inst_num_input_barriers[(node.id, c_local_index)] = inst_num_input_barriers.get((node.id, c_local_index), 0) + 1
+
+    # Step 3. Tensor reuse barriers
     for consumer_node_ids, num_consumer_insts, reuser_id in release_barriers:
         if barrier_counter >= MAX_BARRIERS:
             raise RuntimeError(f"[MegaKittens] Barrier count exceeds {MAX_BARRIERS}")
         bid = barrier_counter
         barrier_counter += 1
         for nid in consumer_node_ids:
-            node_dst_barriers.setdefault(nid, []).append(bid)
-        node_src_barriers.setdefault(reuser_id, []).append((bid, num_consumer_insts))
-        node_num_reuse_barriers[reuser_id] = node_num_reuse_barriers.get(reuser_id, 0) + 1
+            for local_index in range(node_inst_count[nid]):
+                inst_dst_barriers.setdefault((nid, local_index), []).append(bid)
+        for local_index in range(node_inst_count[reuser_id]):
+            inst_src_barriers.setdefault((reuser_id, local_index), []).append((bid, num_consumer_insts))
+            inst_num_reuse_barriers[(reuser_id, local_index)] = inst_num_reuse_barriers.get((reuser_id, local_index), 0) + 1
 
-    for nid, barriers in node_dst_barriers.items():
+    # Step 4. Validate per-instruction barrier limits
+    for key, barriers in inst_dst_barriers.items():
         if len(barriers) > Instruction.MAX_DST_BARRIERS:
             raise RuntimeError(
-                f"[MegaKittens] Node has {len(barriers)} dst barriers (max {Instruction.MAX_DST_BARRIERS})"
+                f"[MegaKittens] Instruction {key} has {len(barriers)} dst barriers (max {Instruction.MAX_DST_BARRIERS})"
             )
-    for nid, barriers in node_src_barriers.items():
+    for key, barriers in inst_src_barriers.items():
         if len(barriers) > Instruction.MAX_SRC_BARRIERS:
             raise RuntimeError(
-                f"[MegaKittens] Node has {len(barriers)} src barriers (max {Instruction.MAX_SRC_BARRIERS})"
+                f"[MegaKittens] Instruction {key} has {len(barriers)} src barriers (max {Instruction.MAX_SRC_BARRIERS})"
             )
 
-    return node_dst_barriers, node_src_barriers, node_num_input_barriers, node_num_reuse_barriers, barrier_counter
+    return node_block_indices, inst_dst_barriers, inst_src_barriers, inst_num_input_barriers, inst_num_reuse_barriers, barrier_counter
 
 
 def _generate_instructions(
@@ -274,8 +338,8 @@ def schedule(
     """Convert a validated DAG into a minimal set of tensors and a flat per-SM instruction list."""
     node_inst_count, node_inst_offset = _get_instruction_count_and_offset(dag)
     tensor_metas, tensor_index, input_tensor_indices, output_tensor_indices, release_barriers = _assign_tensors(dag, node_inst_count, node_inst_offset)
-    node_dst_barriers, node_src_barriers, node_num_input_barriers, node_num_reuse_barriers, barrier_counter = _assign_barriers(dag, node_inst_count, release_barriers)
-    instruction_metas, instructions = _generate_instructions(dag, tensor_index, node_dst_barriers, node_src_barriers, node_num_input_barriers, node_num_reuse_barriers)
+    node_block_indices, inst_dst_barriers, inst_src_barriers, inst_num_input_barriers, inst_num_reuse_barriers, barrier_counter = _assign_barriers(dag, node_inst_count, release_barriers)
+    instruction_metas, instructions = _generate_instructions(dag, tensor_index, node_block_indices, inst_dst_barriers, inst_src_barriers, inst_num_input_barriers, inst_num_reuse_barriers)
 
     return (
         instruction_metas,
