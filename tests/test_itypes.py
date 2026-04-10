@@ -5,22 +5,22 @@ from .common import check
 def collect_test_cases():
     test_cases = []
     for cls in megakittens.schema.itype.IType.__subclasses__():
-        if "test_shapes" not in cls.__dict__:
-            raise RuntimeError(f"{cls.__name__} must define test_shapes")
-        if not isinstance(cls.__dict__["test_shapes"], list):
-            raise RuntimeError(f"{cls.__name__}.test_shapes must be a list, got {type(cls.__dict__['test_shapes']).__name__}")
-        if not all(isinstance(s, tuple) for s in cls.__dict__["test_shapes"]):
-            raise RuntimeError(f"{cls.__name__}.test_shapes entries must be tuples")
+        if "test_cases" not in cls.__dict__:
+            raise RuntimeError(f"{cls.__name__} must define test_cases")
+        if not isinstance(cls.__dict__["test_cases"], list):
+            raise RuntimeError(f"{cls.__name__}.test_cases must be a list, got {type(cls.__dict__['test_cases']).__name__}")
+        if not all(isinstance(s, tuple) for s in cls.__dict__["test_cases"]):
+            raise RuntimeError(f"{cls.__name__}.test_cases entries must be tuples")
         if "test_fn" not in cls.__dict__:
-            raise RuntimeError(f"{cls.__name__} has test_shapes but no test_fn")
+            raise RuntimeError(f"{cls.__name__} has test_cases but no test_fn")
         if not callable(cls.__dict__["test_fn"]):
             raise RuntimeError(f"{cls.__name__}.test_fn must be callable")
         if "test_args" not in cls.__dict__:
-            raise RuntimeError(f"{cls.__name__} has test_shapes but no test_args")
+            raise RuntimeError(f"{cls.__name__} has test_cases but no test_args")
         if not callable(cls.__dict__["test_args"]):
             raise RuntimeError(f"{cls.__name__}.test_args must be callable")
         itype = cls()
-        for shape in itype.test_shapes:
+        for shape in itype.test_cases:
             test_cases.append((itype, shape))
     return test_cases
 

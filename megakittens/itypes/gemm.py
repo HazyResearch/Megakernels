@@ -35,7 +35,7 @@ class Gemm(IType):
     B_TMA = st(dtype=DType.bf16, rows=64, cols=128) # st_bf<Kb, Nb/2> (B is K×N)
     D_TMA = st(dtype=DType.bf16, rows=128, cols=32) # st_bf<Mb/2, Nb/EPI_PIPE_DEPTH>
 
-    test_shapes = [(512, 256, 64), (512, 256, 256), (512, 512, 256), (1024, 1024, 512), (2560, 2560, 64)]
+    test_cases = [(512, 256, 64), (512, 256, 256), (512, 512, 256), (1024, 1024, 512), (2560, 2560, 64)]
     bench_shapes = [(16384, 16384, 16384), (16384, 32768, 16384), (32768, 16384, 16384), (32768, 32768, 16384)]
 
     def test_args(self, shape: tuple) -> tuple[torch.Tensor, ...]:

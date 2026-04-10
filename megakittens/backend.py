@@ -266,11 +266,14 @@ def fx_graph_to_mk_dag(
     dag_nodes: List[Node] = []
 
     for node in graph_nodes:
+        is_input = False
+        is_output = False
+        itype: IType | None = None
         input_index: int | None = None
         out_tensors: tuple[TensorMeta, ...] | None = None
 
         if node.op == "placeholder":
-            optype = OpType.input
+            is_input = True
             input_nodes = list(node.all_input_nodes)
             if _input_index >= len(example_inputs):
                 raise RuntimeError("[MegaKittens] Number of input nodes is greater than len(example_inputs)")
@@ -283,7 +286,7 @@ def fx_graph_to_mk_dag(
                 raise RuntimeError("[MegaKittens] Non-tensor inputs are not supported")
 
         elif node.op == "get_attr":
-            optype = OpType.input
+            is_input = True
             input_nodes = list(node.all_input_nodes)
             try:
                 attr = getattr(gm, node.target)
@@ -295,12 +298,12 @@ def fx_graph_to_mk_dag(
                 raise RuntimeError("[MegaKittens] Non-tensor attributes are not supported")
 
         elif node.op in {"call_function", "call_module", "call_method"}:
-            optype = _resolve_optype(gm, node)
+            itype = _resolve_itype(gm, node)
             input_nodes = list(node.all_input_nodes)
             out_tensors = _get_output_tensors(node)
 
         elif node.op == "output":
-            optype = OpType.output
+            is_output = True
             if not node.args:
                 raise RuntimeError("[MegaKittens] Output node has no args")
             input_nodes = _flatten_output_nodes(node.args)
@@ -340,7 +343,9 @@ def fx_graph_to_mk_dag(
             )
 
         current_node = Node(
-            optype=optype,
+            is_input=is_input,
+            is_output=is_output,
+            itype=itype,
             out_tensors=out_tensors,
             in_nodes=tuple(in_nodes_list),
             out_nodes=tuple([] for _ in out_tensors),

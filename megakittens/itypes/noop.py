@@ -17,7 +17,7 @@ def _noop_fake() -> None:
 
 class Noop(IType):
     torch_functions = []
-    test_shapes = []
+    test_cases = []
     bench_shapes = []
 
     def test_args(self, shape):
