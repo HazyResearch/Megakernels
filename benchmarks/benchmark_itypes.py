@@ -5,7 +5,7 @@ from .common import benchmark
 
 
 def collect_benchmark_cases(names=None):
-    benchmark_cases = []
+    bench_cases = []
     for cls in megakittens.schema.itype.IType.__subclasses__():
         if "bench_cases" not in cls.__dict__:
             raise RuntimeError(f"{cls.__name__} must define bench_cases")
@@ -25,11 +25,11 @@ def collect_benchmark_cases(names=None):
             itype = cls(*cls_args)
             if names and itype.name not in names:
                 continue
-            benchmark_cases.append((itype, input_args))
-    return benchmark_cases
+            bench_cases.append((itype, input_args))
+    return bench_cases
 
 
-def benchmark_one(itype):
+def benchmark_one(itype, bench_cases):
     has_flops = hasattr(itype, "bench_flops")
     has_bytes = hasattr(itype, "bench_bytes")
 
@@ -44,14 +44,14 @@ def benchmark_one(itype):
     print(header)
     print("-" * len(header))
 
-    for shape in itype.bench_shapes:
-        mk_ms, pt_ms = benchmark(itype.test_fn, itype.test_args(shape))
-        line = f"{str(shape):>28}  {mk_ms*1000:>10.1f}  {pt_ms*1000:>10.1f}"
+    for case in bench_cases:
+        mk_ms, pt_ms = benchmark(itype.test_fn, itype.test_args(case))
+        line = f"{str(case):>28}  {mk_ms*1000:>10.1f}  {pt_ms*1000:>10.1f}"
         if has_flops:
-            flops = itype.bench_flops(shape)
+            flops = itype.bench_flops(case)
             line += f"  {flops / mk_ms / 1e9:>8.1f}  {flops / pt_ms / 1e9:>8.1f}"
         if has_bytes:
-            bytes_moved = itype.bench_bytes(shape)
+            bytes_moved = itype.bench_bytes(case)
             line += f"  {bytes_moved / mk_ms / 1e6:>10.1f}  {bytes_moved / pt_ms / 1e6:>10.1f}"
         line += f"  {pt_ms/mk_ms:>6.2f}x"
         print(line)
@@ -59,5 +59,8 @@ def benchmark_one(itype):
 
 if __name__ == "__main__":
     names = sys.argv[1:] or None
-    for itype in collect_benchmark_cases(names):
-        benchmark_one(itype)
+    grouped_bench_cases: dict = {}
+    for itype, case in collect_benchmark_cases(names):
+        grouped_bench_cases.setdefault(itype, []).append(case)
+    for itype, bench_cases in grouped_bench_cases.items():
+        benchmark_one(itype, bench_cases)
