@@ -27,6 +27,7 @@ def check(
     Raises:
         AssertionError if results don't match within tolerance.
     """
+    torch._dynamo.reset()  # by default, dynamo limits to 8 compilations per function object
     compiled_fn = megakittens.compile(fn, use_jit_cache=False, save_dag=True, save_schedule=True)
 
     result = compiled_fn(*args)
