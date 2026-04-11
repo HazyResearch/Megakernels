@@ -16,8 +16,6 @@ THUNDERKITTENS_ARCH_DEFINES = {
 COMMON_NVRTC_FLAGS = (
     "--std=c++20",
     "--use_fast_math",
-    "-Xptxas=--verbose",
-    "-Xptxas=--warn-on-spills",
     "-DNDEBUG",
     "-lineinfo",
     "-DKITTENS_NO_HOST",
@@ -25,6 +23,10 @@ COMMON_NVRTC_FLAGS = (
     f"-I{THUNDERKITTENS_ROOT / 'include'}",
     f"-I{THUNDERKITTENS_ROOT / 'prototype'}",
     *(f"-I{d}" for d in cuda_include_dirs()),
+)
+VERBOSE_NVRTC_FLAGS = (
+    "-Xptxas=--verbose",
+    "-Xptxas=--warn-on-spills",
 )
 
 
@@ -58,7 +60,7 @@ def _save_to_cache(key: str, cubin: bytes, mangled_names: tuple[bytes, ...]) -> 
 @functools.cache
 def compile_source_to_cubin(
     src: str, kernel_symbols: tuple[bytes, ...], major: int, minor: int,
-    *, use_file_cache: bool = True,
+    *, use_file_cache: bool = True, verbose: bool = True,
 ) -> tuple[bytes, tuple[bytes, ...]]:
     # 0. Check file-backed cache
     cache_key = _cache_key(src, kernel_symbols, major, minor)
@@ -86,7 +88,8 @@ def compile_source_to_cubin(
     if major not in THUNDERKITTENS_ARCH_DEFINES:
         raise RuntimeError(f"[MegaKittens] Unsupported GPU compute capability: sm_{major}x")
     sm_suffix = "a" if major >= 9 else ""
-    opts = tuple(flag.encode("utf-8") for flag in COMMON_NVRTC_FLAGS) + (
+    nvrtc_flags = COMMON_NVRTC_FLAGS + (VERBOSE_NVRTC_FLAGS if verbose else ())
+    opts = tuple(flag.encode("utf-8") for flag in nvrtc_flags) + (
         THUNDERKITTENS_ARCH_DEFINES[major].encode("utf-8"),
         f"--gpu-architecture=sm_{major}{minor}{sm_suffix}".encode("utf-8"),
     )

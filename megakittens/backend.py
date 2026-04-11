@@ -414,6 +414,7 @@ def megakittens_backend(
     save_dag: bool = False,
     save_schedule: bool = False,
     use_jit_cache: bool = True,
+    verbose: bool = True,
 ) -> Callable[[torch.fx.GraphModule, List[Any]], Callable[..., Any]]:
     def _megakittens_backend(gm: torch.fx.GraphModule, example_inputs: List[Any]) -> Callable[..., Any]:
         if debug:
@@ -457,6 +458,7 @@ def megakittens_backend(
             input_tensor_indices=input_tensor_indices,
             output_tensor_indices=output_tensor_indices,
             use_jit_cache=use_jit_cache,
+            verbose=verbose,
         )
 
         return make_boxed_func(dispatcher)
