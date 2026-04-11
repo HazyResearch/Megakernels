@@ -18,20 +18,13 @@ def rms_lm_head_op(
 
 
 @rms_lm_head_op.register_fake
-def _rms_lm_head_fake(
-    x: torch.Tensor,
-    norm_weight: torch.Tensor,
-    lm_head: torch.Tensor,
-    eps: float,
-) -> torch.Tensor:
-    V = lm_head.shape[0]
-    M = x.shape[0]
-    return torch.empty((M, V), dtype=x.dtype, device=x.device)
+def _rms_lm_head_fake(x, norm_weight, lm_head, eps):
+    return torch.empty((x.shape[0], lm_head.shape[0]), dtype=x.dtype, device=x.device)
 
 
 class RmsLmHead(IType):
 
-    def __init__(self, n: int = 0) -> None:
+    def __init__(self, n=0):
         self._n = n
 
     @property
@@ -54,14 +47,11 @@ class RmsLmHead(IType):
     def inputs(self) -> list[TensorSpec]:
         if self._n > 0:
             return [
-                # SRC0: hidden_states — TMA sv load into activation page
-                TensorSpec(dtype=DType.bf16, granularity=(1,),
+                TensorSpec(dtype=DType.bf16, granularity=(1,),                           # hidden_states
                            tma_types=[sv(dtype=DType.bf16, length=self._n)]),
-                # SRC1: norm_weight — TMA sv load into activation page
-                TensorSpec(dtype=DType.bf16, granularity=(1,),
+                TensorSpec(dtype=DType.bf16, granularity=(1,),                           # norm_weight
                            tma_types=[sv(dtype=DType.bf16, length=self._n)]),
-                # SRC2: lm_head_weights — TMA st load (16×512 tiles)
-                TensorSpec(dtype=DType.bf16, granularity=(1, 1),
+                TensorSpec(dtype=DType.bf16, granularity=(1, 1),                         # lm_head_weights
                            tma_types=[st(dtype=DType.bf16, rows=16, cols=512)]),
             ]
         return [
@@ -73,8 +63,7 @@ class RmsLmHead(IType):
     @property
     def outputs(self) -> list[TensorSpec]:
         return [
-            # DST: logits — TMA sv store (16-element chunks)
-            TensorSpec(dtype=DType.bf16, granularity=(1,),
+            TensorSpec(dtype=DType.bf16, granularity=(1,),                               # logits
                        tma_types=[sv(dtype=DType.bf16, length=16)]),
         ]
 

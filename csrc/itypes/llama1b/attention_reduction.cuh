@@ -4,8 +4,6 @@
 #include "schema.cuh"
 #include "utils.cuh"
 
-// this one i am very not sure about
-
 namespace megakittens {
 
 template <typename Config, typename Globals,
@@ -257,7 +255,6 @@ struct AttentionReduction {
             if (kittens::warp::elect_leader())
                 s.page_finish(data_pid(s));
             
-            // atomic add here
             if (kittens::warp::elect_leader()) {
                 __threadfence();
                 all_barrier_arrive<Config>(g, s.instruction());

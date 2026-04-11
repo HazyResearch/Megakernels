@@ -131,8 +131,7 @@ struct RmsQkvRopeAppend {
     using pipeline = llama1b::rms_matvec_pipeline<
         Config, Globals, N, parsed_instruction, pipeline_specifics, SRC_ACT, SRC_NORM>;
 
-    // 1024 aligned (stuart)
-    static constexpr int ROPE_COS_OFFSET = ((pipeline::OUTPUT_SCRATCH_OFFSET +
+    static constexpr int ROPE_COS_OFFSET = ((pipeline::OUTPUT_SCRATCH_OFFSET + // 1024-align
         pipeline::OUTPUT_PIPELINE_STAGES * pipeline::SCRATCH_BYTES_PER_STAGE) + 1023) & ~1023;
     static constexpr int ROPE_SIN_OFFSET = ROPE_COS_OFFSET + HEAD_DIM * sizeof(float);
 

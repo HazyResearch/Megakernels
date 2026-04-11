@@ -41,7 +41,7 @@ rms_norm(kittens::rv_fl<N / Config::NUM_CONSUMER_WARPS> activations_vec,
     return activations_vec;
 }
 
-// rmsnorm, activations in smem (oriiginal path)
+// rmsnorm, activations in smem
 template <typename Config, int N>
 __device__ static inline auto
 rms_norm(const kittens::sv_bf<N / Config::NUM_CONSUMER_WARPS> &rms_scale_smem,

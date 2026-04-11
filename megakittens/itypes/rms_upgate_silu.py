@@ -1,8 +1,3 @@
-"""
-Fused RMSNorm + up/gate dual matvec + SiLU gating instruction type for decode.
-Computes: silu(gate_weights @ rms_norm(x)) * (up_weights @ rms_norm(x))
-"""
-
 import torch
 
 from ..schema.dtype import DType
@@ -27,40 +22,36 @@ def _fake(x, norm_weight, gate_weight, up_weight, eps):
 
 class RmsUpgateSilu(IType):
 
-    def __init__(self, n: int = 0):
+    def __init__(self, n=0):
         self._n = n
 
     @property
-    def name(self):
+    def name(self) -> str:
         return "rms_upgate_silu"
 
     @property
-    def cpp_template(self):
+    def cpp_template(self) -> str:
         return f"RmsUpgateSilu<MKConfig, MKGlobals, {self._n}, {{tensors}}>"
 
     @property
-    def cpp_include(self):
+    def cpp_include(self) -> str:
         return "itypes/llama1b/upgate.cuh"
 
     @property
-    def op_type(self):
+    def op_type(self) -> str:
         return "rms_upgate_silu"
 
     @property
-    def inputs(self):
+    def inputs(self) -> list[TensorSpec]:
         if self._n > 0:
             return [
-                # SRC_ACT: hidden_states — TMA sv load into activation page
-                TensorSpec(dtype=DType.bf16, granularity=(1,),
+                TensorSpec(dtype=DType.bf16, granularity=(1,),                           # hidden_states
                            tma_types=[sv(dtype=DType.bf16, length=self._n)]),
-                # SRC_NORM: norm_weight — TMA sv load into activation page
-                TensorSpec(dtype=DType.bf16, granularity=(1, 1),
+                TensorSpec(dtype=DType.bf16, granularity=(1, 1),                         # norm_weight
                            tma_types=[sv(dtype=DType.bf16, length=self._n)]),
-                # SRC_UP: up_weights — TMA st load (16×512 tiles)
-                TensorSpec(dtype=DType.bf16, granularity=(1, 1, 1),
+                TensorSpec(dtype=DType.bf16, granularity=(1, 1, 1),                      # up_weights
                            tma_types=[st(dtype=DType.bf16, rows=16, cols=512)]),
-                # SRC_GATE: gate_weights — TMA st load (16×512 tiles)
-                TensorSpec(dtype=DType.bf16, granularity=(1, 1, 1),
+                TensorSpec(dtype=DType.bf16, granularity=(1, 1, 1),                      # gate_weights
                            tma_types=[st(dtype=DType.bf16, rows=16, cols=512)]),
             ]
         return [
@@ -71,10 +62,9 @@ class RmsUpgateSilu(IType):
         ]
 
     @property
-    def outputs(self):
+    def outputs(self) -> list[TensorSpec]:
         return [
-            # DST: silu_out — TMA sv store (16-element chunks)
-            TensorSpec(dtype=DType.bf16, granularity=(1,),
+            TensorSpec(dtype=DType.bf16, granularity=(1,),                               # silu_out
                        tma_types=[sv(dtype=DType.bf16, length=16)]),
         ]
 

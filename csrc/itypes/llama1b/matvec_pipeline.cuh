@@ -93,7 +93,6 @@ struct matvec_pipeline {
     }
 
     __device__ static inline int init_semaphores(const Globals &g, state_t<Config> &s) {
-        // one lane inits each semaphore, consult gemm.cuh pattern
         if (kittens::laneid() == 0)
             kittens::init_semaphore(activations_arrived(s), 1);
         if (kittens::laneid() < INPUT_PIPELINE_STAGES)
@@ -176,7 +175,6 @@ struct matvec_pipeline {
                 reinterpret_cast<kittens::st_bf<MATVEC_BLOCK_SIZE, REDUCTION_DIM_PER_WARP> *>(
                     s.pages[weight_page].ptr())[kittens::warpid() % WARPS_PER_PAGE];
 
-            // output scratch is on the activation page (COULD BE CHANGED)
             uint8_t *output_scratch_start = reinterpret_cast<uint8_t *>(
                 s.pages[activation_page].ptr(
                     output_scratch_off + output_stage * SCRATCH_BYTES_PER_STAGE));
@@ -252,8 +250,7 @@ struct rms_matvec_pipeline
     static constexpr int RMS_SCALE_SIZE        = N * sizeof(kittens::bf16);
     static constexpr int RMS_SCRATCH_OFFSET    = RMS_SCALE_OFFSET + RMS_SCALE_SIZE;
     static constexpr int RMS_SCRATCH_SIZE      = Config::NUM_CONSUMER_WARPS * sizeof(float);
-    // 1024 aligned (stuart)
-    static constexpr int OUTPUT_SCRATCH_OFFSET = ((RMS_SCRATCH_OFFSET + RMS_SCRATCH_SIZE) + 1023) & ~1023;
+    static constexpr int OUTPUT_SCRATCH_OFFSET = ((RMS_SCRATCH_OFFSET + RMS_SCRATCH_SIZE) + 1023) & ~1023; // 1024-align
 
     static constexpr int SEM_COUNT = pipeline::SEM_COUNT + 1;
 
@@ -301,15 +298,12 @@ struct rms_matvec_pipeline
         using sv_slice_t = kittens::sv_bf<ELEMS_PER_WARP>;
         using rv_t = kittens::rv_fl<ELEMS_PER_WARP>;
 
-        // barrier wait 
         if (kittens::warpid() == 0 && kittens::warp::elect_leader()) {
             s.record(TEVENT_AT_GMEM_WAIT);
             pipeline_specifics::gmem_wait(g, s);
             s.record(TEVENT_DONE_GMEM_WAIT);
         }
         kittens::group<Config::NUM_CONSUMER_WARPS>::sync(4);
-        // b/c we have 8 warps 
-        asm volatile("{fence.acquire.gpu;}" ::: "memory");
 
         // consumers load activations so loader can fetch weights earlier
         rv_t activations_vec;
