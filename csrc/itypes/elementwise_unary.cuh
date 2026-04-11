@@ -4,8 +4,37 @@
 
 namespace megakittens {
 
-template <typename Config, typename Globals, int SRC, int DST>
-struct Relu {
+enum class UnaryOp { IDENTITY, RELU, ABS, EXP, EXP2, LOG, LOG2, NEG, SQRT, RSQRT };
+
+template <UnaryOp op, typename T>
+__device__ static __forceinline__ void apply_unary(T &x) {
+    if constexpr (op == UnaryOp::NEG)   x = __hneg2(x);
+    else if constexpr (op == UnaryOp::SQRT)  x = h2sqrt(x);
+    else if constexpr (op == UnaryOp::RSQRT) x = h2rsqrt(x);
+}
+
+template <UnaryOp op, typename Group, typename RT>
+__device__ static __forceinline__ void apply_unary_op(RT &reg) {
+    if      constexpr (op == UnaryOp::IDENTITY) {}
+    else if constexpr (op == UnaryOp::RELU) Group::relu(reg, reg);
+    else if constexpr (op == UnaryOp::ABS)  Group::abs(reg, reg);
+    else if constexpr (op == UnaryOp::EXP)  Group::exp(reg, reg);
+    else if constexpr (op == UnaryOp::EXP2) Group::exp2(reg, reg);
+    else if constexpr (op == UnaryOp::LOG)  Group::log(reg, reg);
+    else if constexpr (op == UnaryOp::LOG2) Group::log2(reg, reg);
+    else {
+        #pragma unroll
+        for (int i = 0; i < RT::height; i++)
+            #pragma unroll
+            for (int j = 0; j < RT::width; j++)
+                #pragma unroll
+                for (int k = 0; k < RT::packed_per_tile; k++)
+                    apply_unary<op>(reg.tiles[i][j].data[k]);
+    }
+}
+
+template <typename Config, typename Globals, int SRC, int DST, UnaryOp... Ops>
+struct ElementwiseUnary {
     static constexpr int NUM_USED_PAGES = Config::NUM_PAGES; // 1 page per tile
 
     using tile_t = kittens::st<kittens::bf16, 128, 128>;
@@ -79,7 +108,7 @@ struct Relu {
 
                 kittens::rt_bf<16, 128> src_reg;
                 consumer_group::load(src_reg, src_smem);
-                consumer_group::relu(src_reg, src_reg);
+                (apply_unary_op<Ops, consumer_group>(src_reg), ...);
                 consumer_group::store(src_smem, src_reg);
                 consumer_group::sync(1);
 
