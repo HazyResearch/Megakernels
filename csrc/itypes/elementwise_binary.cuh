@@ -68,7 +68,7 @@ struct ElementwiseBinary {
                 const int input_idx = used_query % non_dst_pages + 1;
                 return tile_idx * NUM_INPUTS + input_idx;
             } else {
-                const int tile_idx = used_query - num_tiles * non_dst_inputs;
+                const int tile_idx = used_query - num_tiles * non_dst_pages;
                 return tile_idx * NUM_INPUTS;
             }
         }
