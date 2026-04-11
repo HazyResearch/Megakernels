@@ -39,7 +39,7 @@ Two files:
 ## Architecture notes
 
 - The icode dispatch switch is JIT-generated per graph (not in any header). Each unique `(itype, src_tensors, dst_tensors)` gets a fresh icode. The generated dispatch lives inside `namespace megakittens` along with `MKConfig` and `MKGlobals`.
-- Tensor indices on instruction types are compile-time template params (e.g. `ElementwiseBinary<MKConfig, MKGlobals, BinaryOpList<BinaryOp::ADD>, 0, 1, 2>`), not read from the instruction at runtime.
+- Tensor indices on instruction types are compile-time template params (e.g. `ElementwiseBinary<MKConfig, MKGlobals, BinaryOps<BinaryOp::ADD>, 0, 1, 2>`), not read from the instruction at runtime.
 - `gls<I>()` on `MKGlobals` is a JIT-generated `if constexpr` chain returning the actual typed gl member. Each tensor keeps its original gl type (dtype, shape, TMA descriptors).
 - `tensor_to_gl` left-pads tensor shapes to 4D: `(M, N)` → `(1, 1, M, N)`, `(B, M, N)` → `(1, B, M, N)`. The gl is always `gl<dtype, -1, -1, -1, -1>` for data tensors.
 - `aot_autograd` flattens user inputs (including `list[Tensor]`) into individual tensors via pytree. String/scalar args (except for ints and floats, which become tensors) become graph constants. The dispatcher only sees flat tensors at runtime.
