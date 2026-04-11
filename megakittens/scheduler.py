@@ -198,7 +198,7 @@ def _assign_barriers(
             for c_local_index, (c_src_regions, c_dst_regions) in enumerate(consumer_regions):
                 c_region = c_src_regions[edge_idx]
                 dependent_p_local_indices = set()
-                for p_block_idx, (p_src_regions, p_dst_regions) in enumerate(producer_regions):
+                for p_block_idx, (p_src_regions, p_dst_regions) in enumerate(producer_regions):  # TODO: these loops are extremely inefficient atm
                     p_region = p_dst_regions[slot_idx]
                     if regions_overlap(c_region, p_region):
                         dependent_p_local_indices.add(p_block_idx)
