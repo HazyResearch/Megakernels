@@ -183,6 +183,7 @@ def _assign_barriers(
         ]
 
     # Step 2. Input dependency barriers
+    dependency_map: Dict[Tuple[int, frozenset[int]], Dict[int, List[int]]] = {}  # (producer node ID, set of local indices) -> { (consumer node ID) -> (list of local indices) }
     for node in dag.nodes:
         if node.is_input or node.is_output:
             continue
@@ -194,31 +195,31 @@ def _assign_barriers(
             consumer_regions = node_regions[node.id]
 
             # For each consumer instruction, find which producer instructions it depends on
-            dependency_map: Dict[frozenset[int], List[int]] = {}  # (set of producer local indices) -> (list of consumer local indices)
-            for c_block_index, (c_src_regions, c_dst_regions) in enumerate(consumer_regions):
+            for c_local_index, (c_src_regions, c_dst_regions) in enumerate(consumer_regions):
                 c_region = c_src_regions[edge_idx]
                 dependent_p_local_indices = set()
                 for p_block_idx, (p_src_regions, p_dst_regions) in enumerate(producer_regions):
                     p_region = p_dst_regions[slot_idx]
                     if regions_overlap(c_region, p_region):
                         dependent_p_local_indices.add(p_block_idx)
-                p_local_indices = frozenset(dependent_p_local_indices)
-                dependency_map.setdefault(p_local_indices, []).append(c_block_index)
+                dependent_p_local_indices_set = frozenset(dependent_p_local_indices)
+                dependency_map.setdefault((in_node.id, dependent_p_local_indices_set), {}).setdefault(node.id, []).append(c_local_index)
 
-            # Each unique dependency set becomes one barrier
-            for p_local_indices, c_local_indices in dependency_map.items():
-                if not p_local_indices:
-                    continue
-                if barrier_counter >= MAX_BARRIERS:
-                    raise RuntimeError(f"[MegaKittens] Barrier count exceeds {MAX_BARRIERS}")
-                bid = barrier_counter
-                barrier_counter += 1
-                target = len(p_local_indices)
-                for p_local_index in p_local_indices:
-                    inst_dst_barriers.setdefault((in_node.id, p_local_index), []).append(bid)
-                for c_local_index in c_local_indices:
-                    inst_src_barriers.setdefault((node.id, c_local_index), []).append((bid, target))
-                    inst_num_input_barriers[(node.id, c_local_index)] = inst_num_input_barriers.get((node.id, c_local_index), 0) + 1
+    # Each unique (producer_node_id, dependency set) becomes one barrier
+    for (producer_id, dependent_p_local_indices_set), consumers_by_node in dependency_map.items():
+        if not dependent_p_local_indices_set:
+            continue
+        if barrier_counter >= MAX_BARRIERS:
+            raise RuntimeError(f"[MegaKittens] Barrier count exceeds {MAX_BARRIERS}")
+        bid = barrier_counter
+        barrier_counter += 1
+        target = len(dependent_p_local_indices_set)
+        for p_local_index in dependent_p_local_indices_set:
+            inst_dst_barriers.setdefault((producer_id, p_local_index), []).append(bid)
+        for consumer_id, c_local_indices in consumers_by_node.items():
+            for c_local_index in c_local_indices:
+                inst_src_barriers.setdefault((consumer_id, c_local_index), []).append((bid, target))
+                inst_num_input_barriers[(consumer_id, c_local_index)] = inst_num_input_barriers.get((consumer_id, c_local_index), 0) + 1
 
     # Step 3. Tensor reuse barriers
     for consumer_node_ids, num_consumer_insts, reuser_id in release_barriers:
