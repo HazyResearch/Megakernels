@@ -46,18 +46,22 @@ def _resolve_max(args, kwargs):
 def _resolve_min(args, kwargs):
     return ElementwiseBinary(ops=("min",))
 
+def _resolve_atan2(args, kwargs):
+    return ElementwiseBinary(ops=("atan2",))
+
 
 class ElementwiseBinary(IType):
     TILE_SIZE = 128
     TMA = st(dtype=DType.bf16, rows=128, cols=128)
 
     BINARY_OPS = {
-        "add": ("BinaryOp::ADD", torch.add),
-        "sub": ("BinaryOp::SUB", torch.sub),
-        "mul": ("BinaryOp::MUL", torch.mul),
-        "div": ("BinaryOp::DIV", torch.div),
-        "max": ("BinaryOp::MAX", torch.maximum),
-        "min": ("BinaryOp::MIN", torch.minimum),
+        "add":   ("BinaryOp::ADD",   torch.add),
+        "sub":   ("BinaryOp::SUB",   torch.sub),
+        "mul":   ("BinaryOp::MUL",   torch.mul),
+        "div":   ("BinaryOp::DIV",   torch.div),
+        "max":   ("BinaryOp::MAX",   torch.maximum),
+        "min":   ("BinaryOp::MIN",   torch.minimum),
+        "atan2": ("BinaryOp::ATAN2", torch.atan2),
     }
 
     torch_functions_map = {
@@ -79,10 +83,13 @@ class ElementwiseBinary(IType):
         torch.ops.aten.maximum: _resolve_max, torch.ops.aten.maximum.default: _resolve_max,
         torch.minimum: _resolve_min,
         torch.ops.aten.minimum: _resolve_min, torch.ops.aten.minimum.default: _resolve_min,
+        torch.atan2: _resolve_atan2,
+        torch.ops.aten.atan2: _resolve_atan2, torch.ops.aten.atan2.default: _resolve_atan2,
     }
     torch_methods_map = {
         "add": _resolve_add, "sub": _resolve_sub,
         "mul": _resolve_mul, "div": _resolve_div,
+        "atan2": _resolve_atan2,
     }
 
     test_cases = [

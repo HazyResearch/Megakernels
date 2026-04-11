@@ -4,7 +4,17 @@
 
 namespace megakittens {
 
-enum class BinaryOp { ADD, SUB, MUL, DIV, MAX, MIN };
+enum class BinaryOp { ADD, SUB, MUL, DIV, MAX, MIN, ATAN2 };
+
+template <BinaryOp op, typename T>
+__device__ static __forceinline__ void apply_binary(T &dst, const T &a, const T &b) {
+    if constexpr (op == BinaryOp::ATAN2) {
+        dst = __floats2bfloat162_rn(
+            atan2f(__bfloat162float(a.x), __bfloat162float(b.x)), 
+            atan2f(__bfloat162float(a.y), __bfloat162float(b.y))
+        );
+    }
+}
 
 template <BinaryOp op, typename Group, kittens::ducks::rt::all RT>
 __device__ static __forceinline__ void apply_binary_op(RT &dst, const RT &a, const RT &b) {
@@ -14,6 +24,15 @@ __device__ static __forceinline__ void apply_binary_op(RT &dst, const RT &a, con
     else if constexpr (op == BinaryOp::DIV) Group::div(dst, a, b);
     else if constexpr (op == BinaryOp::MAX) Group::max(dst, a, b);
     else if constexpr (op == BinaryOp::MIN) Group::min(dst, a, b);
+    else {
+        #pragma unroll
+        for (int i = 0; i < RT::height; i++)
+            #pragma unroll
+            for (int j = 0; j < RT::width; j++)
+                #pragma unroll
+                for (int k = 0; k < RT::packed_per_tile; k++)
+                    apply_binary<op>(dst.tiles[i][j].data[k], a.tiles[i][j].data[k], b.tiles[i][j].data[k]);
+    }
 }
 
 // Get I-th value from an int parameter pack
