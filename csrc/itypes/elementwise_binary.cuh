@@ -6,7 +6,7 @@ namespace megakittens {
 
 enum class BinaryOp { ADD, SUB, MUL, DIV, MAX, MIN };
 
-template <BinaryOp op, typename Group, kittens::ducks::rt RT>
+template <BinaryOp op, typename Group, kittens::ducks::rt::all RT>
 __device__ static __forceinline__ void apply_binary_op(RT &dst, const RT &a, const RT &b) {
     if      constexpr (op == BinaryOp::ADD) Group::add(dst, a, b);
     else if constexpr (op == BinaryOp::SUB) Group::sub(dst, a, b);
