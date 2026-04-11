@@ -176,9 +176,6 @@ class Attention(IType):
         q, k, v = src_metas
         o = dst_metas[0]
 
-        if len(q.shape) != 4:
-            raise RuntimeError(f"[MegaKittens] Attention requires 4D tensors (BSHD), got {len(q.shape)}D")
-
         batch, seq_len, num_heads, head_dim = q.shape
 
         if head_dim != self.Db:

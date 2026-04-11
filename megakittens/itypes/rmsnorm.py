@@ -119,19 +119,14 @@ class RMSNorm(IType):
         return [x_region, w_region], [y_region]
 
     def validate(self, src_metas: Tuple[TensorMeta, ...], dst_metas: Tuple[TensorMeta, ...]) -> None:
+        super().validate(src_metas, dst_metas)
+
         x_meta = src_metas[0]
         w_meta = src_metas[1]
         C = x_meta.shape[-1]
 
         # Set C for TMA type generation (used by inputs/outputs/cpp_template)
         self._n = C
-
-        super().validate(src_metas, dst_metas)
-
-        if len(x_meta.shape) < 2:
-            raise RuntimeError(
-                f"[MegaKittens] RMSNorm requires x with at least 2 dims, got shape {x_meta.shape}"
-            )
 
         if w_meta.shape != (C,):
             raise RuntimeError(
@@ -141,12 +136,6 @@ class RMSNorm(IType):
         if dst_metas[0].shape != x_meta.shape:
             raise RuntimeError(
                 f"[MegaKittens] RMSNorm output shape {dst_metas[0].shape} doesn't match input shape {x_meta.shape}"
-            )
-
-        # sv requires length divisible by 16
-        if C % 16 != 0:
-            raise RuntimeError(
-                f"[MegaKittens] RMSNorm requires C divisible by 16, got {C}"
             )
 
         # TMA sv constraint: length <= 256 OR (length * sizeof(dtype)) % 128 == 0
