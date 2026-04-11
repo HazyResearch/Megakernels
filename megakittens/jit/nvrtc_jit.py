@@ -16,6 +16,8 @@ THUNDERKITTENS_ARCH_DEFINES = {
 COMMON_NVRTC_FLAGS = (
     "--std=c++20",
     "--use_fast_math",
+    "-Xptxas=--verbose",
+    "-Xptxas=--warn-on-spills",
     "-DNDEBUG",
     "-lineinfo",
     "-DKITTENS_NO_HOST",
@@ -23,10 +25,6 @@ COMMON_NVRTC_FLAGS = (
     f"-I{THUNDERKITTENS_ROOT / 'include'}",
     f"-I{THUNDERKITTENS_ROOT / 'prototype'}",
     *(f"-I{d}" for d in cuda_include_dirs()),
-)
-VERBOSE_NVRTC_FLAGS = (
-    "-Xptxas=--verbose",
-    "-Xptxas=--warn-on-spills",
 )
 
 
@@ -88,8 +86,7 @@ def compile_source_to_cubin(
     if major not in THUNDERKITTENS_ARCH_DEFINES:
         raise RuntimeError(f"[MegaKittens] Unsupported GPU compute capability: sm_{major}x")
     sm_suffix = "a" if major >= 9 else ""
-    nvrtc_flags = COMMON_NVRTC_FLAGS + (VERBOSE_NVRTC_FLAGS if verbose else ())
-    opts = tuple(flag.encode("utf-8") for flag in nvrtc_flags) + (
+    opts = tuple(flag.encode("utf-8") for flag in COMMON_NVRTC_FLAGS) + (
         THUNDERKITTENS_ARCH_DEFINES[major].encode("utf-8"),
         f"--gpu-architecture=sm_{major}{minor}{sm_suffix}".encode("utf-8"),
     )
@@ -102,7 +99,7 @@ def compile_source_to_cubin(
     (err,) = nvrtc.nvrtcGetProgramLog(nvrtc_prog, log)
     check_nvrtc(err)
     decoded_log = log.decode(errors="ignore").strip()
-    if decoded_log:
+    if decoded_log and (verbose or err_compile != nvrtc.nvrtcResult.NVRTC_SUCCESS):
         print(decoded_log)
     check_nvrtc(err_compile)
 
