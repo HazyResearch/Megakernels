@@ -336,7 +336,20 @@ def _generate_instructions(
 def schedule(
     dag: DAG,
 ) -> Tuple[List[InstructionMeta], List[TensorMeta], List[Instruction], int, Tuple[int, ...], Tuple[int, ...]]:
-    """Convert a validated DAG into a minimal set of tensors and a flat per-SM instruction list."""
+    """Convert a validated DAG into a minimal set of tensors, barriers, and a flat per-SM instruction list.
+
+    Args:
+        dag: validated DAG of input, output, and compute nodes.
+
+    Returns:
+        (instruction_metas, tensor_metas, instructions, barrier_counter, input_tensor_indices, output_tensor_indices) where:
+        - instruction_metas: List[InstructionMeta], one per unique instruction. Index 0 is always noop.
+        - tensor_metas: List[TensorMeta], flat list of unique tensor metadata.
+        - instructions: List[Instruction], padded to CLUSTER_SIZE with noops.
+        - barrier_counter: int, total number of barriers allocated.
+        - input_tensor_indices: Tuple[int, ...], tensor_metas indices for graph inputs, in order.
+        - output_tensor_indices: Tuple[int, ...], tensor_metas indices for graph outputs, in order.
+    """
     node_inst_count, node_inst_offset = _get_instruction_count_and_offset(dag)
     tensor_metas, tensor_index, input_tensor_indices, output_tensor_indices, release_barriers = _assign_tensors(dag, node_inst_count, node_inst_offset)
     node_block_indices, inst_dst_barriers, inst_src_barriers, inst_num_input_barriers, inst_num_reuse_barriers, barrier_counter = _assign_barriers(dag, node_inst_count, release_barriers)
