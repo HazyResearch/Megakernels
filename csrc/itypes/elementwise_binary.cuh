@@ -45,6 +45,7 @@ template <typename Config, typename Globals, typename Ops, int... TensorIndices>
 struct ElementwiseBinary {
     static constexpr int NUM_OPS = Ops::NUM_OPS;
     static constexpr int NUM_INPUTS = NUM_OPS + 1;
+    static_assert(NUM_OPS >= 1);
     static_assert(sizeof...(TensorIndices) == NUM_INPUTS + 1, "Need N + 1 tensor indices for N ops (N inputs + 1 output)");
     static constexpr int DST = last_int<TensorIndices...>::value;
     static constexpr int TILES_PER_INST = Config::NUM_PAGES / NUM_INPUTS;
