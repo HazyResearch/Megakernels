@@ -63,7 +63,7 @@ struct ElementwiseBinary {
 
     struct controller {
         __device__ __forceinline__ static int lid_release_order(const Globals &g, state_t<Config> &s, int query) {
-            const int num_tiles = s.instruction().indices[2];
+            const int num_tiles = s.instruction().indices[4];
             const int num_unused = Config::NUM_PAGES - num_tiles * PAGES_PER_TILE;
             if (query < num_unused)
                 return num_tiles * PAGES_PER_TILE + query;
@@ -83,33 +83,35 @@ struct ElementwiseBinary {
     struct loader {
         template <int I>
         __device__ __forceinline__ static void load_one(const Globals &g, state_t<Config> &s,
-                                                         int tile_idx, int tile_row, int tile_col) {
+                                                        int tile_idx, int batch, int depth, int tile_row, int tile_col) {
             const int pid = s.lid_to_pid(tile_idx * PAGES_PER_TILE + I);
             s.page_wait(pid);
             tile_t &st = s.pages[pid].template as<tile_t>();
             kittens::tma::load_async(st, g.template gls<nth_int<I, TensorIndices...>::value>(),
-                                     {tile_row, tile_col}, inputs_arrived(s, tile_idx));
+                                     {batch, depth, tile_row, tile_col}, inputs_arrived(s, tile_idx));
         }
 
         template <int... Is>
         __device__ __forceinline__ static void load_all(const Globals &g, state_t<Config> &s,
-                                                         int tile_idx, int tile_row, int tile_col,
-                                                         std::integer_sequence<int, Is...>) {
-            (load_one<Is>(g, s, tile_idx, tile_row, tile_col), ...);
+                                                        int tile_idx, int batch, int depth, int tile_row, int tile_col,
+                                                        std::integer_sequence<int, Is...>) {
+            (load_one<Is>(g, s, tile_idx, batch, depth, tile_row, tile_col), ...);
         }
 
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
             const auto &instruction = s.instruction();
-            const int tile_row = instruction.indices[0];
-            const int tile_col_start = instruction.indices[1];
-            const int num_tiles = instruction.indices[2];
+            const int batch = instruction.indices[0];
+            const int depth = instruction.indices[1];
+            const int tile_row = instruction.indices[2];
+            const int tile_col_start = instruction.indices[3];
+            const int num_tiles = instruction.indices[4];
 
             if (kittens::warp::elect_leader()) {
                 all_input_barrier_wait<Config>(g, instruction);
 
                 for (int i = 0; i < num_tiles; i++) {
                     kittens::tma::expect_bytes(inputs_arrived(s, i), N_INPUTS * sizeof(tile_t));
-                    load_all(g, s, i, tile_row, tile_col_start + i, std::make_integer_sequence<int, N_INPUTS>{});
+                    load_all(g, s, i, batch, depth, tile_row, tile_col_start + i, std::make_integer_sequence<int, N_INPUTS>{});
                 }
             } else if (kittens::warp::elect_leader_from_active()) {
                 for (int i = num_tiles * PAGES_PER_TILE; i < Config::NUM_PAGES; i++) {
@@ -144,9 +146,11 @@ struct ElementwiseBinary {
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
             const auto &instruction = s.instruction();
             auto &dst_gl = g.template gls<DST>();
-            const int tile_row = instruction.indices[0];
-            const int tile_col_start = instruction.indices[1];
-            const int num_tiles = instruction.indices[2];
+            const int batch = instruction.indices[0];
+            const int depth = instruction.indices[1];
+            const int tile_row = instruction.indices[2];
+            const int tile_col_start = instruction.indices[3];
+            const int num_tiles = instruction.indices[4];
 
             for (int t = 0; t < num_tiles; t++) {
                 kittens::wait(inputs_arrived(s, t), 0);
@@ -173,7 +177,7 @@ struct ElementwiseBinary {
                     for (int i = N_INPUTS - 1; i >= 1; i--)
                         s.page_finish(s.lid_to_pid(t * PAGES_PER_TILE + i));
                     if (t == 0) all_reuse_barrier_wait<Config>(g, instruction);
-                    kittens::tma::store_async(dst_gl, dst_st, {tile_row, tile_col_start + t});
+                    kittens::tma::store_async(dst_gl, dst_st, {batch, depth, tile_row, tile_col_start + t});
                 }
             }
 

@@ -103,11 +103,11 @@ class ElementwiseUnary(IType):
     test_cases = [
         (((op,),), shape)
         for op in UNARY_OPS.keys()
-        for shape in [(128, 128), (512, 1024), (1280, 2048)]
+        for shape in [(128, 128), (512, 1024), (1280, 2048), (2, 128, 256), (3, 512, 1024), (2, 3, 128, 256)]
     ] + [
         ((ops,), shape)
         for ops in [("abs", "neg"), ("neg", "abs"), ("exp", "log"), ("relu", "sqrt"), ("abs", "log", "neg")]
-        for shape in [(128, 128), (512, 1024), (1280, 2048)]
+        for shape in [(128, 128), (512, 1024), (1280, 2048), (2, 128, 256), (3, 512, 1024), (2, 3, 128, 256)]
     ]
     test_atol = 1e-2
     test_rtol = 1e-2

@@ -88,7 +88,7 @@ class ElementwiseBinary(IType):
     test_cases = [
         (((op,),), shape)
         for op in BINARY_OPS.keys()
-        for shape in [(128, 128), (512, 1024), (1280, 2048)]
+        for shape in [(128, 128), (512, 1024), (1280, 2048), (2, 128, 256), (3, 512, 1024), (2, 3, 128, 256)]
     ] + [
         ((ops,), shape)
         for ops in [
@@ -99,7 +99,7 @@ class ElementwiseBinary(IType):
             ("add", "sub", "mul", "max", "min"),                    # 5 ops, 6 inputs
             ("add", "sub", "mul", "div", "max", "min"),             # 6 ops, 7 inputs
         ]
-        for shape in [(128, 128), (512, 1024), (1280, 2048)]
+        for shape in [(128, 128), (512, 1024), (1280, 2048), (2, 128, 256), (3, 512, 1024), (2, 3, 128, 256)]
     ]
     test_atol = 0.2
     test_rtol = 1e-2
@@ -117,10 +117,9 @@ class ElementwiseBinary(IType):
         return Dispatcher.NUM_PAGES // self.num_inputs
 
     def test_args(self, case: tuple) -> tuple:
-        M, N = case
         tensors = []
         for i in range(self.num_inputs):
-            t = torch.randn(M, N, dtype=torch.bfloat16, device="cuda")
+            t = torch.randn(*case, dtype=torch.bfloat16, device="cuda")
             if i >= 1 and self.ops[i - 1] == "div":
                 t = t.abs() + 1e-3
             tensors.append(t)

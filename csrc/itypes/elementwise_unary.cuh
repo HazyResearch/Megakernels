@@ -43,7 +43,7 @@ struct ElementwiseUnary {
 
     struct controller {
         __device__ __forceinline__ static int lid_release_order(const Globals &g, state_t<Config> &s, int query) {
-            const int num_tiles = s.instruction().indices[2];
+            const int num_tiles = s.instruction().indices[4];
             const int num_unused = Config::NUM_PAGES - num_tiles;
             if (query < num_unused)
                 return num_tiles + query;
@@ -51,7 +51,7 @@ struct ElementwiseUnary {
                 return query - num_unused;
         }
         __device__ __forceinline__ static int init_semaphores(const Globals &g, state_t<Config> &s) {
-            const int num_tiles = s.instruction().indices[2];
+            const int num_tiles = s.instruction().indices[4];
             if (kittens::laneid() < num_tiles)
                 kittens::init_semaphore(inputs_arrived(s, kittens::laneid()), 1);
             return num_tiles;
@@ -62,9 +62,11 @@ struct ElementwiseUnary {
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
             const auto &instruction = s.instruction();
             const auto &src_gl = g.template gls<SRC>();
-            const int tile_row = instruction.indices[0];
-            const int tile_col_start = instruction.indices[1];
-            const int num_tiles = instruction.indices[2];
+            const int batch = instruction.indices[0];
+            const int depth = instruction.indices[1];
+            const int tile_row = instruction.indices[2];
+            const int tile_col_start = instruction.indices[3];
+            const int num_tiles = instruction.indices[4];
 
             if (kittens::warp::elect_leader()) {
                 all_input_barrier_wait<Config>(g, instruction);
@@ -74,7 +76,7 @@ struct ElementwiseUnary {
                     s.page_wait(pid);
                     tile_t &src_smem = s.pages[pid].template as<tile_t>();
                     kittens::tma::expect_bytes(inputs_arrived(s, i), sizeof(tile_t));
-                    kittens::tma::load_async(src_smem, src_gl, {tile_row, tile_col_start + i}, inputs_arrived(s, i));
+                    kittens::tma::load_async(src_smem, src_gl, {batch, depth, tile_row, tile_col_start + i}, inputs_arrived(s, i));
                 }
             } else if (kittens::warp::elect_leader_from_active()) {
                 for (int i = num_tiles; i < Config::NUM_PAGES; i++) {
@@ -98,9 +100,11 @@ struct ElementwiseUnary {
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
             const auto &instruction = s.instruction();
             auto &dst_gl = g.template gls<DST>();
-            const int tile_row = instruction.indices[0];
-            const int tile_col_start = instruction.indices[1];
-            const int num_tiles = instruction.indices[2];
+            const int batch = instruction.indices[0];
+            const int depth = instruction.indices[1];
+            const int tile_row = instruction.indices[2];
+            const int tile_col_start = instruction.indices[3];
+            const int num_tiles = instruction.indices[4];
 
             for (int t = 0; t < num_tiles; t++) {
                 tile_t &src_smem = s.pages[s.lid_to_pid(t)].template as<tile_t>();
@@ -114,7 +118,7 @@ struct ElementwiseUnary {
 
                 if (consumer_group::elect_leader()) {
                     if (t == 0) all_reuse_barrier_wait<Config>(g, instruction);
-                    kittens::tma::store_async(dst_gl, src_smem, {tile_row, tile_col_start + t});
+                    kittens::tma::store_async(dst_gl, src_smem, {batch, depth, tile_row, tile_col_start + t});
                 }
             }
 

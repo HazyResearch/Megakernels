@@ -1,4 +1,3 @@
-
 import math
 from typing import List, Tuple
 
@@ -39,22 +38,29 @@ class RMSNorm(IType):
     torch_methods_map = {"rmsnorm": None}
     torch_modules_map = {torch.nn.RMSNorm: None}
 
-    test_cases = [((), (1, 2048)), ((), (4, 2048)), ((), (32, 2048)), ((), (16, 4096)), ((), (32, 4096)), ((), (8, 8192))]
+    test_cases = [
+        ((), (1, 2048)), ((), (4, 2048)), ((), (32, 2048)), 
+        ((), (16, 4096)), ((), (32, 4096)), ((), (8, 8192)),
+        ((), (2, 4, 2048)), ((), (2, 3, 4, 2048)),
+    ]
     test_atol = 1e-2
     test_rtol = 1e-2
     bench_cases = [((), (32768, 256)), ((), (32768, 512)), ((), (32768, 1536)), ((), (32768, 2048)), ((), (32768, 4096)), ((), (32768, 8192)), ((), (32768, 16384))]
 
     def test_args(self, case: tuple) -> tuple:
-        M, N = case
+        C = case[-1]
         return (
-            torch.randn(M, N, dtype=torch.bfloat16, device="cuda"),
-            torch.randn(N, dtype=torch.bfloat16, device="cuda"),
+            torch.randn(*case, dtype=torch.bfloat16, device="cuda"),
+            torch.randn(C, dtype=torch.bfloat16, device="cuda"),
             1e-6,
         )
 
     def bench_bytes(self, case: tuple) -> float:
-        M, N = case
-        return M * N * 2 * 2 + N * 2
+        num_elements = 1
+        for d in case:
+            num_elements *= d
+        C = case[-1]
+        return num_elements * 2 * 2 + C * 2
 
     def __init__(self):
         self._n = 0
@@ -86,36 +92,39 @@ class RMSNorm(IType):
         ]
 
     def block_indices(self, src_metas: Tuple[TensorMeta, ...], dst_metas: Tuple[TensorMeta, ...]) -> List[Tuple[int, ...]]:
-        M, N = src_metas[0].shape[-2], src_metas[0].shape[-1]
-        rpi = _rows_per_inst(N)
+        shape = src_metas[0].shape
+        B, D, R, C = (1,) * (4 - len(shape)) + shape
+        rows_per_inst = _rows_per_inst(C)
         indices = []
-        row = 0
-        while row < M:
-            rows_this = min(rpi, M - row)
-            indices.append((row, rows_this))
-            row += rows_this
+        for b in range(B):
+            for d in range(D):
+                r = 0
+                while r < R:
+                    n = min(rows_per_inst, R - r)
+                    indices.append((b, d, r, n))
+                    r += n
         return indices
 
     def num_instructions(self, src_metas: Tuple[TensorMeta, ...], dst_metas: Tuple[TensorMeta, ...]) -> int:
-        M, N = src_metas[0].shape[-2], src_metas[0].shape[-1]
-        rpi = _rows_per_inst(N)
-        return math.ceil(M / rpi)
+        shape = src_metas[0].shape
+        B, D, R, C = (1,) * (4 - len(shape)) + shape
+        return B * D * math.ceil(R / _rows_per_inst(C))
 
     def access_regions(self, block_index, src_metas, dst_metas):
-        row_start, rows_this = block_index
-        N = src_metas[0].shape[-1]
-        x_region = ((row_start, row_start + rows_this), (0, N))
-        w_region = ((0, N),)
-        y_region = ((row_start, row_start + rows_this), (0, N))
+        b, d, r, n = block_index
+        C = src_metas[0].shape[-1]
+        x_region = ((b, b + 1), (d, d + 1), (r, r + n), (0, C))
+        w_region = ((0, C),)
+        y_region = ((b, b + 1), (d, d + 1), (r, r + n), (0, C))
         return [x_region, w_region], [y_region]
 
     def validate(self, src_metas: Tuple[TensorMeta, ...], dst_metas: Tuple[TensorMeta, ...]) -> None:
         x_meta = src_metas[0]
         w_meta = src_metas[1]
-        N = x_meta.shape[-1]
+        C = x_meta.shape[-1]
 
-        # Set N for TMA type generation (used by inputs/outputs/cpp_template)
-        self._n = N
+        # Set C for TMA type generation (used by inputs/outputs/cpp_template)
+        self._n = C
 
         super().validate(src_metas, dst_metas)
 
@@ -124,9 +133,9 @@ class RMSNorm(IType):
                 f"[MegaKittens] RMSNorm requires x with at least 2 dims, got shape {x_meta.shape}"
             )
 
-        if w_meta.shape != (N,):
+        if w_meta.shape != (C,):
             raise RuntimeError(
-                f"[MegaKittens] RMSNorm weight shape {w_meta.shape} doesn't match x last dim {N}"
+                f"[MegaKittens] RMSNorm weight shape {w_meta.shape} doesn't match x last dim {C}"
             )
 
         if dst_metas[0].shape != x_meta.shape:
@@ -135,21 +144,21 @@ class RMSNorm(IType):
             )
 
         # sv requires length divisible by 16
-        if N % 16 != 0:
+        if C % 16 != 0:
             raise RuntimeError(
-                f"[MegaKittens] RMSNorm requires N divisible by 16, got {N}"
+                f"[MegaKittens] RMSNorm requires C divisible by 16, got {C}"
             )
 
         # TMA sv constraint: length <= 256 OR (length * sizeof(dtype)) % 128 == 0
-        if N > 256 and (N * 2) % 128 != 0:
+        if C > 256 and (C * 2) % 128 != 0:
             raise RuntimeError(
-                f"[MegaKittens] RMSNorm requires N <= 256 or N*2 divisible by 128, got {N}"
+                f"[MegaKittens] RMSNorm requires C <= 256 or C*2 divisible by 128, got {C}"
             )
 
         # Row must fit in one page
-        row_bytes = _sv_sizeof_bytes(N)
+        row_bytes = _sv_sizeof_bytes(C)
         if row_bytes > _PAGE_BYTES:
             raise RuntimeError(
                 f"[MegaKittens] RMSNorm row size {row_bytes}B exceeds page size "
-                f"{_PAGE_BYTES}B. N={N} is too large for single-page TMA path."
+                f"{_PAGE_BYTES}B. C={C} is too large for single-page TMA path."
             )
