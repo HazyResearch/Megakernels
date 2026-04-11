@@ -116,10 +116,6 @@ class ElementwiseUnary(IType):
     def __init__(self, ops: tuple[str, ...] = ("relu",)):
         self.ops = ops
 
-    @staticmethod
-    def test_fn(x, ops_str):
-        return torch.ops.megakittens.elementwise_unary(x, ops_str)
-
     def test_args(self, case: tuple) -> tuple:
         M, N = case
         x = torch.randn(M, N, dtype=torch.bfloat16, device="cuda")

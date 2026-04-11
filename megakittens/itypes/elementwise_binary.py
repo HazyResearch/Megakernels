@@ -116,10 +116,6 @@ class ElementwiseBinary(IType):
     def tiles_per_inst(self) -> int:
         return Dispatcher.NUM_PAGES // self.num_inputs
 
-    @staticmethod
-    def test_fn(tensors, ops_str):
-        return torch.ops.megakittens.elementwise_binary(tensors, ops_str)
-
     def test_args(self, case: tuple) -> tuple:
         M, N = case
         tensors = []
