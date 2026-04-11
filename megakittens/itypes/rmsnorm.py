@@ -49,7 +49,7 @@ class RMSNorm(IType):
     torch_modules_map = {torch.nn.RMSNorm: _resolve_rmsnorm}
 
     test_cases = [
-        ((), (1, 16)),
+        ((), (1, 64)),
         ((), (1, 2048)), ((), (4, 2048)), ((), (32, 2048)),
         ((), (16, 4096)), ((), (32, 4096)), ((), (8, 8192)),
         ((), (2, 4, 2048)), ((), (2, 3, 4, 2048)),
@@ -84,22 +84,22 @@ class RMSNorm(IType):
     def inputs(self) -> list[TensorSpec]:
         if self.col_dim > 0:
             return [
-                TensorSpec(dtype=DType.bf16, granularity=(1, 16), tma_types=[sv(dtype=DType.bf16, length=self.col_dim)]),
-                TensorSpec(dtype=DType.bf16, granularity=(16,)),
+                TensorSpec(dtype=DType.bf16, granularity=(1, 64), tma_types=[sv(dtype=DType.bf16, length=self.col_dim)]),
+                TensorSpec(dtype=DType.bf16, granularity=(64,)),
             ]
         return [
-            TensorSpec(dtype=DType.bf16, granularity=(1, 16)),
-            TensorSpec(dtype=DType.bf16, granularity=(16,)),
+            TensorSpec(dtype=DType.bf16, granularity=(1, 64)),
+            TensorSpec(dtype=DType.bf16, granularity=(64,)),
         ]
 
     @property
     def outputs(self) -> list[TensorSpec]:
         if self.col_dim > 0:
             return [
-                TensorSpec(dtype=DType.bf16, granularity=(1, 16), tma_types=[sv(dtype=DType.bf16, length=self.col_dim)]),
+                TensorSpec(dtype=DType.bf16, granularity=(1, 64), tma_types=[sv(dtype=DType.bf16, length=self.col_dim)]),
             ]
         return [
-            TensorSpec(dtype=DType.bf16, granularity=(1, 16)),
+            TensorSpec(dtype=DType.bf16, granularity=(1, 64)),
         ]
 
     def block_indices(self, src_metas: Tuple[TensorMeta, ...], dst_metas: Tuple[TensorMeta, ...]) -> List[Tuple[int, ...]]:
