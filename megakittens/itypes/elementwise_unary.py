@@ -98,7 +98,7 @@ class ElementwiseUnary(IType):
         "log": _resolve_log, "log2": _resolve_log2,
         "neg": _resolve_neg, "sqrt": _resolve_sqrt, "rsqrt": _resolve_rsqrt,
     }
-    torch_modules_map = {torch.nn.ReLU: _resolve_relu, torch.nn.ReLU6: _resolve_relu}
+    torch_modules_map = {torch.nn.ReLU: _resolve_relu}
 
     test_cases = [
         (((op,),), shape)
