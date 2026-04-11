@@ -21,7 +21,7 @@ Two files:
 ### Python-side conventions
 
 - `__init__` must support a default constructor (no required args).
-- `test_cases` format: `[(cls_args_tuple, input_args_tuple), ...]`. `cls_args` is unpacked as `cls(*cls_args)`.
+- `test_cases` format: `[(cls_args_tuple, input_args_tuple), ...]`. `cls_args` is unpacked as `cls(*cls_args)`. The first test case should use the smallest valid shape to catch minimum-size edge cases.
 - Custom ops that take variable ops use comma-separated strings (torch custom ops don't support `list[str]`).
 - `torch_functions_map` values: `None` for plain IType registration, `callable` for resolvers that return an IType instance. The custom op itself needs a resolver if it has parameters (e.g. ops string).
 - `cpp_template` must place `{tensors}` where tensor indices go. Non-int template params (enums, type lists) go before `{tensors}` since C++ can't have two parameter packs.
