@@ -114,14 +114,24 @@ class IType(ABC):
             )
         for label, metas, specs in [("input", src_metas, self.inputs), ("output", dst_metas, self.outputs)]:
             for i, (meta, spec) in enumerate(zip(metas, specs)):
+                if len(meta.shape) > 4:
+                    raise RuntimeError(
+                        f"[MegaKittens] {self.name} {label} {i}: tensors must be at most 4D, got {len(meta.shape)}D"
+                    )
+                if len(meta.shape) < len(spec.granularity):
+                    raise RuntimeError(
+                        f"[MegaKittens] {self.name} {label} {i}: tensor is {len(meta.shape)}D but granularity requires at least {len(spec.granularity)}D"
+                    )
                 if meta.dtype != spec.dtype:
                     raise RuntimeError(
                         f"[MegaKittens] {self.name} {label} {i}: expected dtype {spec.dtype.value}, got {meta.dtype.value}"
                     )
-                for dim, gran in enumerate(spec.granularity):
-                    if meta.shape[dim] % gran != 0:
+                offset = len(meta.shape) - len(spec.granularity)
+                for g_dim, gran in enumerate(spec.granularity):
+                    if meta.shape[offset + g_dim] % gran != 0:
                         raise RuntimeError(
-                            f"[MegaKittens] {self.name} {label} {i} dim {dim}: {meta.shape[dim]} not a multiple of {gran}"
+                            f"[MegaKittens] {self.name} {label} {i} dim {offset + g_dim}: "
+                            f"{meta.shape[offset + g_dim]} not a multiple of {gran}"
                         )
 
     @abstractmethod

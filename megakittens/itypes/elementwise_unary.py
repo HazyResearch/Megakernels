@@ -117,8 +117,7 @@ class ElementwiseUnary(IType):
         self.ops = ops
 
     def test_args(self, case: tuple) -> tuple:
-        M, N = case
-        x = torch.randn(M, N, dtype=torch.bfloat16, device="cuda")
+        x = torch.randn(*case, dtype=torch.bfloat16, device="cuda")
         if any(op in ("log", "log2", "sqrt", "rsqrt") for op in self.ops):
             x = x.abs() + 1e-3  # ensure positive for log/sqrt/rsqrt
         return (x, ",".join(self.ops))
@@ -145,23 +144,29 @@ class ElementwiseUnary(IType):
         ]
 
     def block_indices(self, src_metas: Tuple[TensorMeta, ...], dst_metas: Tuple[TensorMeta, ...]) -> List[Tuple[int, ...]]:
-        rows = dst_metas[0].shape[0] // self.TILE_SIZE
-        cols = dst_metas[0].shape[1] // self.TILE_SIZE
+        B, D, _R, _C = (1,) * (4 - len(dst_metas[0].shape)) + dst_metas[0].shape
+        R = _R // self.TILE_SIZE
+        C = _C // self.TILE_SIZE
         indices = []
-        for row in range(rows):
-            for col in range(0, cols, self.TILES_PER_INST):
-                n = min(self.TILES_PER_INST, cols - col)
-                indices.append((row, col, n))
+        for b in range(B):
+            for d in range(D):
+                for r in range(R):
+                    for c in range(0, C, self.TILES_PER_INST):
+                        n = min(self.TILES_PER_INST, C - c)
+                        indices.append((b, d, r, c, n))
         return indices
 
     def num_instructions(self, src_metas: Tuple[TensorMeta, ...], dst_metas: Tuple[TensorMeta, ...]) -> int:
-        rows = dst_metas[0].shape[0] // self.TILE_SIZE
-        cols = dst_metas[0].shape[1] // self.TILE_SIZE
-        return rows * ((cols + self.TILES_PER_INST - 1) // self.TILES_PER_INST)
+        B, D, _R, _C = (1,) * (4 - len(dst_metas[0].shape)) + dst_metas[0].shape
+        R = _R // self.TILE_SIZE
+        C = _C // self.TILE_SIZE
+        return B * D * R * ((C + self.TILES_PER_INST - 1) // self.TILES_PER_INST)
 
     def access_regions(self, block_index, src_metas, dst_metas):
-        row, col, n = block_index
-        region = ((row * self.TILE_SIZE, (row + 1) * self.TILE_SIZE), (col * self.TILE_SIZE, (col + n) * self.TILE_SIZE))
+        b, d, r, c, n = block_index
+        region = ((b, b + 1), (d, d + 1),
+                  (r * self.TILE_SIZE, (r + 1) * self.TILE_SIZE),
+                  (c * self.TILE_SIZE, (c + n) * self.TILE_SIZE))
         return [region], [region]
 
     def validate(self, src_metas: Tuple[TensorMeta, ...], dst_metas: Tuple[TensorMeta, ...]) -> None:

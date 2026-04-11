@@ -148,23 +148,29 @@ class ElementwiseBinary(IType):
         ]
 
     def block_indices(self, src_metas: Tuple[TensorMeta, ...], dst_metas: Tuple[TensorMeta, ...]) -> List[Tuple[int, ...]]:
-        rows = dst_metas[0].shape[0] // self.TILE_SIZE
-        cols = dst_metas[0].shape[1] // self.TILE_SIZE
+        B, D, _R, _C = (1,) * (4 - len(dst_metas[0].shape)) + dst_metas[0].shape
+        R = _R // self.TILE_SIZE
+        C = _C // self.TILE_SIZE
         indices = []
-        for row in range(rows):
-            for col in range(0, cols, self.tiles_per_inst):
-                n = min(self.tiles_per_inst, cols - col)
-                indices.append((row, col, n))
+        for b in range(B):
+            for d in range(D):
+                for r in range(R):
+                    for c in range(0, C, self.tiles_per_inst):
+                        n = min(self.tiles_per_inst, C - c)
+                        indices.append((b, d, r, c, n))
         return indices
 
     def num_instructions(self, src_metas: Tuple[TensorMeta, ...], dst_metas: Tuple[TensorMeta, ...]) -> int:
-        rows = dst_metas[0].shape[0] // self.TILE_SIZE
-        cols = dst_metas[0].shape[1] // self.TILE_SIZE
-        return rows * ((cols + self.tiles_per_inst - 1) // self.tiles_per_inst)
+        B, D, _R, _C = (1,) * (4 - len(dst_metas[0].shape)) + dst_metas[0].shape
+        R = _R // self.TILE_SIZE
+        C = _C // self.TILE_SIZE
+        return B * D * R * ((C + self.tiles_per_inst - 1) // self.tiles_per_inst)
 
     def access_regions(self, block_index, src_metas, dst_metas):
-        row, col, n = block_index
-        region = ((row * self.TILE_SIZE, (row + 1) * self.TILE_SIZE), (col * self.TILE_SIZE, (col + n) * self.TILE_SIZE))
+        b, d, r, c, n = block_index
+        region = ((b, b + 1), (d, d + 1),
+                  (r * self.TILE_SIZE, (r + 1) * self.TILE_SIZE),
+                  (c * self.TILE_SIZE, (c + n) * self.TILE_SIZE))
         return [region] * self.num_inputs, [region]
 
     def validate(self, src_metas: Tuple[TensorMeta, ...], dst_metas: Tuple[TensorMeta, ...]) -> None:
