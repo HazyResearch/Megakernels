@@ -62,8 +62,7 @@ Two files:
 
 ## Naming conventions
 
-- "op" / `OpType` = a vertex in the compute graph (DAG level, maps from torch ops)
-- "instruction type" / `IType` = how an op executes on the GPU (kernel implementation)
+- "instruction type" / `IType` = how an op executes on the GPU (kernel implementation). Torch ops map to ITypes via `torch_functions_map`.
 - "instruction" = one tile's worth of work dispatched to one SM
 - "icode" = integer identifying which instruction type to dispatch (assigned per unique itype+tensor combo)
 - Dimensions: `b` = batch, `d` = depth, `r` = row, `c` = col. Uppercase `B, D, R, C` for sizes, lowercase for indices.
