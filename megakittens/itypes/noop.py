@@ -10,6 +10,7 @@ from ..schema.tensor import TensorMeta, TensorSpec
 def noop_op() -> None:
     pass
 
+
 @noop_op.register_fake
 def _noop_fake() -> None:
     pass

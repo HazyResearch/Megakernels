@@ -13,6 +13,7 @@ from ..jit.pykittens import st
 def gemm_op(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     return a @ b
 
+
 @gemm_op.register_fake
 def _gemm_fake(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     return torch.empty(a.shape[0], b.shape[1], dtype=a.dtype, device=a.device)

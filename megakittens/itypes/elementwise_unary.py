@@ -14,6 +14,7 @@ def elementwise_unary_op(x: torch.Tensor, ops: str) -> torch.Tensor:
         x = ElementwiseUnary.UNARY_OPS[op][1](x)
     return x
 
+
 @elementwise_unary_op.register_fake
 def _elementwise_unary_fake(x: torch.Tensor, ops: str) -> torch.Tensor:
     return torch.empty_like(x)

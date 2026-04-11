@@ -14,6 +14,7 @@ from ..jit.pykittens import sv
 def rmsnorm_op(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
     return torch.rms_norm(x, [x.shape[-1]], weight, eps)
 
+
 @rmsnorm_op.register_fake
 def _rmsnorm_fake(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
     return torch.empty_like(x)

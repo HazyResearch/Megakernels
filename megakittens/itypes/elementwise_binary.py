@@ -18,6 +18,7 @@ def elementwise_binary_op(tensors: list[torch.Tensor], ops: str) -> torch.Tensor
         result = ElementwiseBinary.BINARY_OPS[op][1](result, tensors[i])
     return result
 
+
 @elementwise_binary_op.register_fake
 def _elementwise_binary_fake(tensors: list[torch.Tensor], ops: str) -> torch.Tensor:
     return torch.empty_like(tensors[0])
