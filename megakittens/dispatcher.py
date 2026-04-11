@@ -17,6 +17,7 @@ from .jit.pykittens import gl
 from .jit.cuda_utils import (
     get_kernel_from_cubin_module,
     get_sm_arch,
+    get_sm_count,
     initialize_cuda_context,
     launch_kernel,
     load_cubin_module,
@@ -68,10 +69,24 @@ def _pack_instruction(inst: Instruction) -> list[int]:
     return inst_packed
 
 
-def _pack_instructions(instructions: list[Instruction], *, device: str) -> torch.Tensor:
+def _pack_instructions_global(instructions: list[Instruction], *, device: str) -> torch.Tensor:
     """Pack a list of Instruction objects into an (N, 64) int32 tensor."""
     buf = [_pack_instruction(inst) for inst in instructions]
     return torch.tensor(buf, dtype=torch.int32, device=device)
+
+
+def _pack_instructions_per_sm(instructions: list[Instruction], sm_count: int, device: str) -> torch.Tensor:
+    """Pack a list of Instruction objects into a (max_per_sm_insts, sm_count, 64) int32 tensor."""
+    if sm_count % Dispatcher.CLUSTER_SIZE != 0:
+        raise RuntimeError(f"[MegaKittens] sm_count must be a multiple of {Dispatcher.CLUSTER_SIZE}, got {sm_count}")
+    max_per_sm_insts = -(-len(instructions) // sm_count) if len(instructions) > 0 else 1
+    buf = [0] * (max_per_sm_insts * sm_count * 64)
+    for i, inst in enumerate(instructions):
+        wave = i // sm_count
+        sm = i % sm_count
+        offset = wave*sm_count*64 + sm*64
+        buf[offset:offset+64] = _pack_instruction(inst)
+    return torch.tensor(buf, dtype=torch.int32, device=device).reshape(max_per_sm_insts, sm_count, 64)
 
 
 def _validate_tensor_against_meta(
@@ -129,6 +144,7 @@ class Dispatcher:
         output_tensor_indices: Sequence[int],
         use_jit_cache: bool = True,
         verbose: bool = True,
+        global_work_queue: bool = False,
     ) -> None:
         if not tensor_metas:
             raise RuntimeError("[MegaKittens] 'tensor_metas' must not be empty")
@@ -187,6 +203,7 @@ class Dispatcher:
         self.gls: list[gl | None] = [None] * len(self.all_tensors)
         self.use_jit_cache = use_jit_cache
         self.verbose = verbose
+        self.global_work_queue = global_work_queue
 
     def __del__(self) -> None:
         if self._cubin_module is not None:
@@ -231,7 +248,11 @@ class Dispatcher:
             )
 
         # Allocate instruction and barrier tensors
-        self.instruction_tensor = _pack_instructions(self.instructions, device=str(self.device))
+        device_index = self.device.index if self.device.index else torch.cuda.current_device()
+        if self.global_work_queue:
+            self.instruction_tensor = _pack_instructions_global(self.instructions, device=str(self.device))
+        else:
+            self.instruction_tensor = _pack_instructions_per_sm(self.instructions, get_sm_count(device_index), device=str(self.device))
         self.barrier_tensor = torch.zeros(
             max(self.num_barriers, 1), dtype=torch.int32, device=str(self.device),
         )
@@ -252,7 +273,10 @@ class Dispatcher:
         for i, t in enumerate(self.all_tensors):
             mk_dtype = DType.from_torch(t.dtype)
             if i < 2:  # instructions and barriers
-                self.gls[i] = gl(dtype=mk_dtype, b=1, d=1, r=-1, c=-1)
+                if i == 0 and not self.global_work_queue:
+                    self.gls[i] = gl(dtype=mk_dtype, b=1, d=-1, r=-1, c=-1)
+                else:
+                    self.gls[i] = gl(dtype=mk_dtype, b=1, d=1, r=-1, c=-1)
             else:
                 tma = tensor_tma_types.get(i - 2, [])
                 self.gls[i] = gl(dtype=mk_dtype, b=-1, d=-1, r=-1, c=-1, tma_types=tma)
@@ -291,11 +315,12 @@ class Dispatcher:
             op = template.format(tensors=tensor_args)
             dispatch_cases.append(f"case {inst_meta.icode}: return dispatch_instruction<{op}, worker_type, T>(args...);")
         dispatch_cases = "\n".join(dispatch_cases)
+        config_struct = "static constexpr bool GLOBAL_WORK_QUEUE = true;" if self.global_work_queue else ""
         source = f"""
             #include "megakittens.cuh"
             {itype_includes}
             namespace megakittens {{
-                struct MKConfig : default_config {{}};
+                struct MKConfig : default_config {{{config_struct}}};
                 struct MKGlobals {{
                     {self.gls[0].cpp_type} instructions;
                     {self.gls[1].cpp_type} barriers;
@@ -328,11 +353,15 @@ class Dispatcher:
             self.barrier_tensor.zero_()
         fields = [(g.tensor_to_gl(t), g.size, g.align) for g, t in zip(self.gls, self.all_tensors)]
         _globals_holder, globals_packed = pack_args(fields)
+        if self.global_work_queue:
+            grid_size = -(-len(self.instructions) // self.CLUSTER_SIZE) * self.CLUSTER_SIZE  # round up
+        else:
+            grid_size = get_sm_count(device_index)
         stream = torch.cuda.current_stream(device_index).cuda_stream
         launch_kernel(
             self._kernel_fn,
             globals_packed,
-            grid=(-(-len(self.instructions) // self.CLUSTER_SIZE) * self.CLUSTER_SIZE,),  # round up to CLUSTER_SIZE
+            grid=(grid_size,),
             block=(self.NUM_THREADS,),
             dynamic_smem_bytes=self.DYNAMIC_SHARED_MEMORY,
             stream=stream,
