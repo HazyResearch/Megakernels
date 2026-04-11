@@ -6,8 +6,8 @@ namespace megakittens {
 
 enum class BinaryOp { ADD, SUB, MUL, DIV, MAX, MIN };
 
-template <BinaryOp op, typename Group, typename T>
-__device__ static __forceinline__ void apply_binary_op(T &dst, const T &a, const T &b) {
+template <BinaryOp op, typename Group, kittens::ducks::rt RT>
+__device__ static __forceinline__ void apply_binary_op(RT &dst, const RT &a, const RT &b) {
     if      constexpr (op == BinaryOp::ADD) Group::add(dst, a, b);
     else if constexpr (op == BinaryOp::SUB) Group::sub(dst, a, b);
     else if constexpr (op == BinaryOp::MUL) Group::mul(dst, a, b);
@@ -18,43 +18,37 @@ __device__ static __forceinline__ void apply_binary_op(T &dst, const T &a, const
 
 // Get I-th value from an int parameter pack
 template <int I, int First, int... Rest>
-struct nth_int { static constexpr int value = nth_int<I-1, Rest...>::value; };
+struct nth_int { static constexpr int value = nth_int<I - 1, Rest...>::value; };
 template <int First, int... Rest>
 struct nth_int<0, First, Rest...> { static constexpr int value = First; };
 
 // Get last value from an int parameter pack
 template <int... Is>
 struct last_int;
-template <int Only>
-struct last_int<Only> { static constexpr int value = Only; };
+template <int Last>
+struct last_int<Last> { static constexpr int value = Last; };
 template <int First, int... Rest>
 struct last_int<First, Rest...> { static constexpr int value = last_int<Rest...>::value; };
 
-// Type-level list of BinaryOps
 template <BinaryOp... Ops>
-struct BinaryOpList {
-    static constexpr int size = sizeof...(Ops);
+struct BinaryOps {
+    static constexpr int NUM_OPS = sizeof...(Ops);
     template <int I>
-    __host__ __device__ static constexpr BinaryOp get() {
+    __device__ static constexpr BinaryOp get() {
         constexpr BinaryOp arr[] = {Ops...};
         return arr[I];
     }
 };
 
-// ElementwiseBinary<Config, Globals, BinaryOpList<Op0, Op1, ...>, SRC0, SRC1, ..., SRCN, DST>
-// result = OpN-1(... Op1(Op0(SRC0, SRC1), SRC2) ..., SRCN)
-// Tensor indices: first N are sources, last one is DST (matches {tensors} convention)
-template <typename Config, typename Globals, typename OpList, int... TensorIndices>
+// Example: ElementwiseBinary<Config, Globals, BinaryOps<Op0, Op1, ...>, SRC0, SRC1, ..., SRCN, DST>
+template <typename Config, typename Globals, typename Ops, int... TensorIndices>
 struct ElementwiseBinary {
-    static constexpr int NUM_OPS = OpList::size;
-    static constexpr int N_TENSORS = sizeof...(TensorIndices);
+    static constexpr int NUM_OPS = Ops::NUM_OPS;
     static constexpr int NUM_INPUTS = NUM_OPS + 1;
-    static_assert(N_TENSORS == NUM_INPUTS + 1, "Need N+1 tensor indices for N ops (N inputs + 1 output)");
-
+    static_assert(sizeof...(TensorIndices) == NUM_INPUTS + 1, "Need N + 1 tensor indices for N ops (N inputs + 1 output)");
     static constexpr int DST = last_int<TensorIndices...>::value;
     static constexpr int TILES_PER_INST = Config::NUM_PAGES / NUM_INPUTS;
     static_assert(TILES_PER_INST >= 1, "Not enough pages for this many inputs");
-    static constexpr int NUM_USED_PAGES = TILES_PER_INST * NUM_INPUTS;
 
     using tile_t = kittens::st<kittens::bf16, 128, 128>;
 
@@ -67,10 +61,15 @@ struct ElementwiseBinary {
             if (query < num_unused)
                 return num_tiles * NUM_INPUTS + query;
             const int used_query = query - num_unused;
-            // Release in reverse input order: last input first, first input (used for store) last
-            const int input_group = (NUM_INPUTS - 1) - used_query / num_tiles;
-            const int tile_idx = used_query % num_tiles;
-            return tile_idx * NUM_INPUTS + input_group;
+            constexpr int non_dst_pages = NUM_INPUTS - 1;
+            if (used_query < num_tiles * non_dst_pages) {
+                const int tile_idx = used_query / non_dst_pages;
+                const int input_idx = used_query % non_dst_pages + 1;
+                return tile_idx * NUM_INPUTS + input_idx;
+            } else {
+                const int tile_idx = used_query - num_tiles * non_dst_inputs;
+                return tile_idx * NUM_INPUTS;
+            }
         }
         __device__ __forceinline__ static int init_semaphores(const Globals &g, state_t<Config> &s) {
             const int num_tiles = s.instruction().indices[4];
@@ -130,7 +129,7 @@ struct ElementwiseBinary {
 
         template <int... Is>
         __device__ __forceinline__ static void apply_all_binary_ops(reg_tile_t *reg_tiles, std::integer_sequence<int, Is...>) {
-            (apply_binary_op<OpList::template get<Is>(), consumer_group>(reg_tiles[0], reg_tiles[0], reg_tiles[Is + 1]), ...);
+            (apply_binary_op<Ops::template get<Is>(), consumer_group>(reg_tiles[0], reg_tiles[0], reg_tiles[Is + 1]), ...);
         }
 
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
@@ -160,7 +159,7 @@ struct ElementwiseBinary {
 
                 if (consumer_group::elect_leader()) {
                     #pragma unroll
-                    for (int i = NUM_INPUTS - 1; i >= 1; i--) // for cleaner lid_release_order logic
+                    for (int i = 1; i < NUM_INPUTS; i++)
                         s.page_finish(s.lid_to_pid(tile_idx*NUM_INPUTS + i));
                     if (tile_idx == 0) all_reuse_barrier_wait<Config>(g, instruction);
                     kittens::tma::store_async(dst_gl, dst_tile, {batch, depth, tile_row, tile_col_start + tile_idx});

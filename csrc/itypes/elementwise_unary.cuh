@@ -13,7 +13,7 @@ __device__ static __forceinline__ void apply_unary(T &x) {
     else if constexpr (op == UnaryOp::RSQRT) x = h2rsqrt(x);
 }
 
-template <UnaryOp op, typename Group, typename RT>
+template <UnaryOp op, typename Group, kittens::ducks::rt RT>
 __device__ static __forceinline__ void apply_unary_op(RT &reg) {
     if      constexpr (op == UnaryOp::IDENTITY) {}
     else if constexpr (op == UnaryOp::RELU) Group::relu(reg, reg);
