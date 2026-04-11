@@ -101,7 +101,7 @@ class ElementwiseUnary(IType):
 
     test_cases = [
         (((op,),), shape)
-        for op in ["identity", "relu", "abs", "exp", "exp2", "log", "log2", "neg", "sqrt", "rsqrt"]
+        for op in UNARY_OPS.keys()
         for shape in [(128, 128), (512, 1024), (1280, 2048)]
     ] + [
         ((ops,), shape)
