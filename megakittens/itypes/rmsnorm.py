@@ -3,6 +3,7 @@ from typing import List, Tuple
 
 import torch
 
+from ..dispatcher import Dispatcher
 from ..schema.dtype import DType
 from ..schema.itype import IType
 from ..schema.tensor import TensorMeta, TensorSpec
@@ -19,24 +20,33 @@ def _rmsnorm_fake(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Te
     return torch.empty_like(x)
 
 
-_PAGE_BYTES = 32768  # Config::PAGE_SIZE
+def _rows_per_inst(C: int) -> int:
+    """How many full rows of width C fit in one page."""
+    row_bytes = ((C * 2 + 127) // 128) * 128  # sv<bf16, C> padded to 128-byte boundary
+    return Dispatcher.PAGE_SIZE // row_bytes
 
 
-def _sv_sizeof_bytes(n: int) -> int:
-    """sizeof(sv<bf16, N>) on Blackwell -- padded to 128-byte boundary."""
-    raw = n * 2  # bf16 = 2 bytes
-    return ((raw + 127) // 128) * 128
+def _resolve_rmsnorm(args, kwargs):
+    x_node = args[0]
+    col_dim = x_node.meta['val'].shape[-1]
+    return RMSNorm(col_dim=col_dim)
 
 
-def _rows_per_inst(N: int) -> int:
-    """How many full rows of width N fit in one page."""
-    row_bytes = _sv_sizeof_bytes(N)
-    return _PAGE_BYTES // row_bytes
+def _resolve_aten_fused_rms_norm(args, kwargs):
+    x_node = args[0]
+    col_dim = x_node.meta['val'].shape[-1]
+    return RMSNorm(col_dim=col_dim), [0]
 
 
 class RMSNorm(IType):
-    torch_methods_map = {"rmsnorm": None}
-    torch_modules_map = {torch.nn.RMSNorm: None}
+    torch_functions_map = {
+        torch.ops.megakittens.rmsnorm: _resolve_rmsnorm,
+        torch.ops.megakittens.rmsnorm.default: _resolve_rmsnorm,
+        torch.ops.aten._fused_rms_norm: _resolve_aten_fused_rms_norm,
+        torch.ops.aten._fused_rms_norm.default: _resolve_aten_fused_rms_norm,
+    }
+    torch_methods_map = {"rmsnorm": _resolve_rmsnorm}
+    torch_modules_map = {torch.nn.RMSNorm: _resolve_rmsnorm}
 
     test_cases = [
         ((), (1, 2048)), ((), (4, 2048)), ((), (32, 2048)), 
@@ -62,18 +72,18 @@ class RMSNorm(IType):
         C = case[-1]
         return num_elements * 2 * 2 + C * 2
 
-    def __init__(self):
-        self._n = 0
+    def __init__(self, col_dim: int = 0):
+        self.col_dim = col_dim
 
     @property
     def cpp_template(self) -> str:
-        return f"RMSNorm<MKConfig, MKGlobals, {self._n}, {{tensors}}>"
+        return f"RMSNorm<MKConfig, MKGlobals, {self.col_dim}, {{tensors}}>"
 
     @property
     def inputs(self) -> list[TensorSpec]:
-        if self._n > 0:
+        if self.col_dim > 0:
             return [
-                TensorSpec(dtype=DType.bf16, granularity=(1, 16), tma_types=[sv(dtype=DType.bf16, length=self._n)]),
+                TensorSpec(dtype=DType.bf16, granularity=(1, 16), tma_types=[sv(dtype=DType.bf16, length=self.col_dim)]),
                 TensorSpec(dtype=DType.bf16, granularity=(16,)),
             ]
         return [
@@ -83,9 +93,9 @@ class RMSNorm(IType):
 
     @property
     def outputs(self) -> list[TensorSpec]:
-        if self._n > 0:
+        if self.col_dim > 0:
             return [
-                TensorSpec(dtype=DType.bf16, granularity=(1, 16), tma_types=[sv(dtype=DType.bf16, length=self._n)]),
+                TensorSpec(dtype=DType.bf16, granularity=(1, 16), tma_types=[sv(dtype=DType.bf16, length=self.col_dim)]),
             ]
         return [
             TensorSpec(dtype=DType.bf16, granularity=(1, 16)),
@@ -125,9 +135,6 @@ class RMSNorm(IType):
         w_meta = src_metas[1]
         C = x_meta.shape[-1]
 
-        # Set C for TMA type generation (used by inputs/outputs/cpp_template)
-        self._n = C
-
         if w_meta.shape != (C,):
             raise RuntimeError(
                 f"[MegaKittens] RMSNorm weight shape {w_meta.shape} doesn't match x last dim {C}"
@@ -145,9 +152,9 @@ class RMSNorm(IType):
             )
 
         # Row must fit in one page
-        row_bytes = _sv_sizeof_bytes(C)
-        if row_bytes > _PAGE_BYTES:
+        row_bytes = ((C * 2 + 127) // 128) * 128
+        if row_bytes > Dispatcher.PAGE_SIZE:
             raise RuntimeError(
                 f"[MegaKittens] RMSNorm row size {row_bytes}B exceeds page size "
-                f"{_PAGE_BYTES}B. C={C} is too large for single-page TMA path."
+                f"{Dispatcher.PAGE_SIZE}B. C={C} is too large for single-page TMA path."
             )
