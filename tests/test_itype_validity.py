@@ -1,5 +1,9 @@
 import sys
 
+import re
+
+import torch
+
 import megakittens
 
 
@@ -152,7 +156,6 @@ def check_validity(inst):
             assert False, f"{cls.__name__}.validate should reject wrong input count"
         except (RuntimeError, IndexError):
             pass
-
     if outputs:
         wrong_dst = tuple(
             megakittens.schema.tensor.TensorMeta(
@@ -165,6 +168,51 @@ def check_validity(inst):
             assert False, f"{cls.__name__}.validate should reject wrong output count"
         except (RuntimeError, IndexError):
             pass
+
+    # Custom op exists and signature matches test_args
+
+    custom_op_name = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", cls.__name__).lower()
+    mk_op = getattr(torch.ops.megakittens, custom_op_name, None)
+    assert mk_op is not None, f"{cls.__name__} missing custom op torch.ops.megakittens.{custom_op_name}"
+    schema = mk_op.default._schema
+    schema_arg_types = [str(a.type) for a in schema.arguments]
+    SCHEMA_TYPE_MAP = {
+        "Tensor": torch.Tensor,
+        "List[Tensor]": list,
+        "str": str,
+        "bool": bool,
+        "int": int,
+        "float": float,
+    }
+    if cls.test_cases:
+        cls_args, input_args = cls.test_cases[0]
+        try:
+            test_inst = cls(*cls_args)
+        except Exception as e:
+            assert False, f"{cls.__name__}: cls(*{cls_args}) raised {e}"
+        args = test_inst.test_args(input_args)
+        assert len(args) == len(schema_arg_types), \
+            f"{cls.__name__}.test_args returns {len(args)} args but custom op expects {len(schema_arg_types)}"
+        for i, (arg, schema_type_str) in enumerate(zip(args, schema_arg_types)):
+            expected_type = SCHEMA_TYPE_MAP.get(schema_type_str)
+            if expected_type is not None:
+                assert isinstance(arg, expected_type), \
+                    f"{cls.__name__}.test_args()[{i}] is {type(arg).__name__} but custom op expects {schema_type_str}"
+
+    # test_args works for all test_cases and bench_cases
+
+    for label, cases in [("test_cases", cls.test_cases), ("bench_cases", cls.bench_cases)]:
+        for j, (cls_args, input_args) in enumerate(cases):
+            try:
+                case_inst = cls(*cls_args)
+            except Exception as e:
+                assert False, f"{cls.__name__}.{label}[{j}]: cls(*{cls_args}) raised {e}"
+            try:
+                args = case_inst.test_args(input_args)
+            except Exception as e:
+                assert False, f"{cls.__name__}.{label}[{j}]: test_args({input_args}) raised {e}"
+            assert isinstance(args, tuple), \
+                f"{cls.__name__}.{label}[{j}]: test_args must return tuple"
 
     # __repr__, __eq__, __hash__
 
