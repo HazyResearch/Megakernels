@@ -20,6 +20,8 @@ Two files:
 
 ### Python-side conventions
 
+- Do not define small utility functions that are only used once. Inline the logic instead.
+- Follow the code style of existing files as much as possible.
 - `__init__` must support a default constructor (no required args).
 - `test_cases` format: `[(cls_args_tuple, input_args_tuple), ...]`. `cls_args` is unpacked as `cls(*cls_args)`. The first test case should use the smallest valid shape to catch minimum-size edge cases.
 - Custom ops that take variable ops use comma-separated strings (torch custom ops don't support `list[str]`).
