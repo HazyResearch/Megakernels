@@ -132,7 +132,7 @@ class ElementwiseBinary(IType):
     @property
     def cpp_template(self) -> str:
         ops_str = ", ".join(self.BINARY_OPS[op][0] for op in self.ops)
-        return f"ElementwiseBinary<MKConfig, MKGlobals, BinaryOpList<{ops_str}>, {{tensors}}>"
+        return f"ElementwiseBinary<MKConfig, MKGlobals, BinaryOps<{ops_str}>, {{tensors}}>"
 
     @property
     def inputs(self) -> list[TensorSpec]:
