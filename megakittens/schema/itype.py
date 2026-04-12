@@ -73,8 +73,9 @@ class IType(ABC):
 
     @property
     def cpp_include(self) -> str:
-        """Default: ``itypes/<name>.cuh``. Override if different."""
-        return f"itypes/{self.name}.cuh"
+        """Default: ``itypes/<name>.cuh`` or ``itypes/<subdir>/<name>.cuh``."""
+        relative_module_name = type(self).__module__.split("megakittens.itypes.")[-1]
+        return f"itypes/{relative_module_name.replace('.', '/')}.cuh"
 
     @property
     @abstractmethod
