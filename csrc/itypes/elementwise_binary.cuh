@@ -67,7 +67,8 @@ struct ElementwiseBinary {
     static_assert(NUM_OPS >= 1);
     static_assert(sizeof...(TensorIndices) == NUM_INPUTS + 1, "Need N + 1 tensor indices for N ops (N inputs + 1 output)");
     static constexpr int DST = last_int<TensorIndices...>::value;
-    static constexpr int TILES_PER_INST = Config::NUM_PAGES / NUM_INPUTS;
+    static constexpr int MAX_TILES_PER_INST = 2;
+    static constexpr int TILES_PER_INST = (Config::NUM_PAGES / NUM_INPUTS < MAX_TILES_PER_INST) ? Config::NUM_PAGES / NUM_INPUTS : MAX_TILES_PER_INST;
     static_assert(TILES_PER_INST >= 1, "Not enough pages for this many inputs");
 
     using tile_t = kittens::st<kittens::bf16, 128, 128>;

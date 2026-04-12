@@ -54,7 +54,7 @@ def _resolve_rsqrt(args, kwargs):
 
 class ElementwiseUnary(IType):
     TILE_SIZE = 128
-    TILES_PER_INST = 7
+    MAX_TILES_PER_INST = 2
     TMA = st(dtype=DType.bf16, rows=128, cols=128)
 
     UNARY_OPS = {
@@ -151,8 +151,8 @@ class ElementwiseUnary(IType):
         for b in range(B):
             for d in range(D):
                 for r in range(R):
-                    for c in range(0, C, self.TILES_PER_INST):
-                        n = min(self.TILES_PER_INST, C - c)
+                    for c in range(0, C, self.MAX_TILES_PER_INST):
+                        n = min(self.MAX_TILES_PER_INST, C - c)
                         indices.append((b, d, r, c, n))
         return indices
 
@@ -160,7 +160,7 @@ class ElementwiseUnary(IType):
         B, D, _R, _C = (1,) * (4 - len(dst_metas[0].shape)) + dst_metas[0].shape
         R = _R // self.TILE_SIZE
         C = _C // self.TILE_SIZE
-        return B * D * R * ((C + self.TILES_PER_INST - 1) // self.TILES_PER_INST)
+        return B * D * R * ((C + self.MAX_TILES_PER_INST - 1) // self.MAX_TILES_PER_INST)
 
     def access_regions(self, block_index, src_metas, dst_metas):
         b, d, r, c, n = block_index

@@ -35,7 +35,8 @@ __device__ static __forceinline__ void apply_unary_op(RT &reg) {
 
 template <typename Config, typename Globals, int SRC, int DST, UnaryOp... Ops>
 struct ElementwiseUnary {
-    static constexpr int NUM_USED_PAGES = Config::NUM_PAGES; // 1 page per tile
+    static constexpr int MAX_TILES_PER_INST = 2;
+    static constexpr int NUM_USED_PAGES = (Config::NUM_PAGES < MAX_TILES_PER_INST) ? Config::NUM_PAGES : MAX_TILES_PER_INST;
 
     using tile_t = kittens::st<kittens::bf16, 128, 128>;
 

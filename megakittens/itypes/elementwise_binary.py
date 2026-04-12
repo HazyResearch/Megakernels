@@ -52,6 +52,7 @@ def _resolve_atan2(args, kwargs):
 
 class ElementwiseBinary(IType):
     TILE_SIZE = 128
+    MAX_TILES_PER_INST = 2
     TMA = st(dtype=DType.bf16, rows=128, cols=128)
 
     BINARY_OPS = {
@@ -121,7 +122,7 @@ class ElementwiseBinary(IType):
 
     @property
     def tiles_per_inst(self) -> int:
-        return Dispatcher.NUM_PAGES // self.num_inputs
+        return min(Dispatcher.NUM_PAGES // self.num_inputs, self.MAX_TILES_PER_INST)
 
     def test_args(self, case: tuple) -> tuple:
         tensors = []
