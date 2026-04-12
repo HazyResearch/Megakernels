@@ -32,7 +32,7 @@ def check(
     expected = fn(*args)
 
     for global_work_queue in [True, False]:
-        compiled_fn = megakittens.compile(fn, use_jit_cache=False, save_dag=False, save_schedule=False, verbose=False, global_work_queue=global_work_queue)
+        compiled_fn = megakittens.compile(fn, use_jit_cache=True, save_dag=False, save_schedule=False, verbose=False, global_work_queue=global_work_queue)
         result = compiled_fn(*args)
 
         diff = (result - expected).abs()
