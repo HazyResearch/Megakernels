@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from typing import Dict, List, Tuple
+import itertools
+from collections import defaultdict
+from functools import reduce
+from math import gcd
+from typing import Any, Dict, List, Tuple
 
 from .dispatcher import Dispatcher
 from .utils import timed
@@ -152,15 +156,6 @@ def _assign_barriers(
         - inst_num_reuse_barriers: Dict[Tuple[int, int], int], (node_id, local_inst_idx) -> how many of src_barriers are tensor reuse barriers.
         - barrier_counter: int, total number of barriers allocated.
     """
-    def regions_overlap(a: tuple[tuple[int, int], ...], b: tuple[tuple[int, int], ...]) -> bool:
-        """True if two axis-aligned bounding boxes overlap in all dimensions."""
-        if len(a) != len(b):
-            raise RuntimeError("[MegaKittens] Bounding boxes have different dimensionalities.")
-        for (a_start, a_end), (b_start, b_end) in zip(a, b):
-            if a_end <= b_start or b_end <= a_start:
-                return False
-        return True
-
     barrier_counter = 0
 
     # Per-instruction barriers, keyed by (node_id, local_inst_idx)
@@ -188,23 +183,41 @@ def _assign_barriers(
     for node in dag.nodes:
         if node.is_input or node.is_output:
             continue
-        for edge_idx, (in_node, slot_idx) in enumerate(node.in_nodes):
+        for edge_idx, (in_node, slot_idx) in enumerate(node.in_nodes):  # Combined with the outer loop, O(num_edges)
             if in_node.is_input or in_node.is_output:
                 continue
 
-            producer_regions = node_regions[in_node.id]
-            consumer_regions = node_regions[node.id]
+            # Collect all regions produced/consumed by this edge
+            producer_regions = [dst_regions[slot_idx] for _, dst_regions in node_regions[in_node.id]]
+            consumer_regions = [src_regions[edge_idx] for src_regions, _ in node_regions[node.id]]
 
-            # For each consumer instruction, find which producer instructions it depends on
-            for c_local_index, (c_src_regions, c_dst_regions) in enumerate(consumer_regions):
-                c_region = c_src_regions[edge_idx]
-                dependent_p_local_indices = set()
-                for p_block_idx, (p_src_regions, p_dst_regions) in enumerate(producer_regions):  # TODO: these loops are extremely inefficient atm
-                    p_region = p_dst_regions[slot_idx]
-                    if regions_overlap(c_region, p_region):
-                        dependent_p_local_indices.add(p_block_idx)
-                dependent_p_local_indices_set = frozenset(dependent_p_local_indices)
-                dependency_map.setdefault((in_node.id, dependent_p_local_indices_set), {}).setdefault(node.id, []).append(c_local_index)
+            ndim = len(producer_regions[0])
+            unit_region: List[int] = []
+            for d in range(ndim):
+                all_sizes = set[Any]()
+                for region in producer_regions:
+                    all_sizes.add(region[d][1] - region[d][0])
+                for region in consumer_regions:
+                    all_sizes.add(region[d][1] - region[d][0])
+                unit_region.append(reduce(gcd, all_sizes))
+
+            unit_region_index_to_p_local_index: Dict[tuple, List[int]] = defaultdict(list)
+            for p_local_index, region in enumerate(producer_regions):
+                unit_region_indices = itertools.product(*[range(region[d][0] // unit_region[d], region[d][1] // unit_region[d]) for d in range(ndim)])
+                for unit_region_index in unit_region_indices:
+                    unit_region_index_to_p_local_index[unit_region_index].append(p_local_index)
+
+            c_region_cache: Dict[tuple, frozenset[int]] = {}
+            for c_local_index, region in enumerate(consumer_regions):
+                if region not in c_region_cache:
+                    unit_region_indices = itertools.product(*[range(region[d][0] // unit_region[d], region[d][1] // unit_region[d]) for d in range(ndim)])
+                    matching_p_local_indices: set[int] = set()
+                    for unit_region_index in itertools.product(*unit_region_indices):
+                        if unit_region_index not in unit_region_index_to_p_local_index:
+                            raise RuntimeError("[MegaKittens] Matching producer region not found.")
+                        matching_p_local_indices.update(unit_region_index_to_p_local_index[unit_region_index])
+                    c_region_cache[region] = frozenset(matching_p_local_indices)
+                dependency_map.setdefault((in_node.id, c_region_cache[region]), {}).setdefault(node.id, []).append(c_local_index)
 
     # Each unique (producer_node_id, dependency set) becomes one barrier
     for (producer_id, dependent_p_local_indices_set), consumers_by_node in dependency_map.items():
