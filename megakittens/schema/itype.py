@@ -74,8 +74,8 @@ class IType(ABC):
     @property
     def cpp_include(self) -> str:
         """Default: ``itypes/<name>.cuh`` or ``itypes/<subdir>/<name>.cuh``."""
-        relative_module_name = type(self).__module__.split("megakittens.itypes.")[-1]
-        return f"itypes/{relative_module_name.replace('.', '/')}.cuh"
+        name = type(self).__module__.removeprefix("megakittens.itypes.").replace(".", "/")
+        return f"itypes/{name}.cuh"
 
     @property
     @abstractmethod
