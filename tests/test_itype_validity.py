@@ -147,37 +147,20 @@ def check_validity(inst):
         cls_args, input_args = cls.test_cases[0]
         test_inst = cls(*cls_args)
         args = test_inst.test_args(input_args)
-        device = megakittens.schema.device.Device(type="cuda", index=0)
         test_src_metas = []
         for arg in args:
             if isinstance(arg, torch.Tensor):
-                test_src_metas.append(megakittens.schema.tensor.TensorMeta(
-                    dtype=megakittens.schema.dtype.DType.from_torch(arg.dtype),
-                    shape=tuple(arg.shape),
-                    device=device,
-                ))
+                test_src_metas.append(megakittens.schema.tensor.TensorMeta.from_torch(arg))
             elif isinstance(arg, Iterable):
                 for t in arg:
                     if isinstance(t, torch.Tensor):
-                        test_src_metas.append(megakittens.schema.tensor.TensorMeta(
-                            dtype=megakittens.schema.dtype.DType.from_torch(t.dtype),
-                            shape=tuple(t.shape),
-                            device=device,
-                        ))
+                        test_src_metas.append(megakittens.schema.tensor.TensorMeta.from_torch(t))
         ref_result = test_inst.test_fn(*args)
         if isinstance(ref_result, torch.Tensor):
-            test_dst_metas = (megakittens.schema.tensor.TensorMeta(
-                dtype=megakittens.schema.dtype.DType.from_torch(ref_result.dtype),
-                shape=tuple(ref_result.shape),
-                device=device,
-            ),)
+            test_dst_metas = (megakittens.schema.tensor.TensorMeta.from_torch(ref_result),)
         elif isinstance(ref_result, Iterable):
             test_dst_metas = tuple(
-                megakittens.schema.tensor.TensorMeta(
-                    dtype=megakittens.schema.dtype.DType.from_torch(t.dtype),
-                    shape=tuple(t.shape),
-                    device=device,
-                ) for t in ref_result if isinstance(t, torch.Tensor)
+                megakittens.schema.tensor.TensorMeta.from_torch(t) for t in ref_result if isinstance(t, torch.Tensor)
             )
         else:
             test_dst_metas = ()

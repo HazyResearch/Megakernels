@@ -10,8 +10,6 @@ from torch.fx.passes.shape_prop import TensorMetadata
 
 from .schema.dag import DAG, Node
 from .schema.itype import IType
-from .schema.device import Device
-from .schema.dtype import DType
 from .schema.tensor import TensorMeta
 from .dispatcher import Dispatcher
 from .scheduler import schedule
@@ -41,54 +39,6 @@ def _resolve_itype(gm: torch.fx.GraphModule, node: torch.fx.Node) -> tuple[IType
     return result, []
 
 
-def _tensor_to_mk_tensor(node: torch.fx.Node, value: torch.Tensor) -> TensorMeta:
-    if not value.is_contiguous():
-        raise RuntimeError(
-            f"[MegaKittens] Tensor for node '{node.name}' must be contiguous"
-        )
-    shape = tuple[int, ...](int(dim) for dim in value.shape)
-    dtype = DType.from_torch(value.dtype)
-    device = Device.from_torch(value.device)
-    return TensorMeta(dtype=dtype, shape=shape, device=device)
-
-
-def _is_contiguous(shape: tuple[int, ...], strides: tuple[int, ...]) -> bool:
-    """Check if strides correspond to a contiguous (row-major) layout."""
-    ndim = len(shape)
-    if ndim == 0:
-        return True
-    expected = 1
-    for i in range(ndim - 1, -1, -1):
-        if shape[i] != 1 and strides[i] != expected:
-            return False
-        expected *= shape[i]
-    return True
-
-
-def _tensor_meta_to_mk_tensor(
-    node: torch.fx.Node,
-    tensor_meta: TensorMetadata,
-    fallback_device: torch.device | None = None,
-) -> TensorMeta:
-    if tensor_meta.stride is not None and not _is_contiguous(
-        tuple[int, ...](tensor_meta.shape), tuple(tensor_meta.stride)
-    ):
-        raise RuntimeError(
-            f"[MegaKittens] Tensor for node '{node.name}' must be contiguous"
-        )
-    if tensor_meta.dtype is None:
-        raise RuntimeError(f"[MegaKittens] Missing tensor metadata dtype for node '{node.name}'")
-    shape = tuple[int, ...](int(dim) for dim in tensor_meta.shape)
-    dtype = DType.from_torch(tensor_meta.dtype)
-    tensor_meta_device = getattr(tensor_meta, "device", None)
-    if tensor_meta_device is None:
-        tensor_meta_device = fallback_device
-    if tensor_meta_device is None:
-        raise RuntimeError(f"[MegaKittens] Missing tensor metadata device for node '{node.name}'")
-    device = Device.from_torch(tensor_meta_device)
-    return TensorMeta(dtype=dtype, shape=shape, device=device)
-
-
 def _get_output_tensors(node: torch.fx.Node, aten_output_indices: list[int] = []) -> tuple[TensorMeta, ...]:
     if "tensor_meta" in node.meta:
         tensor_meta = node.meta["tensor_meta"]
@@ -96,7 +46,7 @@ def _get_output_tensors(node: torch.fx.Node, aten_output_indices: list[int] = []
         if isinstance(tensor_meta, (tuple, list)):
             if all(isinstance(tm, TensorMetadata) for tm in tensor_meta):
                 if val is None:
-                    return tuple(_tensor_meta_to_mk_tensor(node, tm) for tm in tensor_meta)
+                    return tuple(TensorMeta.from_torch(tm) for tm in tensor_meta)
 
                 elif isinstance(val, torch.Tensor):
                     if len(tensor_meta) != 1:
@@ -104,7 +54,7 @@ def _get_output_tensors(node: torch.fx.Node, aten_output_indices: list[int] = []
                             f"[MegaKittens] Node '{node.name}' has {len(tensor_meta)} tensor metadata outputs"
                             f" but single Tensor 'val' provided"
                         )
-                    return (_tensor_meta_to_mk_tensor(node, tensor_meta[0], fallback_device=val.device),)
+                    return (TensorMeta.from_torch(tensor_meta[0], fallback_device=val.device),)
 
                 if not isinstance(val, (tuple, list)):
                     raise RuntimeError(
@@ -123,16 +73,12 @@ def _get_output_tensors(node: torch.fx.Node, aten_output_indices: list[int] = []
                     )
 
                 return tuple(
-                    _tensor_meta_to_mk_tensor(
-                        node,
-                        tm,
-                        fallback_device=val[idx].device,
-                    )
+                    TensorMeta.from_torch(tm, fallback_device=val[idx].device)
                     for idx, tm in enumerate(tensor_meta)
                 )
 
             elif isinstance(val, torch.Tensor):
-                return (_tensor_to_mk_tensor(node, val),)
+                return (TensorMeta.from_torch(val),)
 
             else:
                 raise RuntimeError(
@@ -147,7 +93,7 @@ def _get_output_tensors(node: torch.fx.Node, aten_output_indices: list[int] = []
                     f" but 'val' is not a Tensor (type={type(val).__name__})"
                 )
             fallback_device = val.device if isinstance(val, torch.Tensor) else None
-            return (_tensor_meta_to_mk_tensor(node, tensor_meta, fallback_device=fallback_device),)
+            return (TensorMeta.from_torch(tensor_meta, fallback_device=fallback_device),)
         raise RuntimeError(
             f"[MegaKittens] Unsupported tensor_meta type for node '{node.name}'"
             f" (type={type(tensor_meta).__name__})"
@@ -169,7 +115,7 @@ def _get_output_tensors(node: torch.fx.Node, aten_output_indices: list[int] = []
                             f"[MegaKittens] Non-tensor entry at index {i} in node metadata for node '{node.name}'"
                             f" (type={type(value[i]).__name__})"
                         )
-                    tensors.append(_tensor_to_mk_tensor(node, value[i]))
+                    tensors.append(TensorMeta.from_torch(value[i]))
                 return tuple(tensors)
             else:
                 for v in value:
@@ -178,10 +124,10 @@ def _get_output_tensors(node: torch.fx.Node, aten_output_indices: list[int] = []
                             f"[MegaKittens] Non-tensor entry in node metadata for node '{node.name}'"
                             f" (indexed entry type={type(v).__name__})"
                         )
-                    tensors.append(_tensor_to_mk_tensor(node, v))
+                    tensors.append(TensorMeta.from_torch(v))
             return tuple(tensors)
         elif isinstance(value, torch.Tensor):
-            return (_tensor_to_mk_tensor(node, value),)
+            return (TensorMeta.from_torch(value),)
         else:
             raise RuntimeError(
                 f"[MegaKittens] Node metadata is not a Tensor for node '{node.name}'"
@@ -308,7 +254,7 @@ def fx_graph_to_mk_dag(
             example_input = example_inputs[_input_index]
             _input_index += 1
             if isinstance(example_input, torch.Tensor):
-                out_tensors = (_tensor_to_mk_tensor(node, example_input),)
+                out_tensors = (TensorMeta.from_torch(example_input),)
             else:
                 raise RuntimeError("[MegaKittens] Non-tensor inputs are not supported")
 
@@ -320,7 +266,7 @@ def fx_graph_to_mk_dag(
             except Exception:
                 raise RuntimeError("[MegaKittens] Invalid get_attr node")
             if isinstance(attr, torch.Tensor):
-                out_tensors = (_tensor_to_mk_tensor(node, attr),)
+                out_tensors = (TensorMeta.from_torch(attr),)
             else:
                 raise RuntimeError("[MegaKittens] Non-tensor attributes are not supported")
 
