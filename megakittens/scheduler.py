@@ -212,7 +212,7 @@ def _assign_barriers(
                 if region not in c_region_cache:
                     unit_region_indices = itertools.product(*[range(region[d][0] // unit_region[d], region[d][1] // unit_region[d]) for d in range(ndim)])
                     matching_p_local_indices: set[int] = set()
-                    for unit_region_index in itertools.product(*unit_region_indices):
+                    for unit_region_index in unit_region_indices:
                         if unit_region_index not in unit_region_index_to_p_local_index:
                             raise RuntimeError("[MegaKittens] Matching producer region not found.")
                         matching_p_local_indices.update(unit_region_index_to_p_local_index[unit_region_index])
