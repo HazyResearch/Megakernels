@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Dict, List, Tuple
 
 from .dispatcher import Dispatcher
+from .utils import timed
 from .itypes.noop import Noop
 from .jit.cuda_utils import get_sm_count
 from .schema.dag import DAG
@@ -335,6 +336,7 @@ def _generate_instructions(
 
 def schedule(
     dag: DAG,
+    verbose: bool = True,
 ) -> Tuple[List[InstructionMeta], List[TensorMeta], List[Instruction], int, Tuple[int, ...], Tuple[int, ...]]:
     """Convert a validated DAG into a minimal set of tensors, barriers, and a flat per-SM instruction list.
 
@@ -350,10 +352,14 @@ def schedule(
         - input_tensor_indices: Tuple[int, ...], tensor_metas indices for graph inputs, in order.
         - output_tensor_indices: Tuple[int, ...], tensor_metas indices for graph outputs, in order.
     """
-    node_inst_count, node_inst_offset = _get_instruction_count_and_offset(dag)
-    tensor_metas, tensor_index, input_tensor_indices, output_tensor_indices, release_barriers = _assign_tensors(dag, node_inst_count, node_inst_offset)
-    node_block_indices, inst_dst_barriers, inst_src_barriers, inst_num_input_barriers, inst_num_reuse_barriers, barrier_counter = _assign_barriers(dag, node_inst_count, release_barriers)
-    instruction_metas, instructions = _generate_instructions(dag, tensor_index, node_block_indices, inst_dst_barriers, inst_src_barriers, inst_num_input_barriers, inst_num_reuse_barriers)
+    with timed("  Counted instructions and offsets", verbose):
+        node_inst_count, node_inst_offset = _get_instruction_count_and_offset(dag)
+    with timed("  Assigned tensors", verbose):
+        tensor_metas, tensor_index, input_tensor_indices, output_tensor_indices, release_barriers = _assign_tensors(dag, node_inst_count, node_inst_offset)
+    with timed("  Assigned barriers", verbose):
+        node_block_indices, inst_dst_barriers, inst_src_barriers, inst_num_input_barriers, inst_num_reuse_barriers, barrier_counter = _assign_barriers(dag, node_inst_count, release_barriers)
+    with timed("  Generated instructions", verbose):
+        instruction_metas, instructions = _generate_instructions(dag, tensor_index, node_block_indices, inst_dst_barriers, inst_src_barriers, inst_num_input_barriers, inst_num_reuse_barriers)
 
     return (
         instruction_metas,

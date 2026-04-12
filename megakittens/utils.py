@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import contextlib
 import itertools
 import json
 import re
+import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 
@@ -11,6 +13,17 @@ from .schema.tensor import TensorMeta
 from .schema.instruction import Instruction, InstructionMeta
 
 _LOG_DUMP_COUNTER = itertools.count()
+
+
+@contextlib.contextmanager
+def timed(msg: str, enable: bool):
+    if enable:
+        t0 = time.perf_counter()
+        yield
+        t1 = time.perf_counter()
+        print(f"[MegaKittens] {msg} ({(t1 - t0) * 1000:.1f} ms)")
+    else:
+        yield
 
 
 def create_log_base_path(fn: Callable[..., Any]) -> Path:
