@@ -54,6 +54,12 @@ def check_validity(inst):
         assert hasattr(cls, "test_fn") and callable(cls.test_fn), f"{cls.__name__} needs test_fn"
         assert hasattr(cls, "test_args") and callable(cls.test_args), f"{cls.__name__} needs test_args"
 
+    # Non-noop itypes must have at least 1 test case and 1 bench case
+
+    if cls.__name__ != "Noop":
+        assert len(cls.test_cases) >= 1, f"{cls.__name__} must have at least 1 test case"
+        assert len(cls.bench_cases) >= 1, f"{cls.__name__} must have at least 1 bench case"
+
     # Property return types
 
     name = inst.name
