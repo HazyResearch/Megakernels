@@ -25,7 +25,7 @@ def mlp(
 
 
 def benchmark_mlp() -> None:
-    print("3-layer MLP: relu(Wx+b) x3 (bf16)")
+    print("8-layer MLP (bf16)")
     print(f"{'(M, H)':>15}  {'MK (us)':>10}  {'PT (us)':>10}  {'ratio':>7}")
     print("-" * 50)
 
