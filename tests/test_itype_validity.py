@@ -1,4 +1,5 @@
 import sys
+from collections.abc import Iterable
 
 import re
 
@@ -139,6 +140,96 @@ def check_validity(inst):
                             f"{cls.__name__}.access_regions {region_label}[{ri}][{d}] start >= end"
     except (RuntimeError, IndexError, ZeroDivisionError):
         pass
+
+    # access_regions: dimensionality consistency and granularity match across all block indices
+
+    if cls.test_cases:
+        cls_args, input_args = cls.test_cases[0]
+        test_inst = cls(*cls_args)
+        args = test_inst.test_args(input_args)
+        device = megakittens.schema.device.Device(type="cuda", index=0)
+        test_src_metas = []
+        for arg in args:
+            if isinstance(arg, torch.Tensor):
+                test_src_metas.append(megakittens.schema.tensor.TensorMeta(
+                    dtype=megakittens.schema.dtype.DType.from_torch(arg.dtype),
+                    shape=tuple(arg.shape),
+                    device=device,
+                ))
+            elif isinstance(arg, Iterable):
+                for t in arg:
+                    if isinstance(t, torch.Tensor):
+                        test_src_metas.append(megakittens.schema.tensor.TensorMeta(
+                            dtype=megakittens.schema.dtype.DType.from_torch(t.dtype),
+                            shape=tuple(t.shape),
+                            device=device,
+                        ))
+        ref_result = test_inst.test_fn(*args)
+        if isinstance(ref_result, torch.Tensor):
+            test_dst_metas = (megakittens.schema.tensor.TensorMeta(
+                dtype=megakittens.schema.dtype.DType.from_torch(ref_result.dtype),
+                shape=tuple(ref_result.shape),
+                device=device,
+            ),)
+        elif isinstance(ref_result, Iterable):
+            test_dst_metas = tuple(
+                megakittens.schema.tensor.TensorMeta(
+                    dtype=megakittens.schema.dtype.DType.from_torch(t.dtype),
+                    shape=tuple(t.shape),
+                    device=device,
+                ) for t in ref_result if isinstance(t, torch.Tensor)
+            )
+        else:
+            test_dst_metas = ()
+
+        assert len(test_src_metas) == len(test_inst.inputs), \
+            f"{cls.__name__}: test_args produced {len(test_src_metas)} tensor args, expected {len(test_inst.inputs)} inputs"
+        assert len(test_dst_metas) == len(test_inst.outputs), \
+            f"{cls.__name__}: test_fn produced {len(test_dst_metas)} tensor outputs, expected {len(test_inst.outputs)} outputs"
+
+        block_idx_list = test_inst.block_indices(test_src_metas, test_dst_metas)
+        min_src_ndims = [len(spec.granularity) for spec in test_inst.inputs]
+        min_dst_ndims = [len(spec.granularity) for spec in test_inst.outputs]
+        first_src, first_dst = test_inst.access_regions(block_idx_list[0], test_src_metas, test_dst_metas)
+        ref_src_ndims = [len(r) for r in first_src]
+        ref_dst_ndims = [len(r) for r in first_dst]
+
+        for bi, block_index in enumerate(block_idx_list):
+            src_regions, dst_regions = test_inst.access_regions(block_index, test_src_metas, test_dst_metas)
+
+            assert len(src_regions) == len(test_inst.inputs), \
+                f"{cls.__name__} block {bi}: src_regions count {len(src_regions)} != inputs count {len(test_inst.inputs)}"
+            assert len(dst_regions) == len(test_inst.outputs), \
+                f"{cls.__name__} block {bi}: dst_regions count {len(dst_regions)} != outputs count {len(test_inst.outputs)}"
+
+            for ri, (region, spec) in enumerate(zip(src_regions, test_inst.inputs)):
+                assert len(region) >= min_src_ndims[ri], \
+                    f"{cls.__name__} block {bi}: src_regions[{ri}] has {len(region)} dims, " \
+                    f"fewer than inputs[{ri}].granularity ndim {min_src_ndims[ri]}"
+                assert len(region) == ref_src_ndims[ri], \
+                    f"{cls.__name__} block {bi}: src_regions[{ri}] has {len(region)} dims, " \
+                    f"expected {ref_src_ndims[ri]} (consistent with block 0)"
+                offset = len(region) - len(spec.granularity)
+                for d, gran in enumerate(spec.granularity):
+                    start, end = region[offset + d]
+                    assert start % gran == 0, \
+                        f"{cls.__name__} block {bi}: src_regions[{ri}] dim {offset + d} start {start} not divisible by granularity {gran}"
+                    assert (end - start) % gran == 0, \
+                        f"{cls.__name__} block {bi}: src_regions[{ri}] dim {offset + d} size {end - start} not divisible by granularity {gran}"
+            for ri, (region, spec) in enumerate(zip(dst_regions, test_inst.outputs)):
+                assert len(region) >= min_dst_ndims[ri], \
+                    f"{cls.__name__} block {bi}: dst_regions[{ri}] has {len(region)} dims, " \
+                    f"fewer than outputs[{ri}].granularity ndim {min_dst_ndims[ri]}"
+                assert len(region) == ref_dst_ndims[ri], \
+                    f"{cls.__name__} block {bi}: dst_regions[{ri}] has {len(region)} dims, " \
+                    f"expected {ref_dst_ndims[ri]} (consistent with block 0)"
+                offset = len(region) - len(spec.granularity)
+                for d, gran in enumerate(spec.granularity):
+                    start, end = region[offset + d]
+                    assert start % gran == 0, \
+                        f"{cls.__name__} block {bi}: dst_regions[{ri}] dim {offset + d} start {start} not divisible by granularity {gran}"
+                    assert (end - start) % gran == 0, \
+                        f"{cls.__name__} block {bi}: dst_regions[{ri}] dim {offset + d} size {end - start} not divisible by granularity {gran}"
 
     # validate() returns None
 
