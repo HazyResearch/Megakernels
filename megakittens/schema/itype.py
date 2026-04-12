@@ -146,44 +146,45 @@ class IType(ABC):
         ...
 
     @classmethod
-    def _resolve(cls, mapping: dict, key, args, kwargs, label: str):
-        if key not in mapping:
-            raise RuntimeError(f"[MegaKittens] Unsupported {label}: {key!r}")
-        entry = mapping[key]
+    def from_torch(cls, target: Callable | str | type, args=(), kwargs={}) -> "IType | tuple[IType, list[int]]":
+        if isinstance(target, str):
+            mapping = _CALL_METHOD_MAP
+            label = "call_method target"
+        elif isinstance(target, type):
+            mapping = _CALL_MODULE_MAP
+            label = "module type"
+        elif callable(target):
+            mapping = _CALL_FUNCTION_MAP
+            label = "call_function target"
+        else:
+            raise TypeError(f"[MegaKittens] Cannot resolve IType from {type(target).__name__}")
+
+        if target not in mapping:
+            raise RuntimeError(f"[MegaKittens] Unsupported {label}: {target!r}")
+        entry = mapping[target]
+
         if isinstance(entry, list):
             for resolver in entry:
                 if not callable(resolver):
-                    raise RuntimeError(f"[MegaKittens] Resolver for {label} {key!r} is not callable: {resolver!r}")
+                    raise RuntimeError(f"[MegaKittens] Resolver for {label} {target!r} is not callable: {resolver!r}")
                 result = resolver(args, kwargs)
                 if result is None:
                     continue
                 if isinstance(result, tuple):
                     if len(result) != 2 or not isinstance(result[0], IType) or not isinstance(result[1], list):
                         raise RuntimeError(
-                            f"[MegaKittens] Resolver for {label} {key!r} returned invalid tuple: {result!r}"
+                            f"[MegaKittens] Resolver for {label} {target!r} returned invalid tuple: {result!r}"
                         )
                 elif not isinstance(result, IType):
                     raise RuntimeError(
-                        f"[MegaKittens] Resolver for {label} {key!r} returned invalid type: {type(result).__name__}"
+                        f"[MegaKittens] Resolver for {label} {target!r} returned invalid type: {type(result).__name__}"
                     )
                 return result
-            raise RuntimeError(f"[MegaKittens] No matching resolver for {label}: {key!r}")
+            raise RuntimeError(f"[MegaKittens] No matching resolver for {label}: {target!r}")
         else:
             if not isinstance(entry, IType):
-                raise RuntimeError(f"[MegaKittens] Invalid entry for {label} {key!r}: expected IType, got {type(entry).__name__}")
+                raise RuntimeError(f"[MegaKittens] Invalid entry for {label} {target!r}: expected IType, got {type(entry).__name__}")
             return entry
-
-    @classmethod
-    def from_call_function(cls, target, args=(), kwargs={}):
-        return cls._resolve(_CALL_FUNCTION_MAP, target, args, kwargs, "call_function target")
-
-    @classmethod
-    def from_call_method(cls, target_str: str, args=(), kwargs={}):
-        return cls._resolve(_CALL_METHOD_MAP, target_str, args, kwargs, "call_method target")
-
-    @classmethod
-    def from_call_module(cls, module_type: type, args=(), kwargs={}):
-        return cls._resolve(_CALL_MODULE_MAP, module_type, args, kwargs, "module type")
 
     @property
     def _id(self) -> tuple:

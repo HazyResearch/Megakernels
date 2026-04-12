@@ -18,17 +18,18 @@ from .utils import create_log_base_path, save_dag_as_png, save_dag_as_png_as_jso
 
 def _resolve_itype(gm: torch.fx.GraphModule, node: torch.fx.Node) -> tuple[IType, list[int]]:
     if node.op == "call_function":
-        result = IType.from_call_function(node.target, args=node.args, kwargs=node.kwargs)
+        target = node.target
     elif node.op == "call_method":
-        result = IType.from_call_method(node.target, args=node.args, kwargs=node.kwargs)
+        target = node.target
     elif node.op == "call_module":
         try:
             module = gm.get_submodule(node.target)
         except Exception:
             raise RuntimeError(f"[MegaKittens] Invalid call_module node '{node.name}' target={node.target!r}")
-        result = IType.from_call_module(type(module), args=node.args, kwargs=node.kwargs)
+        target = type(module)
     else:
         raise RuntimeError(f"[MegaKittens] Unsupported node op '{node.op}' for node '{node.name}'")
+    result = IType.from_torch(target, args=node.args, kwargs=node.kwargs)
     if isinstance(result, tuple):
         itype, aten_output_indices = result
         if not isinstance(itype, IType) or not isinstance(aten_output_indices, list):
