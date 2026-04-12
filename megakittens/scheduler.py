@@ -4,7 +4,7 @@ import itertools
 from collections import defaultdict
 from functools import reduce
 from math import gcd
-from typing import Any, Dict, List, Tuple
+from typing import Dict, List, Tuple
 
 from .dispatcher import Dispatcher
 from .utils import timed
@@ -194,7 +194,7 @@ def _assign_barriers(
             ndim = len(producer_regions[0])
             unit_region: List[int] = []
             for d in range(ndim):
-                all_sizes = set[Any]()
+                all_sizes: set[int] = set()
                 for region in producer_regions:
                     all_sizes.add(region[d][1] - region[d][0])
                 for region in consumer_regions:
