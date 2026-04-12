@@ -410,7 +410,6 @@ def megakittens_backend(
     dry_run: bool = False,
     verify: bool = False,
     profile: bool = False,
-    debug: bool = False,
     save_dag: bool = False,
     save_schedule: bool = False,
     use_jit_cache: bool = True,
@@ -418,7 +417,7 @@ def megakittens_backend(
     global_work_queue: bool = False,
 ) -> Callable[[torch.fx.GraphModule, List[Any]], Callable[..., Any]]:
     def _megakittens_backend(gm: torch.fx.GraphModule, example_inputs: List[Any]) -> Callable[..., Any]:
-        if debug:
+        if verbose:
             print(f"[MegaKittens] Compiling function `{fn.__qualname__}`")
             print(f"[MegaKittens] FX graph:")
             gm.graph.print_tabular()
@@ -433,7 +432,7 @@ def megakittens_backend(
             utils.save_dag_as_png(dag_json, base_path)
 
         if dry_run:
-            if debug:
+            if verbose:
                 print(f"[MegaKittens] Dry run mode; returning original function")
             return make_boxed_func(gm)
 
