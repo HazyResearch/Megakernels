@@ -7,7 +7,7 @@
 
 namespace megakittens {
 
-template <typename Config, typename Globals, int N, int SRC_ACT, int SRC_NORM, int SRC_UP, int SRC_GATE, int DST>
+template <typename Config, typename Globals, int N, int SRC_ACT, int SRC_NORM, int SRC_UP, int SRC_GATE, int SCALAR_RMS_EPS, int DST>
 struct RmsUpgateSilu {
 
     struct parsed_instruction {
@@ -57,7 +57,7 @@ struct RmsUpgateSilu {
     };
 
     using pipeline = llama1b::rms_matvec_pipeline<
-        Config, Globals, N, parsed_instruction, pipeline_specifics, SRC_ACT, SRC_NORM>;
+        Config, Globals, N, parsed_instruction, pipeline_specifics, SRC_ACT, SRC_NORM, SCALAR_RMS_EPS>;
     static_assert(pipeline::OUTPUT_PIPELINE_STAGES == 3);
 
     struct controller {

@@ -230,7 +230,7 @@ struct matvec_pipeline {
 
 template <typename Config, typename Globals, int N,
           typename parsed_instruction, typename pipeline_specifics,
-          int SRC_ACT, int SRC_NORM>
+          int SRC_ACT, int SRC_NORM, int SCALAR_RMS_EPS>
 struct rms_matvec_pipeline
     : public matvec_pipeline<Config, Globals, N, parsed_instruction, pipeline_specifics> {
 
@@ -310,7 +310,7 @@ struct rms_matvec_pipeline
         float *rms_scratch = reinterpret_cast<float *>(
             s.pages[pipeline::get_activation_page(s)].ptr(RMS_SCRATCH_OFFSET));
         activations_vec = llama1b::rms_norm<Config, N>(
-            activations_vec, rms_scale_smem, g.rms_norm_eps, rms_scratch);
+            activations_vec, rms_scale_smem, g.template gls<SCALAR_RMS_EPS>().raw_ptr[0], rms_scratch);
 
         kittens::warp::sync();
 

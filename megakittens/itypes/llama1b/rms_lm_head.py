@@ -53,11 +53,13 @@ class RmsLmHead(IType):
                            tma_types=[sv(dtype=DType.bf16, length=self._n)]),
                 TensorSpec(dtype=DType.bf16, granularity=(1, 1),                         # lm_head_weights
                            tma_types=[st(dtype=DType.bf16, rows=16, cols=512)]),
+                TensorSpec(dtype=DType.fp32, granularity=(1,)),                         # rms_norm_eps
             ]
         return [
             TensorSpec(dtype=DType.bf16, granularity=(1,)),
             TensorSpec(dtype=DType.bf16, granularity=(1,)),
             TensorSpec(dtype=DType.bf16, granularity=(1, 1)),
+            TensorSpec(dtype=DType.fp32, granularity=(1,)),
         ]
 
     @property
@@ -69,6 +71,12 @@ class RmsLmHead(IType):
 
     def block_indices(self, src_metas, dst_metas):
         return [()]
+
+    def test_args(self, case):
+        return ()
+
+    def access_regions(self, block_index, src_metas, dst_metas):
+        return [], []
 
     def validate(self, src_metas, dst_metas):
         x_meta = src_metas[0]

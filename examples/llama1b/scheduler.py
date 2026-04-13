@@ -7,16 +7,16 @@ matching the megakittens Instruction/InstructionMeta format.
 
 from __future__ import annotations
 
-from ..itypes.llama1b.attention_partial import AttentionPartial
-from ..itypes.noop import Noop
-from ..itypes.llama1b.matvec_adds import MatVecAdds
-from ..itypes.llama1b.rms_lm_head import RmsLmHead
-from ..itypes.llama1b.rms_qkv_rope_append import RmsQkvRopeAppend
-from ..itypes.llama1b.rms_upgate_silu import RmsUpgateSilu
-from ..schema.device import Device
-from ..schema.dtype import DType
-from ..schema.instruction import Instruction, InstructionMeta
-from ..schema.tensor import TensorMeta
+from megakittens.itypes.llama1b.attention_partial import AttentionPartial
+from megakittens.itypes.noop import Noop
+from megakittens.itypes.llama1b.matvec_adds import MatVecAdds
+from megakittens.itypes.llama1b.rms_lm_head import RmsLmHead
+from megakittens.itypes.llama1b.rms_qkv_rope_append import RmsQkvRopeAppend
+from megakittens.itypes.llama1b.rms_upgate_silu import RmsUpgateSilu
+from megakittens.schema.device import Device
+from megakittens.schema.dtype import DType
+from megakittens.schema.instruction import Instruction, InstructionMeta
+from megakittens.schema.tensor import TensorMeta
 
 
 # -- Llama-3.2-1B constants --------------------------------------------------
@@ -64,6 +64,9 @@ class T:
     V_CACHE = 15             # [NUM_LAYERS, MAX_SEQ_LEN, NUM_KV_HEADS, HEAD_DIM]
     ROPE_COS = 16            # [MAX_SEQ_LEN, HEAD_DIM]
     ROPE_SIN = 17            # [MAX_SEQ_LEN, HEAD_DIM]
+    POS_ID = 18              # [1] int32
+    ATTN_SCALE = 19          # [1] fp32
+    RMS_NORM_EPS = 20        # [1] fp32
 _TENSOR_COUNT = max(v for k, v in vars(T).items() if not k.startswith('_') and isinstance(v, int)) + 1
 T.COUNT = _TENSOR_COUNT
 
@@ -132,6 +135,9 @@ def _make_tensor_metas(device: Device) -> list[TensorMeta]:
     metas[T.V_CACHE] = TensorMeta(dtype=bf16, shape=(NUM_LAYERS, MAX_SEQ_LEN, NUM_KV_HEADS, HEAD_DIM), device=device)
     metas[T.ROPE_COS] = TensorMeta(dtype=fp32, shape=(MAX_SEQ_LEN, HEAD_DIM), device=device)
     metas[T.ROPE_SIN] = TensorMeta(dtype=fp32, shape=(MAX_SEQ_LEN, HEAD_DIM), device=device)
+    metas[T.POS_ID] = TensorMeta(dtype=DType.int32, shape=(1,), device=device)
+    metas[T.ATTN_SCALE] = TensorMeta(dtype=fp32, shape=(1,), device=device)
+    metas[T.RMS_NORM_EPS] = TensorMeta(dtype=fp32, shape=(1,), device=device)
 
     return metas
 
@@ -375,24 +381,27 @@ def schedule_decode(
         InstructionMeta(icode=ICODE_QKV, itype=_rms_qkv_itype,
                         src_tensors=(T.HIDDEN_STATES, T.ATTN_NORM_WEIGHTS,
                                      T.QKV_WEIGHTS, T.ROPE_COS, T.ROPE_SIN,
-                                     T.K_CACHE, T.V_CACHE),
+                                     T.K_CACHE, T.V_CACHE,
+                                     T.POS_ID, T.RMS_NORM_EPS),
                         dst_tensors=(T.Q_POST_ROPE,)),
         InstructionMeta(icode=ICODE_ATTENTION, itype=_attention_partial_itype,
-                        src_tensors=(T.Q_POST_ROPE, T.K_CACHE, T.V_CACHE),
+                        src_tensors=(T.Q_POST_ROPE, T.K_CACHE, T.V_CACHE,
+                                     T.POS_ID, T.ATTN_SCALE),
                         dst_tensors=(T.ATTN_OUT,)),
         InstructionMeta(icode=ICODE_O_PROJ, itype=_matvec_adds_itype,
                         src_tensors=(T.ATTN_OUT, T.O_WEIGHTS),
                         dst_tensors=(T.HIDDEN_STATES,)),
         InstructionMeta(icode=ICODE_UPGATE, itype=_rms_upgate_silu_itype,
                         src_tensors=(T.HIDDEN_STATES, T.MLP_NORM_WEIGHTS,
-                                     T.UP_WEIGHTS, T.GATE_WEIGHTS),
+                                     T.UP_WEIGHTS, T.GATE_WEIGHTS,
+                                     T.RMS_NORM_EPS),
                         dst_tensors=(T.SILU_OUT,)),
         InstructionMeta(icode=ICODE_DOWNPROJ, itype=_matvec_adds_itype,
                         src_tensors=(T.SILU_OUT, T.DOWN_WEIGHTS),
                         dst_tensors=(T.HIDDEN_STATES,)),
         InstructionMeta(icode=ICODE_LM_HEAD, itype=_rms_lm_head_itype,
                         src_tensors=(T.HIDDEN_STATES, T.LM_HEAD_NORM_WEIGHT,
-                                     T.LM_HEAD_WEIGHT),
+                                     T.LM_HEAD_WEIGHT, T.RMS_NORM_EPS),
                         dst_tensors=(T.LOGITS,)),
     ]
 

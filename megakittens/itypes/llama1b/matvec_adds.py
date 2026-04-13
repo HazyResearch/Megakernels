@@ -6,7 +6,7 @@ from ...schema.tensor import TensorSpec
 from ...jit.pykittens import sv, st
 
 
-@torch.library.custom_op("megakittens::matvec_adds", mutates_args=())
+@torch.library.custom_op("megakittens::mat_vec_adds", mutates_args=())
 def matvec_adds_op(
     x: torch.Tensor,
     down_weights: torch.Tensor,
@@ -68,6 +68,12 @@ class MatVecAdds(IType):
 
     def block_indices(self, src_metas, dst_metas):
         return [()]
+
+    def test_args(self, case):
+        return ()
+
+    def access_regions(self, block_index, src_metas, dst_metas):
+        return [], []
 
     def validate(self, src_metas, dst_metas):
         if self._n == 0:

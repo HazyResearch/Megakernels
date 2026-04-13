@@ -1,7 +1,33 @@
+import torch
+import torch.nn.functional as F
+
 from ...schema.dtype import DType
 from ...schema.itype import IType
 from ...schema.tensor import TensorSpec
 from ...jit.pykittens import sv, st
+
+
+@torch.library.custom_op("megakittens::attention_partial", mutates_args=())
+def attention_partial_op(
+    q: torch.Tensor, k_cache: torch.Tensor, v_cache: torch.Tensor,
+    pos_id: torch.Tensor, attn_scale: torch.Tensor,
+) -> torch.Tensor:
+    num_kv_heads = k_cache.shape[2]
+    head_dim = k_cache.shape[3]
+    gqa_ratio = q.shape[0] // (num_kv_heads * head_dim)
+    seq_len = pos_id.item() + 1
+    scale = attn_scale.item()
+    qh = q.view(num_kv_heads, gqa_ratio, head_dim)
+    k = k_cache[0, :seq_len].permute(1, 2, 0)
+    v = k_cache[0, :seq_len].permute(1, 0, 2)
+    scores = torch.bmm(qh, k) * scale
+    w = F.softmax(scores.float(), dim=-1).to(q.dtype)
+    return torch.bmm(w, v).reshape(-1)
+
+
+@attention_partial_op.register_fake
+def _attention_partial_fake(q, k_cache, v_cache, pos_id, attn_scale):
+    return torch.empty_like(q)
 
 
 class AttentionPartial(IType):
@@ -38,6 +64,8 @@ class AttentionPartial(IType):
             TensorSpec(dtype=DType.bf16, granularity=(1,)),                              # q_post_rope
             TensorSpec(dtype=DType.bf16, granularity=(1, 1, 1, 1), tma_types=kv_tma),    # k_cache
             TensorSpec(dtype=DType.bf16, granularity=(1, 1, 1, 1), tma_types=kv_tma),    # v_cache
+            TensorSpec(dtype=DType.int32, granularity=(1,)),                             # pos_id
+            TensorSpec(dtype=DType.fp32, granularity=(1,)),                              # attn_scale
         ]
 
     @property
@@ -49,6 +77,12 @@ class AttentionPartial(IType):
 
     def block_indices(self, src_metas, dst_metas):
         return [()]
+
+    def test_args(self, case):
+        return ()
+
+    def access_regions(self, block_index, src_metas, dst_metas):
+        return [], []
 
     def validate(self, src_metas, dst_metas):
         pass

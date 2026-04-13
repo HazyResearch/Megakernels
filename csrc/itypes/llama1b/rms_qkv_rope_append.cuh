@@ -9,7 +9,7 @@ namespace megakittens {
 
 template <typename Config, typename Globals, int N, int HEAD_DIM, int NUM_KV_HEADS,
           int SRC_ACT, int SRC_NORM, int SRC_QKV_W, int SRC_ROPE_COS, int SRC_ROPE_SIN,
-          int SRC_K_CACHE, int SRC_V_CACHE, int DST_Q>
+          int SRC_K_CACHE, int SRC_V_CACHE, int SCALAR_POS_ID, int SCALAR_RMS_EPS, int DST_Q>
 struct RmsQkvRopeAppend {
 
     static constexpr int BLOCK_SIZE = 16;
@@ -105,14 +105,14 @@ struct RmsQkvRopeAppend {
                     int dim_idx = (base_index % HEAD_DIM) / BLOCK_SIZE;
                     kittens::tma::store_async<kittens::cache_policy::EVICT_LAST>(
                         g.template gls<SRC_K_CACHE>(), qkv_proj_smem_bf,
-                        {inst.layer_idx, static_cast<int>(g.pos_id), head_idx, dim_idx});
+                        {inst.layer_idx, static_cast<int>(g.template gls<SCALAR_POS_ID>().raw_ptr[0]), head_idx, dim_idx});
                 } else { // V
                     int base_index = (block_idx - V_BLK_START) * BLOCK_SIZE;
                     int head_idx = base_index / HEAD_DIM;
                     int dim_idx = (base_index % HEAD_DIM) / BLOCK_SIZE;
                     kittens::tma::store_async<kittens::cache_policy::EVICT_LAST>(
                         g.template gls<SRC_V_CACHE>(), qkv_proj_smem_bf,
-                        {inst.layer_idx, static_cast<int>(g.pos_id), head_idx, dim_idx});
+                        {inst.layer_idx, static_cast<int>(g.template gls<SCALAR_POS_ID>().raw_ptr[0]), head_idx, dim_idx});
                 }
 
                 kittens::tma::store_async_wait();
@@ -129,7 +129,7 @@ struct RmsQkvRopeAppend {
     };
 
     using pipeline = llama1b::rms_matvec_pipeline<
-        Config, Globals, N, parsed_instruction, pipeline_specifics, SRC_ACT, SRC_NORM>;
+        Config, Globals, N, parsed_instruction, pipeline_specifics, SRC_ACT, SRC_NORM, SCALAR_RMS_EPS>;
 
     static constexpr int ROPE_COS_OFFSET = ((pipeline::OUTPUT_SCRATCH_OFFSET + // 1024-align
         pipeline::OUTPUT_PIPELINE_STAGES * pipeline::SCRATCH_BYTES_PER_STAGE) + 1023) & ~1023;
@@ -173,10 +173,10 @@ struct RmsQkvRopeAppend {
                 kittens::tma::expect_bytes(sem, 2 * HEAD_DIM * sizeof(float));
                 kittens::tma::load_async<kittens::cache_policy::EVICT_LAST>(
                     rope_cos_smem, g.template gls<SRC_ROPE_COS>(),
-                    {0, 0, static_cast<int>(g.pos_id), 0}, sem);
+                    {0, 0, static_cast<int>(g.template gls<SCALAR_POS_ID>().raw_ptr[0]), 0}, sem);
                 kittens::tma::load_async<kittens::cache_policy::EVICT_LAST>(
                     rope_sin_smem, g.template gls<SRC_ROPE_SIN>(),
-                    {0, 0, static_cast<int>(g.pos_id), 0}, sem);
+                    {0, 0, static_cast<int>(g.template gls<SCALAR_POS_ID>().raw_ptr[0]), 0}, sem);
             }
 
             parsed_instruction inst{s.instruction()};

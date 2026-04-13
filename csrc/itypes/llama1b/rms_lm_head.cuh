@@ -7,7 +7,7 @@
 
 namespace megakittens {
 
-template <typename Config, typename Globals, int N, int SRC0, int SRC1, int SRC2, int DST>
+template <typename Config, typename Globals, int N, int SRC0, int SRC1, int SRC2, int SCALAR_RMS_EPS, int DST>
 struct RmsLmHead {
 
     struct parsed_instruction {
@@ -65,7 +65,7 @@ struct RmsLmHead {
     };
 
     using pipeline = llama1b::rms_matvec_pipeline<
-        Config, Globals, N, parsed_instruction, pipeline_specifics, SRC0, SRC1>;
+        Config, Globals, N, parsed_instruction, pipeline_specifics, SRC0, SRC1, SCALAR_RMS_EPS>;
 
     struct controller {
         __device__ __forceinline__ static int

@@ -8,7 +8,7 @@ namespace megakittens {
 
 template <typename Config, typename Globals,
           int HEAD_DIM, int KV_BLOCK_SIZE, int GQA_RATIO,
-          int SRC_Q, int SRC_K_CACHE, int SRC_V_CACHE, int DST>
+          int SRC_Q, int SRC_K_CACHE, int SRC_V_CACHE, int SCALAR_POS_ID, int SCALAR_ATTN_SCALE, int DST>
 struct AttentionPartial {
 
     static_assert(GQA_RATIO == 4, "GQA_RATIO must be 4.");
@@ -230,7 +230,7 @@ struct AttentionPartial {
             if (kittens::warp::elect_leader()) {
 
                 parsed_instruction inst{s};
-                int seq_len = g.pos_id + 1;
+                int seq_len = g.template gls<SCALAR_POS_ID>().raw_ptr[0] + 1;
                 int total_attn_blocks = (seq_len + KV_BLOCK_SIZE - 1) / KV_BLOCK_SIZE;
 
                 s.page_wait(kv_pid(s));
@@ -275,9 +275,9 @@ struct AttentionPartial {
             parsed_instruction inst{s};
             int q_head_start_idx = inst.kv_head_idx * GQA_RATIO;
             int q_head_local_idx = (q_head_start_idx % 16) / 4;
-            int seq_len = g.pos_id + 1;
+            int seq_len = g.template gls<SCALAR_POS_ID>().raw_ptr[0] + 1;
             int total_attn_blocks = (seq_len + KV_BLOCK_SIZE - 1) / KV_BLOCK_SIZE;
-            float softmax_temp = g.attn_scale * 1.44269504089f; // 1 / (sqrt(D_h) * ln(2))
+            float softmax_temp = g.template gls<SCALAR_ATTN_SCALE>().raw_ptr[0] * 1.44269504089f; // 1 / (sqrt(D_h) * ln(2))
 
             q_rt Q_reg;
             k_rt K_reg;

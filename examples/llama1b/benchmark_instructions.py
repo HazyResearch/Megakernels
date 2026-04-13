@@ -6,7 +6,7 @@ import torch
 import torch.nn.functional as F
 
 from megakittens.jit.cuda_utils import get_sm_count, initialize_cuda_context
-from megakittens.dispatcher import Dispatcher, ScalarField
+from megakittens.dispatcher import Dispatcher
 from megakittens.schema.device import Device
 from megakittens.schema.dtype import DType
 from megakittens.schema.instruction import Instruction, InstructionMeta
@@ -17,7 +17,7 @@ from megakittens.itypes.llama1b.matvec_adds import MatVecAdds
 from megakittens.itypes.llama1b.rms_lm_head import RmsLmHead
 from megakittens.itypes.llama1b.rms_qkv_rope_append import RmsQkvRopeAppend
 from megakittens.itypes.llama1b.rms_upgate_silu import RmsUpgateSilu
-from megakittens.llama1b.scheduler import (
+from .scheduler import (
     GQA_RATIO,
     HEAD_DIM,
     HIDDEN_DIM,
@@ -42,12 +42,6 @@ SEQ_LEN = 128  # decode position for attention benchmark
 B300_BW_BYTES_PER_SEC = 8_000_000_000_000
 ATTN_SCALE = 1.0 / math.sqrt(HEAD_DIM)
 
-SCALARS = [
-    ScalarField("pos_id", "unsigned int", 4, 4),
-    ScalarField("attn_scale", "float", 4, 4),
-    ScalarField("rms_norm_eps", "float", 4, 4),
-]
-
 _DEVICE = Device(type="cuda", index=0)
 _NOOP_META = InstructionMeta(icode=0, itype=Noop(), src_tensors=(), dst_tensors=())
 _NOOP_INST = Instruction(
@@ -68,7 +62,6 @@ def _make_dispatcher(inst_meta, tensor_metas, instructions, input_indices, outpu
         input_tensor_indices=input_indices,
         output_tensor_indices=output_indices,
         use_jit_cache=False,
-        scalar_fields=SCALARS,
     )
 
 
@@ -170,7 +163,7 @@ def _pt_rms_lm_head(x, norm_weight, lm_head_weight):
 
 def _setup_rms_qkv_rope_append(sm_count):
     itype = RmsQkvRopeAppend(n=HIDDEN_DIM, head_dim=HEAD_DIM, num_kv_heads=NUM_KV_HEADS)
-    src, dst = (0, 1, 2, 3, 4, 5, 6), (7,)
+    src, dst = (0, 1, 2, 3, 4, 5, 6, 8, 9), (7,)
     inst_meta = InstructionMeta(icode=1, itype=itype, src_tensors=src, dst_tensors=dst)
 
     tensor_metas = [
@@ -182,6 +175,8 @@ def _setup_rms_qkv_rope_append(sm_count):
         TensorMeta(dtype=DType.bf16, shape=(NUM_LAYERS, MAX_SEQ_LEN, NUM_KV_HEADS, HEAD_DIM), device=_DEVICE),
         TensorMeta(dtype=DType.bf16, shape=(NUM_LAYERS, MAX_SEQ_LEN, NUM_KV_HEADS, HEAD_DIM), device=_DEVICE),
         TensorMeta(dtype=DType.bf16, shape=(Q_DIM,), device=_DEVICE),
+        TensorMeta(dtype=DType.int32, shape=(1,), device=_DEVICE),   # pos_id
+        TensorMeta(dtype=DType.fp32, shape=(1,), device=_DEVICE),    # rms_norm_eps
     ]
 
     num_blocks = QKV_DIM // MATVEC_BLOCK_SIZE
@@ -190,14 +185,14 @@ def _setup_rms_qkv_rope_append(sm_count):
         s = round(sm * num_blocks / sm_count)
         e = round((sm + 1) * num_blocks / sm_count)
         instructions.append(Instruction(
-            icode=1, src_tensors=src, dst_tensors=dst, indices=(0, s, e),
+            icode=1, src_tensors=(0, 1, 2, 3, 4, 5, 6), dst_tensors=(7,), indices=(0, s, e),
             src_barriers=(), src_barrier_targets=(),
             num_input_barriers=0, num_reuse_barriers=0, num_dst_barriers=0,
             dst_barriers=(),
         ))
 
     dispatcher = _make_dispatcher(inst_meta, tensor_metas, instructions,
-                                  input_indices=tuple(range(8)),
+                                  input_indices=tuple(range(10)),
                                   output_indices=(7, 5, 6))
 
     D = "cuda"
@@ -210,9 +205,11 @@ def _setup_rms_qkv_rope_append(sm_count):
         torch.zeros(NUM_LAYERS, MAX_SEQ_LEN, NUM_KV_HEADS, HEAD_DIM, dtype=torch.bfloat16, device=D),
         torch.zeros(NUM_LAYERS, MAX_SEQ_LEN, NUM_KV_HEADS, HEAD_DIM, dtype=torch.bfloat16, device=D),
         torch.zeros(Q_DIM, dtype=torch.bfloat16, device=D),
+        torch.tensor([0], dtype=torch.int32, device=D),             # pos_id
+        torch.tensor([RMS_NORM_EPS], dtype=torch.float32, device=D), # rms_norm_eps
     ]
 
-    mk_fn = lambda: dispatcher(*tensors, 0, ATTN_SCALE, RMS_NORM_EPS)
+    mk_fn = lambda: dispatcher(*tensors)
 
     hidden, norm_w, qkv_w = tensors[0], tensors[1][0], tensors[2][0]
     cos, sin = tensors[3], tensors[4]
@@ -228,7 +225,7 @@ def _setup_rms_qkv_rope_append(sm_count):
 
 def _setup_attention_partial(sm_count):
     itype = AttentionPartial()
-    src, dst = (0, 1, 2), (3,)
+    src, dst = (0, 1, 2, 4, 5), (3,)
     inst_meta = InstructionMeta(icode=1, itype=itype, src_tensors=src, dst_tensors=dst)
 
     tensor_metas = [
@@ -236,20 +233,22 @@ def _setup_attention_partial(sm_count):
         TensorMeta(dtype=DType.bf16, shape=(NUM_LAYERS, MAX_SEQ_LEN, NUM_KV_HEADS, HEAD_DIM), device=_DEVICE),
         TensorMeta(dtype=DType.bf16, shape=(NUM_LAYERS, MAX_SEQ_LEN, NUM_KV_HEADS, HEAD_DIM), device=_DEVICE),
         TensorMeta(dtype=DType.bf16, shape=(Q_DIM,), device=_DEVICE),
+        TensorMeta(dtype=DType.int32, shape=(1,), device=_DEVICE),   # pos_id
+        TensorMeta(dtype=DType.fp32, shape=(1,), device=_DEVICE),    # attn_scale
     ]
 
     layer_idx = 0
     instructions = []
     for kv_head in range(NUM_KV_HEADS):
         instructions.append(Instruction(
-            icode=1, src_tensors=src, dst_tensors=dst, indices=(layer_idx, kv_head),
+            icode=1, src_tensors=(0, 1, 2), dst_tensors=(3,), indices=(layer_idx, kv_head),
             src_barriers=(), src_barrier_targets=(),
             num_input_barriers=0, num_reuse_barriers=0, num_dst_barriers=0,
             dst_barriers=(),
         ))
 
     dispatcher = _make_dispatcher(inst_meta, tensor_metas, instructions,
-                                  input_indices=(0, 1, 2, 3),
+                                  input_indices=tuple(range(6)),
                                   output_indices=(3,))
 
     D = "cuda"
@@ -257,9 +256,10 @@ def _setup_attention_partial(sm_count):
     k_cache = torch.randn(NUM_LAYERS, MAX_SEQ_LEN, NUM_KV_HEADS, HEAD_DIM, dtype=torch.bfloat16, device=D)
     v_cache = torch.randn(NUM_LAYERS, MAX_SEQ_LEN, NUM_KV_HEADS, HEAD_DIM, dtype=torch.bfloat16, device=D)
     attn_out = torch.zeros(Q_DIM, dtype=torch.bfloat16, device=D)
+    pos_id_t = torch.tensor([SEQ_LEN - 1], dtype=torch.int32, device=D)
+    attn_scale_t = torch.tensor([ATTN_SCALE], dtype=torch.float32, device=D)
 
-    pos_id = SEQ_LEN - 1
-    mk_fn = lambda: dispatcher(q, k_cache, v_cache, attn_out, pos_id, ATTN_SCALE, RMS_NORM_EPS)
+    mk_fn = lambda: dispatcher(q, k_cache, v_cache, attn_out, pos_id_t, attn_scale_t)
     pt_fn = lambda: _pt_attention_partial(q, k_cache, v_cache, layer_idx, SEQ_LEN, ATTN_SCALE)
 
     roofline_bytes = Q_DIM * 2 \
@@ -300,7 +300,7 @@ def _setup_o_proj_residual(sm_count):
     o_weights = torch.randn(NUM_LAYERS, HIDDEN_DIM, HIDDEN_DIM, dtype=torch.bfloat16, device=D)
     hidden_states = torch.randn(HIDDEN_DIM, dtype=torch.bfloat16, device=D)
 
-    mk_fn = lambda: dispatcher(attn_out_vec, o_weights, hidden_states, 0, ATTN_SCALE, RMS_NORM_EPS)
+    mk_fn = lambda: dispatcher(attn_out_vec, o_weights, hidden_states)
     pt_fn = lambda: _pt_proj_residual(attn_out_vec, o_weights[layer_idx], hidden_states)
 
     roofline_bytes = HIDDEN_DIM * 2 + HIDDEN_DIM * HIDDEN_DIM * 2 + HIDDEN_DIM * 2
@@ -310,7 +310,7 @@ def _setup_o_proj_residual(sm_count):
 
 def _setup_rms_upgate_silu(sm_count):
     itype = RmsUpgateSilu(n=HIDDEN_DIM)
-    src, dst = (0, 1, 2, 3), (4,)
+    src, dst = (0, 1, 2, 3, 5), (4,)
     inst_meta = InstructionMeta(icode=1, itype=itype, src_tensors=src, dst_tensors=dst)
 
     tensor_metas = [
@@ -319,6 +319,7 @@ def _setup_rms_upgate_silu(sm_count):
         TensorMeta(dtype=DType.bf16, shape=(NUM_LAYERS, INTERMEDIATE_DIM, HIDDEN_DIM), device=_DEVICE),
         TensorMeta(dtype=DType.bf16, shape=(NUM_LAYERS, INTERMEDIATE_DIM, HIDDEN_DIM), device=_DEVICE),
         TensorMeta(dtype=DType.bf16, shape=(INTERMEDIATE_DIM,), device=_DEVICE),
+        TensorMeta(dtype=DType.fp32, shape=(1,), device=_DEVICE),    # rms_norm_eps
     ]
 
     layer_idx = 0
@@ -326,7 +327,7 @@ def _setup_rms_upgate_silu(sm_count):
     instructions = []
     for sm in range(sm_count):
         instructions.append(Instruction(
-            icode=1, src_tensors=src, dst_tensors=dst,
+            icode=1, src_tensors=(0, 1, 2, 3), dst_tensors=(4,),
             indices=(layer_idx, sm, sm_count, num_blocks, 0),
             src_barriers=(), src_barrier_targets=(),
             num_input_barriers=0, num_reuse_barriers=0, num_dst_barriers=0,
@@ -334,7 +335,7 @@ def _setup_rms_upgate_silu(sm_count):
         ))
 
     dispatcher = _make_dispatcher(inst_meta, tensor_metas, instructions,
-                                  input_indices=tuple(range(5)),
+                                  input_indices=tuple(range(6)),
                                   output_indices=(4,))
 
     D = "cuda"
@@ -344,9 +345,10 @@ def _setup_rms_upgate_silu(sm_count):
         torch.randn(NUM_LAYERS, INTERMEDIATE_DIM, HIDDEN_DIM, dtype=torch.bfloat16, device=D),
         torch.randn(NUM_LAYERS, INTERMEDIATE_DIM, HIDDEN_DIM, dtype=torch.bfloat16, device=D),
         torch.zeros(INTERMEDIATE_DIM, dtype=torch.bfloat16, device=D),
+        torch.tensor([RMS_NORM_EPS], dtype=torch.float32, device=D), # rms_norm_eps
     ]
 
-    mk_fn = lambda: dispatcher(*tensors, 0, ATTN_SCALE, RMS_NORM_EPS)
+    mk_fn = lambda: dispatcher(*tensors)
 
     x, norm_w = tensors[0], tensors[1][layer_idx]
     up_w, gate_w = tensors[2][layer_idx], tensors[3][layer_idx]
@@ -395,7 +397,7 @@ def _setup_down_proj_residual(sm_count):
     down_weights = torch.randn(NUM_LAYERS, HIDDEN_DIM, INTERMEDIATE_DIM, dtype=torch.bfloat16, device=D)
     hidden_states = torch.randn(HIDDEN_DIM, dtype=torch.bfloat16, device=D)
 
-    mk_fn = lambda: dispatcher(silu_out, down_weights, hidden_states, 0, ATTN_SCALE, RMS_NORM_EPS)
+    mk_fn = lambda: dispatcher(silu_out, down_weights, hidden_states)
     pt_fn = lambda: _pt_proj_residual(silu_out, down_weights[layer_idx], hidden_states)
 
     roofline_bytes = INTERMEDIATE_DIM * 2 + HIDDEN_DIM * INTERMEDIATE_DIM * 2 + HIDDEN_DIM * 2
@@ -405,7 +407,7 @@ def _setup_down_proj_residual(sm_count):
 
 def _setup_rms_lm_head(sm_count):
     itype = RmsLmHead(n=HIDDEN_DIM)
-    src, dst = (0, 1, 2), (3,)
+    src, dst = (0, 1, 2, 4), (3,)
     inst_meta = InstructionMeta(icode=1, itype=itype, src_tensors=src, dst_tensors=dst)
 
     tensor_metas = [
@@ -413,6 +415,7 @@ def _setup_rms_lm_head(sm_count):
         TensorMeta(dtype=DType.bf16, shape=(HIDDEN_DIM,), device=_DEVICE),
         TensorMeta(dtype=DType.bf16, shape=(VOCAB_SIZE, HIDDEN_DIM), device=_DEVICE),
         TensorMeta(dtype=DType.bf16, shape=(VOCAB_SIZE,), device=_DEVICE),
+        TensorMeta(dtype=DType.fp32, shape=(1,), device=_DEVICE),    # rms_norm_eps
     ]
 
     num_blocks = VOCAB_SIZE // MATVEC_BLOCK_SIZE
@@ -423,14 +426,14 @@ def _setup_rms_lm_head(sm_count):
         s = round(sm * num_blocks / sm_count)
         e = round((sm + 1) * num_blocks / sm_count)
         instructions.append(Instruction(
-            icode=1, src_tensors=src, dst_tensors=dst, indices=(s, e),
+            icode=1, src_tensors=(0, 1, 2), dst_tensors=(3,), indices=(s, e),
             src_barriers=(), src_barrier_targets=(),
             num_input_barriers=0, num_reuse_barriers=0, num_dst_barriers=0,
             dst_barriers=(),
         ))
 
     dispatcher = _make_dispatcher(inst_meta, tensor_metas, instructions,
-                                  input_indices=(0, 1, 2, 3),
+                                  input_indices=tuple(range(5)),
                                   output_indices=(3,))
 
     D = "cuda"
@@ -438,8 +441,9 @@ def _setup_rms_lm_head(sm_count):
     norm_weight = torch.randn(HIDDEN_DIM, dtype=torch.bfloat16, device=D)
     lm_head_weight = torch.randn(VOCAB_SIZE, HIDDEN_DIM, dtype=torch.bfloat16, device=D)
     logits = torch.zeros(VOCAB_SIZE, dtype=torch.bfloat16, device=D)
+    rms_norm_eps_t = torch.tensor([RMS_NORM_EPS], dtype=torch.float32, device=D)
 
-    mk_fn = lambda: dispatcher(x, norm_weight, lm_head_weight, logits, 0, ATTN_SCALE, RMS_NORM_EPS)
+    mk_fn = lambda: dispatcher(x, norm_weight, lm_head_weight, logits, rms_norm_eps_t)
     pt_fn = lambda: _pt_rms_lm_head(x, norm_weight, lm_head_weight)
 
     roofline_bytes = (HIDDEN_DIM + HIDDEN_DIM) * 2 + VOCAB_SIZE * HIDDEN_DIM * 2 + VOCAB_SIZE * 2
@@ -516,7 +520,6 @@ def benchmark_decode_e2e():
         instruction_metas, tensor_metas, instructions, num_barriers,
         input_indices, output_indices,
         use_jit_cache=False,
-        scalar_fields=SCALARS,
     )
 
     D = "cuda"
@@ -537,6 +540,9 @@ def benchmark_decode_e2e():
     mk_v_cache = torch.randn(NUM_LAYERS, MAX_SEQ_LEN, NUM_KV_HEADS, HEAD_DIM, dtype=torch.bfloat16, device=D)
     rope_cos = torch.randn(MAX_SEQ_LEN, HEAD_DIM, dtype=torch.float32, device=D)
     rope_sin = torch.randn(MAX_SEQ_LEN, HEAD_DIM, dtype=torch.float32, device=D)
+    pos_id_tensor = torch.tensor([pos_id], dtype=torch.int32, device=D)
+    attn_scale_tensor = torch.tensor([ATTN_SCALE], dtype=torch.float32, device=D)
+    rms_norm_eps_tensor = torch.tensor([RMS_NORM_EPS], dtype=torch.float32, device=D)
 
     mk_tensors = [
         weights["qkv_weights"],
@@ -557,9 +563,12 @@ def benchmark_decode_e2e():
         mk_v_cache,
         rope_cos,
         rope_sin,
+        pos_id_tensor,
+        attn_scale_tensor,
+        rms_norm_eps_tensor,
     ]
 
-    mk_fn = lambda: dispatcher(*mk_tensors, pos_id, ATTN_SCALE, RMS_NORM_EPS)
+    mk_fn = lambda: dispatcher(*mk_tensors)
 
     pt_k_cache = mk_k_cache.clone()
     pt_v_cache = mk_v_cache.clone()
@@ -737,13 +746,15 @@ def benchmark_tok_per_sec(prompt="Hello, my name is", max_new_tokens=200, num_sa
         instruction_metas, tensor_metas, instructions, num_barriers,
         input_indices, output_indices,
         use_jit_cache=False,
-        scalar_fields=SCALARS,
     )
 
     hidden_states = embed_weight[first_token].clone()
     logits = torch.zeros(VOCAB_SIZE, dtype=torch.bfloat16, device=D)
+    pos_id_tensor = torch.tensor([prompt_len], dtype=torch.int32, device=D)
+    attn_scale_tensor = torch.tensor([ATTN_SCALE], dtype=torch.float32, device=D)
+    rms_norm_eps_tensor = torch.tensor([RMS_NORM_EPS], dtype=torch.float32, device=D)
 
-    # same order as megakittens.llama1b.scheduler.T
+    # same order as examples.llama1b.scheduler.T
     mk_tensors = [
         weights["qkv_weights"],
         weights["o_weights"],
@@ -763,6 +774,9 @@ def benchmark_tok_per_sec(prompt="Hello, my name is", max_new_tokens=200, num_sa
         v_cache,
         rope_cos,
         rope_sin,
+        pos_id_tensor,
+        attn_scale_tensor,
+        rms_norm_eps_tensor,
     ]
 
     model_size = sum(t.nelement() * t.element_size() for t in mk_tensors[:9])
@@ -775,10 +789,11 @@ def benchmark_tok_per_sec(prompt="Hello, my name is", max_new_tokens=200, num_sa
 
     def _decode_step(pos_id, input_token):
         hidden_states.copy_(embedding(input_token))
-        dispatcher.relaunch(pos_id=pos_id)
+        pos_id_tensor.fill_(pos_id)
+        dispatcher._launch()
         return torch.argmax(logits, dim=-1)
 
-    dispatcher(*mk_tensors, prompt_len, ATTN_SCALE, RMS_NORM_EPS)
+    dispatcher(*mk_tensors)
     output_tokens[0] = first_token
     print(f"Warming up ({warmup} runs)...")
     for _ in range(warmup):
@@ -826,6 +841,6 @@ def benchmark_tok_per_sec(prompt="Hello, my name is", max_new_tokens=200, num_sa
 
 
 if __name__ == "__main__":
-    benchmark_instructions()
-    benchmark_decode_e2e()
+    # benchmark_instructions()
+    # benchmark_decode_e2e()
     benchmark_tok_per_sec()
