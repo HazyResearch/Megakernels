@@ -123,7 +123,7 @@ class Dispatcher:
 
     # Must match default_config in csrc/schema.cuh
     INSTRUCTION_PIPE_STAGES = 2
-    CLUSTER_SIZE = 2
+    CLUSTER_SIZE = 1
     NUM_CONSUMER_WARPS = 8
     NUM_WARPS = 4 + NUM_CONSUMER_WARPS
     NUM_THREADS = NUM_WARPS * 32
