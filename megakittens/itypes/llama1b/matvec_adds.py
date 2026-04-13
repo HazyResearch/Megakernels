@@ -1,9 +1,9 @@
 import torch
 
-from ..schema.dtype import DType
-from ..schema.itype import IType
-from ..schema.tensor import TensorSpec
-from ..jit.pykittens import sv, st
+from ...schema.dtype import DType
+from ...schema.itype import IType
+from ...schema.tensor import TensorSpec
+from ...jit.pykittens import sv, st
 
 
 @torch.library.custom_op("megakittens::matvec_adds", mutates_args=())

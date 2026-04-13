@@ -1,7 +1,7 @@
-from ..schema.dtype import DType
-from ..schema.itype import IType
-from ..schema.tensor import TensorSpec
-from ..jit.pykittens import sv, st
+from ...schema.dtype import DType
+from ...schema.itype import IType
+from ...schema.tensor import TensorSpec
+from ...jit.pykittens import sv, st
 
 
 class RmsQkvRopeAppend(IType):

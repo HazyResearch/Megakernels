@@ -9,3 +9,6 @@ log/
 .vscode/
 temp/
 examples_from_old/
+*.mkprof
+*.pt
+tests/llama1b/profile_decode.py

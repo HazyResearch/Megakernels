@@ -7,12 +7,12 @@ matching the megakittens Instruction/InstructionMeta format.
 
 from __future__ import annotations
 
-from ..itypes.attention_partial import AttentionPartial
+from ..itypes.llama1b.attention_partial import AttentionPartial
 from ..itypes.noop import Noop
-from ..itypes.matvec_adds import MatVecAdds
-from ..itypes.rms_lm_head import RmsLmHead
-from ..itypes.rms_qkv_rope_append import RmsQkvRopeAppend
-from ..itypes.rms_upgate_silu import RmsUpgateSilu
+from ..itypes.llama1b.matvec_adds import MatVecAdds
+from ..itypes.llama1b.rms_lm_head import RmsLmHead
+from ..itypes.llama1b.rms_qkv_rope_append import RmsQkvRopeAppend
+from ..itypes.llama1b.rms_upgate_silu import RmsUpgateSilu
 from ..schema.device import Device
 from ..schema.dtype import DType
 from ..schema.instruction import Instruction, InstructionMeta
@@ -64,15 +64,33 @@ class T:
     V_CACHE = 15             # [NUM_LAYERS, MAX_SEQ_LEN, NUM_KV_HEADS, HEAD_DIM]
     ROPE_COS = 16            # [MAX_SEQ_LEN, HEAD_DIM]
     ROPE_SIN = 17            # [MAX_SEQ_LEN, HEAD_DIM]
+    COUNT = 18
 
-_TENSOR_COUNT = max(v for k, v in vars(T).items() if not k.startswith('_') and isinstance(v, int)) + 1
-T.COUNT = _TENSOR_COUNT
+
+# -- Schedule result type -----------------------------------------------------
+
+# The scheduler returns a 6-tuple matching the existing Dispatcher constructor:
+# (instruction_metas, tensor_metas, instructions, num_barriers,
+#  input_tensor_indices, output_tensor_indices)
+ScheduleResult = tuple[
+    list[InstructionMeta],
+    list[TensorMeta],
+    list[Instruction],
+    int,
+    tuple[int, ...],
+    tuple[int, ...],
+]
+
+
+# -- Helpers ------------------------------------------------------------------
 
 CLUSTER_SIZE = 2
 GQA_RATIO = NUM_ATTENTION_HEADS // NUM_KV_HEADS  # 4
 BLOCKS_PER_HEAD = HEAD_DIM // MATVEC_BLOCK_SIZE   # 4
 
-# Barrier layout: barriers[layer][opcode_slot][sub_idx]
+# -- Fine-grained barrier layout -----------------------------------------------
+# 3D logical structure: barriers[layer][opcode_slot][sub_idx]
+# Flattened to a 1D int32 array.
 NUM_BARRIER_SLOTS = 6   # qkv, attn, attn_red, oproj, upgate, downproj
 MAX_SUB_BARRIERS = 48   # largest: QKV with 32 Q + 8 K + 8 V = 48
 
@@ -95,6 +113,7 @@ DOWNPROJ_TARGET = INTERMEDIATE_DIM // MATVEC_BLOCK_SIZE  # 512
 def _barrier_index(layer_idx: int, opcode_slot: int, sub_idx: int = 0) -> int:
     return layer_idx * NUM_BARRIER_SLOTS * MAX_SUB_BARRIERS + opcode_slot * MAX_SUB_BARRIERS + sub_idx
 
+
 _noop_inst_meta = InstructionMeta(icode=0, itype=Noop(), src_tensors=(), dst_tensors=())
 
 _noop = Instruction(
@@ -104,9 +123,13 @@ _noop = Instruction(
     dst_barriers=(),
 )
 
+
 def _pad_to_cluster(instructions: list[Instruction]) -> None:
     while len(instructions) % CLUSTER_SIZE != 0:
         instructions.append(_noop)
+
+
+# -- Tensor metadata ----------------------------------------------------------
 
 def _make_tensor_metas(device: Device) -> list[TensorMeta]:
     bf16 = DType.bf16
@@ -175,6 +198,7 @@ def _schedule_attention(
 ) -> list[Instruction]:
     # No attention_reduction step currently (1 partial per head),
     # so attention signals the attn_red barrier (slot 2) directly.
+    # This matches the reference's skip_attn_reduction path.
     attn_red_barrier = _barrier_index(layer_idx, 2, 0)
     instructions = []
     for kv_head in range(NUM_KV_HEADS):
@@ -208,25 +232,17 @@ def _schedule_o_proj(
     sm_count: int,
     layer_idx: int,
     icode: int,
-    max_instructions: int | None = None,
 ) -> list[Instruction]:
     attn_red_barrier = _barrier_index(layer_idx, 2, 0)
     oproj_barrier = _barrier_index(layer_idx, 3, 0)
     num_blocks = HIDDEN_DIM // MATVEC_BLOCK_SIZE  # 128
-    num_instructions = min(sm_count, num_blocks)
-    if max_instructions is not None:
-        num_instructions = min(num_instructions, max_instructions)
     instructions = []
-    for i in range(num_instructions):
-        start = round(i * num_blocks / num_instructions)
-        end = round((i + 1) * num_blocks / num_instructions)
-        if start == end:
-            continue
+    for sm in range(num_blocks):
         instructions.append(Instruction(
             icode=icode,
             src_tensors=(T.ATTN_OUT, T.O_WEIGHTS),
             dst_tensors=(T.HIDDEN_STATES,),
-            indices=(layer_idx, start, end, 0),
+            indices=(layer_idx, sm, sm + 1, 0),
             src_barriers=(attn_red_barrier,),
             src_barrier_targets=(ATTN_RED_TARGET,),
             num_input_barriers=1,
@@ -272,30 +288,39 @@ def _schedule_downproj(
     downproj_barrier = _barrier_index(layer_idx, 5, 0)
     num_blocks = HIDDEN_DIM // MATVEC_BLOCK_SIZE  # 128
     num_chunks = INTERMEDIATE_DIM // HIDDEN_DIM   # 4 reduction chunks
-    sms_per_chunk = sm_count // num_chunks
+
+    # (chunk, block_idx) jobs distributed across SMs, one instruction per SM
+    jobs = [(c, b) for c in range(num_chunks) for b in range(num_blocks)]
 
     instructions = []
-    for chunk in range(num_chunks):
-        upgate_sub = _barrier_index(layer_idx, 4, chunk)
-        col_offset = chunk * HIDDEN_DIM
-        # Distribute blocks within this chunk across its SMs
-        for sm in range(sms_per_chunk):
-            start = round(sm * num_blocks / sms_per_chunk)
-            end = round((sm + 1) * num_blocks / sms_per_chunk)
-            if start == end:
-                continue
-            instructions.append(Instruction(
-                icode=icode,
-                src_tensors=(T.SILU_OUT, T.DOWN_WEIGHTS),
-                dst_tensors=(T.HIDDEN_STATES,),
-                indices=(layer_idx, start, end, col_offset),
-                src_barriers=(upgate_sub,),
-                src_barrier_targets=(UPGATE_TARGET_PER_SUB,),
-                num_input_barriers=1,
-                num_reuse_barriers=0,
-                num_dst_barriers=1,
-                dst_barriers=(downproj_barrier,),
-            ))
+    num_assigned = 0
+    for sm in range(sm_count):
+        jobs_left = len(jobs) - num_assigned
+        sms_left = sm_count - sm
+        jobs_for_this_sm = round(jobs_left / sms_left)
+
+        raw_slice = jobs[num_assigned : num_assigned + jobs_for_this_sm]
+        chunk_idx = raw_slice[0][0]
+        same_chunk = [j for j in raw_slice if j[0] == chunk_idx]
+
+        start = same_chunk[0][1]
+        end = same_chunk[-1][1] + 1
+        reduction_col_offset = chunk_idx * HIDDEN_DIM
+        upgate_sub = _barrier_index(layer_idx, 4, chunk_idx)
+
+        instructions.append(Instruction(
+            icode=icode,
+            src_tensors=(T.SILU_OUT, T.DOWN_WEIGHTS),
+            dst_tensors=(T.HIDDEN_STATES,),
+            indices=(layer_idx, start, end, reduction_col_offset),
+            src_barriers=(upgate_sub,),
+            src_barrier_targets=(UPGATE_TARGET_PER_SUB,),
+            num_input_barriers=1,
+            num_reuse_barriers=0,
+            num_dst_barriers=1,
+            dst_barriers=(downproj_barrier,),
+        ))
+        num_assigned += len(same_chunk)
 
     _pad_to_cluster(instructions)
     return instructions
@@ -343,13 +368,34 @@ ICODE_DOWNPROJ = 5
 ICODE_LM_HEAD = 6
 
 
+def _pad_phase_to(instructions: list[Instruction], target: int) -> list[Instruction]:
+    """Pad an instruction list to exactly `target` length with noops."""
+    pad_count = target - len(instructions)
+    if pad_count > 0:
+        instructions = instructions + [_noop] * pad_count
+    return instructions
+
+
 def schedule_decode(
     sm_count: int,
     num_layers: int = NUM_LAYERS,
     device: Device | None = None,
     noop: bool = False,
-    oproj_max_instructions: int | None = 64,
-):
+    pad_phases: bool = False,
+) -> ScheduleResult:
+    """Build the full decode instruction schedule.
+
+    Returns a 6-tuple that can be passed directly to the Dispatcher constructor.
+
+    Args:
+        sm_count: Number of SMs on the target GPU.
+        num_layers: Number of transformer layers (default: 16).
+        device: Target device (default: cuda:0).
+        noop: If True, all instructions use icode=0 (noop) for plumbing tests.
+        pad_phases: If True, pad each phase to sm_count with noops so every SM
+                    gets exactly one instruction per phase (prevents phase skipping
+                    in global work queue dispatch).
+    """
     if device is None:
         device = Device(type="cuda", index=0)
 
@@ -407,10 +453,16 @@ def schedule_decode(
             prev_layer_barrier, prev_layer_target,
         )
         attn_insts = _schedule_attention(layer_idx, icode_attn)
-        oproj_insts = _schedule_o_proj(sm_count, layer_idx, icode_oproj,
-                                       max_instructions=oproj_max_instructions)
+        oproj_insts = _schedule_o_proj(sm_count, layer_idx, icode_oproj)
         upgate_insts = _schedule_upgate(sm_count, layer_idx, icode_upgate)
         downproj_insts = _schedule_downproj(sm_count, layer_idx, icode_downproj)
+
+        if pad_phases:
+            qkv_insts = _pad_phase_to(qkv_insts, sm_count)
+            attn_insts = _pad_phase_to(attn_insts, sm_count)
+            oproj_insts = _pad_phase_to(oproj_insts, sm_count)
+            upgate_insts = _pad_phase_to(upgate_insts, sm_count)
+            downproj_insts = _pad_phase_to(downproj_insts, sm_count)
 
         instructions.extend(qkv_insts)
         instructions.extend(attn_insts)
@@ -420,6 +472,8 @@ def schedule_decode(
 
     # LM head
     lmhead_insts = _schedule_lm_head(sm_count, num_layers, icode_lmhead)
+    if pad_phases:
+        lmhead_insts = _pad_phase_to(lmhead_insts, sm_count)
     instructions.extend(lmhead_insts)
 
     # All tensors are inputs (caller pre-allocates everything)
