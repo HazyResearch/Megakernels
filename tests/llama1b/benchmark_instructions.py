@@ -12,11 +12,11 @@ from megakittens.schema.dtype import DType
 from megakittens.schema.instruction import Instruction, InstructionMeta
 from megakittens.schema.tensor import TensorMeta
 from megakittens.itypes.noop import Noop
-from megakittens.itypes.attention_partial import AttentionPartial
-from megakittens.itypes.matvec_adds import MatVecAdds
-from megakittens.itypes.rms_lm_head import RmsLmHead
-from megakittens.itypes.rms_qkv_rope_append import RmsQkvRopeAppend
-from megakittens.itypes.rms_upgate_silu import RmsUpgateSilu
+from megakittens.itypes.llama1b.attention_partial import AttentionPartial
+from megakittens.itypes.llama1b.matvec_adds import MatVecAdds
+from megakittens.itypes.llama1b.rms_lm_head import RmsLmHead
+from megakittens.itypes.llama1b.rms_qkv_rope_append import RmsQkvRopeAppend
+from megakittens.itypes.llama1b.rms_upgate_silu import RmsUpgateSilu
 from megakittens.llama1b.scheduler import (
     GQA_RATIO,
     HEAD_DIM,

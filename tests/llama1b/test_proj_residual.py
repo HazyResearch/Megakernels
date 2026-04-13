@@ -16,7 +16,7 @@ from megakittens.schema.dtype import DType
 from megakittens.schema.instruction import Instruction, InstructionMeta
 from megakittens.schema.tensor import TensorMeta
 from megakittens.itypes.noop import Noop
-from megakittens.itypes.matvec_adds import MatVecAdds
+from megakittens.itypes.llama1b.matvec_adds import MatVecAdds
 
 initialize_cuda_context()
 

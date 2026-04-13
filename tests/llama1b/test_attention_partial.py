@@ -14,7 +14,7 @@ from megakittens.schema.device import Device
 from megakittens.schema.dtype import DType
 from megakittens.schema.instruction import Instruction, InstructionMeta
 from megakittens.schema.tensor import TensorMeta
-from megakittens.itypes.attention_partial import AttentionPartial
+from megakittens.itypes.llama1b.attention_partial import AttentionPartial
 from megakittens.itypes.noop import Noop
 
 initialize_cuda_context()

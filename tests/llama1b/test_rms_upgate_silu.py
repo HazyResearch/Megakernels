@@ -13,7 +13,7 @@ from megakittens.schema.dtype import DType
 from megakittens.schema.instruction import Instruction, InstructionMeta
 from megakittens.schema.tensor import TensorMeta
 from megakittens.itypes.noop import Noop
-from megakittens.itypes.rms_upgate_silu import RmsUpgateSilu
+from megakittens.itypes.llama1b.rms_upgate_silu import RmsUpgateSilu
 
 initialize_cuda_context()
 

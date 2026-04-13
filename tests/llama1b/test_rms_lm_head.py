@@ -8,7 +8,7 @@ import torch
 
 from megakittens.jit.cuda_utils import get_sm_count, initialize_cuda_context
 from megakittens.dispatcher import Dispatcher, ScalarField
-from megakittens.itypes.rms_lm_head import RmsLmHead
+from megakittens.itypes.llama1b.rms_lm_head import RmsLmHead
 from megakittens.itypes.noop import Noop
 from megakittens.schema.device import Device
 from megakittens.schema.dtype import DType

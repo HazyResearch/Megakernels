@@ -12,7 +12,7 @@ from megakittens.schema.dtype import DType
 from megakittens.schema.instruction import Instruction, InstructionMeta
 from megakittens.schema.tensor import TensorMeta
 from megakittens.itypes.noop import Noop
-from megakittens.itypes.rms_qkv_rope_append import RmsQkvRopeAppend
+from megakittens.itypes.llama1b.rms_qkv_rope_append import RmsQkvRopeAppend
 
 initialize_cuda_context()
 
