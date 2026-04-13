@@ -55,10 +55,8 @@ struct MatVecAdds {
             kittens::warp::sync();
 
             if (kittens::warp::elect_leader()) {
-                s.record(TEVENT_AT_GMEM_STORE);
                 kittens::tma::store_add_async<kittens::cache_policy::EVICT_LAST>(g.template gls<DST>(), output_smem_bf, {0, block_idx});
                 kittens::tma::store_async_wait();
-                s.record(TEVENT_DONE_GMEM_STORE);
 
                 if (output_idx == inst.iters - 1) {
                     const auto &instr = s.instruction();
@@ -104,9 +102,7 @@ struct MatVecAdds {
 
             if (kittens::warpid() == 0 && kittens::warp::elect_leader()) {
                 s.page_wait(pipeline::get_activation_page(s));
-                s.record(TEVENT_AT_GMEM_WAIT);
                 all_input_barrier_wait<Config>(g, s.instruction());
-                s.record(TEVENT_DONE_GMEM_WAIT);
             }
             kittens::group<Config::NUM_CONSUMER_WARPS>::sync(4);
 

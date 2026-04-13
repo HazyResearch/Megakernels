@@ -131,9 +131,6 @@ struct matvec_pipeline {
                 auto &sem = weights_arrived(s, input_stage);
                 kittens::tma::expect_bytes(sem, sizeof(kittens::bf16) * N * MATVEC_BLOCK_SIZE);
 
-                if (iter == 0) s.record(TEVENT_FIRST_LOAD);
-                else if (iter == inst.iters - 1) s.record(TEVENT_LAST_LOAD);
-
                 // 2 pages per stage, 2 × st_bf<16,512> per page = 4 TMA loads
                 #pragma unroll
                 for (int i = 0; i < STAGE_PAGES * 2; i++) {
@@ -182,9 +179,6 @@ struct matvec_pipeline {
                 *reinterpret_cast<kittens::sv_fl<MATVEC_BLOCK_SIZE> *>(
                     output_scratch_start + kittens::warpid() * SCRATCH_BYTES_PER_WARP);
 
-            if (i == 0) s.record(TEVENT_FIRST_USE);
-            else if (i == inst.iters - 1) s.record(TEVENT_LAST_USE);
-
             llama1b::matvec(out_smem, weights, activations_vec);
 
             kittens::warp::arrive(outputs_arrived(s, output_stage));
@@ -212,9 +206,6 @@ struct matvec_pipeline {
         for (int i = 0; i < inst.iters; i++) {
             kittens::wait(outputs_arrived(s, output_stage),
                 (i % (2 * OUTPUT_PIPELINE_STAGES)) >= OUTPUT_PIPELINE_STAGES);
-
-            if (i == 0) s.record(TEVENT_FIRST_STORE);
-            else if (i == inst.iters - 1) s.record(TEVENT_LAST_STORE);
 
             pipeline_specifics::store(s, g, inst, i, output_stage);
 
@@ -299,9 +290,7 @@ struct rms_matvec_pipeline
         using rv_t = kittens::rv_fl<ELEMS_PER_WARP>;
 
         if (kittens::warpid() == 0 && kittens::warp::elect_leader()) {
-            s.record(TEVENT_AT_GMEM_WAIT);
             pipeline_specifics::gmem_wait(g, s);
-            s.record(TEVENT_DONE_GMEM_WAIT);
         }
         kittens::group<Config::NUM_CONSUMER_WARPS>::sync(4);
 

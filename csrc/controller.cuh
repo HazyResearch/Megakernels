@@ -16,9 +16,7 @@ __device__ __forceinline__ void controller_loop(const Globals &g, megakittens::s
         //         previous instruction to complete and invalidate its semaphores
         if (s.iter >= Config::INSTRUCTION_PIPE_STAGES) {
             const int phasebit = ((s.iter - Config::INSTRUCTION_PIPE_STAGES) / Config::INSTRUCTION_PIPE_STAGES) & 0b1;
-            if (lane_id == 0) s.record(TEVENT_AT_CTRL_WAIT);
             kittens::wait(s.instruction_finished[s.stage], phasebit);
-            if (lane_id == 0) s.record(TEVENT_DONE_CTRL_WAIT);
             if (lane_id < num_semaphores[s.stage])
                 invalidate_semaphore(s.instruction_states[s.stage].semaphores[lane_id]);
             kittens::warp::sync();
@@ -49,7 +47,6 @@ __device__ __forceinline__ void controller_loop(const Globals &g, megakittens::s
 
         // Step 3. Initialize dynamic semaphores
         const int icode = s.instruction_states[s.stage].instruction.icode;
-        if (lane_id == 0) s.record(TEVENT_ICODE, icode);
         if (icode == 0) {
             num_semaphores[s.stage] = 0;
         } else {

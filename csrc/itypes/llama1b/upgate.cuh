@@ -101,9 +101,6 @@ struct RmsUpgateSilu {
                 kittens::wait(pipeline::outputs_arrived(s, output_stage),
                     (i % (2 * OPS)) >= OPS);
 
-                if (i == 0) s.record(TEVENT_FIRST_STORE);
-                else if (i == inst.iters - 1) s.record(TEVENT_LAST_STORE);
-
                 if (i % 2 == 0) {
                     // up iteration: reduce into register now instead of idling
                     llama1b::matvec_reduce<Config, pipeline::SCRATCH_BYTES_PER_WARP>(

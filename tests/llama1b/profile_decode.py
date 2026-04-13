@@ -48,7 +48,7 @@ def main(config: ScriptConfig):
     sm_count = get_sm_count()
     metas, tmetas, insts, nbar, inp, oi = schedule_decode(sm_count=sm_count)
     d = Dispatcher(metas, tmetas, insts, nbar, inp, oi,
-                   use_jit_cache=False, scalar_fields=SCALARS, profile=True)
+                   use_jit_cache=False, scalar_fields=SCALARS)
     tensors = make_tensors()
     pos_id = config.seq_len - 1
     attn_scale = 1.0 / math.sqrt(HDDIM)
@@ -58,10 +58,6 @@ def main(config: ScriptConfig):
     torch.cuda.synchronize()
     d(*tensors, pos_id, attn_scale, 1e-5)
     torch.cuda.synchronize()
-
-    from megakittens.timings import timings_to_mkprof
-    timings_to_mkprof(d.timings_tensor, config.name, clock_mhz=config.clock_mhz)
-    print("Open util/profiler/index.html and load the .mkprof file.")
 
 
 if __name__ == "__main__":

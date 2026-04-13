@@ -68,8 +68,6 @@ struct default_config {
     static constexpr int STATIC_SHARED_MEMORY = STATIC_SHARED_MEMORY_BASE + INSTRUCTION_PIPE_STAGES*SCRATCH_BYTES;
 
     static constexpr int SPIN_LOOP_SLEEP_NS = 20;
-    static constexpr int TIMING_WIDTH = 16; // # of int32s for timing
-    static constexpr bool PROFILE = false;  // compile-time profiling toggle
 };
 
 template <typename Config>
@@ -116,24 +114,6 @@ struct state_t {
 
     kittens::semaphore &tensor_finished;
     kittens::tensor_allocator<1, 1> &tensor_alloc;
-
-    // Profiling fields — only present when Config::PROFILE is true
-    int *timings_ptr;
-    int timings_stride;
-    uint64_t start_clock;
-
-    __device__ __forceinline__ void record(int event_id, int value) {
-        if constexpr (Config::PROFILE) {
-            int offset = iter * Config::TIMING_WIDTH + event_id;
-            if (offset < timings_stride)
-                timings_ptr[blockIdx.x * timings_stride + offset] = value;
-        }
-    }
-    __device__ __forceinline__ void record(int event_id) {
-        if constexpr (Config::PROFILE) {
-            record(event_id, (int)(clock64() - start_clock));
-        }
-    }
 
     __device__ __forceinline__ const instruction_t &instruction() const {
         return instruction_states[stage].instruction;

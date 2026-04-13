@@ -13,7 +13,6 @@ def compile(
     *,
     enable: bool = True,
     verify: bool = False,
-    profile: bool = False,
     debug: bool = False,
     save_dag: bool = False,
     save_schedule: bool = False,
@@ -25,7 +24,6 @@ def compile(
             backend=megakittens_backend(
                 fn=_fn,
                 verify=verify,
-                profile=profile,
                 debug=debug,
                 save_dag=save_dag,
                 save_schedule=save_schedule,

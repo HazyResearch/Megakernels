@@ -369,7 +369,6 @@ def megakittens_backend(
     fn: Callable[..., Any],
     *,
     verify: bool = False,
-    profile: bool = False,
     debug: bool = False,
     save_dag: bool = False,
     save_schedule: bool = False,

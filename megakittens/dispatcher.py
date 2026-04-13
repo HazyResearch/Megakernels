@@ -164,7 +164,6 @@ class Dispatcher:
     DYNAMIC_SHARED_MEMORY_ALIGN = 1024
     NUM_PAGES = (227*1024 - STATIC_SHARED_MEMORY_BASE - DYNAMIC_SHARED_MEMORY_ALIGN) // PAGE_SIZE
     DYNAMIC_SHARED_MEMORY = NUM_PAGES*PAGE_SIZE + DYNAMIC_SHARED_MEMORY_ALIGN
-    TIMING_WIDTH = 16
 
     def __init__(
         self,
@@ -176,7 +175,6 @@ class Dispatcher:
         output_tensor_indices: Sequence[int],
         use_jit_cache: bool = True,
         scalar_fields: list[ScalarField] | None = None,
-        profile: bool = False,
     ) -> None:
         if not tensor_metas:
             raise RuntimeError("[MegaKittens] 'tensor_metas' must not be empty")
@@ -234,10 +232,8 @@ class Dispatcher:
         self.all_tensors: list[torch.Tensor | None] = [None] * (2 + len(tensor_metas))
         self.gls: list[gl | None] = [None] * len(self.all_tensors)
         self.use_jit_cache = use_jit_cache
-        self.profile = profile
         self.scalar_fields: list[ScalarField] = scalar_fields or []
         self.scalars: dict[str, Any] = {sf.name: 0 for sf in self.scalar_fields}
-        self.timings_tensor: torch.Tensor | None = None
         # Launch cache: avoids rebuilding gl structs + TMA descriptors every call
         self._cached_globals_buf: bytearray | None = None
         self._cached_scalar_offsets: list[int] = []
@@ -309,17 +305,6 @@ class Dispatcher:
             max(self.num_barriers, 1), dtype=torch.int32, device=str(self.device),
         )
 
-        # Allocate timings buffer: [num_sms, max_queue_len, TIMING_WIDTH]
-        max_queue_len = self.instruction_tensor.shape[1]
-        self._timings_max_iters = max_queue_len
-        if self.profile:
-            self.timings_tensor = torch.zeros(
-                num_sms, self._timings_max_iters, self.TIMING_WIDTH,
-                dtype=torch.int32, device=str(self.device),
-            )
-        else:
-            self.timings_tensor = None
-
         # Collect TMA types per tensor index from instruction metas
         tensor_tma_types: dict[int, list[st | sv]] = {}
         for inst_meta in self.instruction_metas:
@@ -389,21 +374,17 @@ class Dispatcher:
             op = template.format(tensors=tensor_args)
             dispatch_cases.append(f"case {inst_meta.icode}: return dispatch_instruction<{op}, worker_type, T>(args...);")
         dispatch_cases = "\n".join(dispatch_cases)
-        profile_str = "true" if self.profile else "false"
         source = f"""
             #include "megakittens.cuh"
             {itype_includes}
             namespace megakittens {{
                 struct MKConfig : default_config {{
-                    static constexpr bool PROFILE = {profile_str};
                 }};
                 struct MKGlobals {{
                     {self.gls[0].cpp_type} instructions;
                     {self.gls[1].cpp_type} barriers;
                     {gl_fields}
                     {scalar_fields_str}
-                    int *timings_ptr;
-                    int timings_stride;
                     template <int I> __device__ __forceinline__ auto& gls() const {{{gls_body}}}
                 }};
                 template <WorkerType worker_type, typename T, typename Config, typename Globals, typename... Args>
@@ -430,9 +411,6 @@ class Dispatcher:
         # Reset barriers before each launch
         if self.num_barriers > 0:
             self.barrier_tensor.zero_()
-        if self.timings_tensor is not None:
-            self.timings_tensor.zero_()
-
         if self._cached_globals_buf is not None:
             # Fast path: patch only scalar fields into cached buffer
             for sf, sf_offset in zip(self.scalar_fields, self._cached_scalar_offsets):
@@ -455,15 +433,6 @@ class Dispatcher:
         num_gl_fields = len(fields)
         for sf in self.scalar_fields:
             fields.append((sf.pack(self.scalars[sf.name]), sf.size, sf.align))
-        if self.timings_tensor is not None:
-            timings_ptr = self.timings_tensor.data_ptr()
-            timings_stride = self._timings_max_iters * self.TIMING_WIDTH
-        else:
-            timings_ptr = 0
-            timings_stride = 0
-        fields.append((struct.pack('<Q', timings_ptr), 8, 8))
-        fields.append((c_int(timings_stride), 4, 4))
-
         # Compute scalar field byte offsets within packed struct
         scalar_offsets = []
         offset = 0
