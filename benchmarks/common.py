@@ -22,7 +22,8 @@ def benchmark(
     Returns:
         (mk_ms, pt_ms): Average time per call in milliseconds.
     """
-    compiled_fn = megakittens.compile(fn, use_jit_cache=False, save_dag=True, save_schedule=True)
+    torch._dynamo.reset()  # by default, dynamo limits to 8 compilations per function object
+    compiled_fn = megakittens.compile(fn, use_jit_cache=True, save_dag=False, save_schedule=False, verbose=False, global_work_queue=False)
 
     # Warmup both
     for _ in range(warmup):

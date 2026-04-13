@@ -5,7 +5,7 @@ from typing import List, Tuple
 
 from pydantic import BaseModel, NonNegativeInt
 
-from .optype import OpType
+from .itype import IType
 from .tensor import TensorMeta
 
 
@@ -13,13 +13,16 @@ class Node(BaseModel):
     """
     Graph vertex for the DAG. This schema is node-centric (no separate Edge objects).
     """
-    optype: OpType
+    model_config = {"arbitrary_types_allowed": True}
+    is_input: bool = False
+    is_output: bool = False  # There should be only 1 output node
+    itype: IType | None = None  # None if input/output
     in_nodes: Tuple[Tuple[Node, NonNegativeInt], ...]
     out_tensors: Tuple[TensorMeta, ...]
     out_nodes: Tuple[List[Node], ...]
 
     # Op-specific fields
-    input_index: int | None # None if not an input
+    input_index: int | None = None  # None if not an input
     # TODO: support default values
 
     # Unique identifier for this node
@@ -82,13 +85,15 @@ class DAG:
         for node in self.nodes:
             if not isinstance(node, Node):
                 raise RuntimeError("[MegaKittens] DAG payload contains non-Node entry")
+            if node.is_input + node.is_output + (node.itype is not None) != 1:  # XOR
+                raise RuntimeError("[MegaKittens] Node must be exactly one of: input, output, or itype")
             if len(node.out_nodes) != len(node.out_tensors):
                 raise RuntimeError(
                     f"[MegaKittens] Node arity mismatch: out_nodes={len(node.out_nodes)} out_tensors={len(node.out_tensors)}"
                 )
 
-        input_nodes = [node for node in self.nodes if node.optype == OpType.input]
-        output_nodes = [node for node in self.nodes if node.optype == OpType.output]
+        input_nodes = [node for node in self.nodes if node.is_input]
+        output_nodes = [node for node in self.nodes if node.is_output]
 
         for node in input_nodes:
             if len(node.in_nodes) != 0:

@@ -8,85 +8,46 @@ from functorch.compile import make_boxed_func
 from torch._dynamo.backends.common import aot_autograd
 from torch.fx.passes.shape_prop import TensorMetadata
 
-from . import utils
-from .schema.dag import DAG, Node, OpType
-from .schema.device import Device
-from .schema.dtype import DType
+from .schema.dag import DAG, Node
+from .schema.itype import IType
 from .schema.tensor import TensorMeta
 from .dispatcher import Dispatcher
 from .scheduler import schedule
+from .utils import create_log_base_path, save_dag_as_png, save_dag_as_png_as_json, save_schedule_as_txt, timed
 
 
-def _resolve_optype(gm: torch.fx.GraphModule, node: torch.fx.Node) -> OpType:
+def _resolve_itype(gm: torch.fx.GraphModule, node: torch.fx.Node) -> tuple[IType, list[int]]:
     if node.op == "call_function":
-        return OpType.from_call_function(node.target)
-    if node.op == "call_method":
-        return OpType.from_call_method(node.target)
-    if node.op == "call_module":
+        target = node.target
+    elif node.op == "call_method":
+        target = node.target
+    elif node.op == "call_module":
         try:
             module = gm.get_submodule(node.target)
         except Exception:
             raise RuntimeError(f"[MegaKittens] Invalid call_module node '{node.name}' target={node.target!r}")
-        return OpType.from_call_module(type(module))
-    raise RuntimeError(f"[MegaKittens] Unsupported node op '{node.op}' for node '{node.name}'")
+        target = type(module)
+    else:
+        raise RuntimeError(f"[MegaKittens] Unsupported node op '{node.op}' for node '{node.name}'")
+    result = IType.from_torch(target, args=node.args, kwargs=node.kwargs)
+    if isinstance(result, tuple):
+        itype, aten_output_indices = result
+        if not isinstance(itype, IType) or not isinstance(aten_output_indices, list):
+            raise RuntimeError(f"[MegaKittens] Invalid resolver result for node '{node.name}': {result!r}")
+        return itype, aten_output_indices
+    if not isinstance(result, IType):
+        raise RuntimeError(f"[MegaKittens] Invalid resolve result for node '{node.name}': expected IType, got {type(result).__name__}")
+    return result, []
 
 
-def _tensor_to_mk_tensor(node: torch.fx.Node, value: torch.Tensor) -> TensorMeta:
-    if not value.is_contiguous():
-        raise RuntimeError(
-            f"[MegaKittens] Tensor for node '{node.name}' must be contiguous"
-        )
-    shape = tuple[int, ...](int(dim) for dim in value.shape)
-    dtype = DType.from_torch(value.dtype)
-    device = Device.from_torch(value.device)
-    return TensorMeta(dtype=dtype, shape=shape, device=device)
-
-
-def _is_contiguous(shape: tuple[int, ...], strides: tuple[int, ...]) -> bool:
-    """Check if strides correspond to a contiguous (row-major) layout."""
-    ndim = len(shape)
-    if ndim == 0:
-        return True
-    expected = 1
-    for i in range(ndim - 1, -1, -1):
-        if shape[i] != 1 and strides[i] != expected:
-            return False
-        expected *= shape[i]
-    return True
-
-
-def _tensor_meta_to_mk_tensor(
-    node: torch.fx.Node,
-    tensor_meta: TensorMetadata,
-    fallback_device: torch.device | None = None,
-) -> TensorMeta:
-    if tensor_meta.stride is not None and not _is_contiguous(
-        tuple[int, ...](tensor_meta.shape), tuple(tensor_meta.stride)
-    ):
-        raise RuntimeError(
-            f"[MegaKittens] Tensor for node '{node.name}' must be contiguous"
-        )
-    if tensor_meta.dtype is None:
-        raise RuntimeError(f"[MegaKittens] Missing tensor metadata dtype for node '{node.name}'")
-    shape = tuple[int, ...](int(dim) for dim in tensor_meta.shape)
-    dtype = DType.from_torch(tensor_meta.dtype)
-    tensor_meta_device = getattr(tensor_meta, "device", None)
-    if tensor_meta_device is None:
-        tensor_meta_device = fallback_device
-    if tensor_meta_device is None:
-        raise RuntimeError(f"[MegaKittens] Missing tensor metadata device for node '{node.name}'")
-    device = Device.from_torch(tensor_meta_device)
-    return TensorMeta(dtype=dtype, shape=shape, device=device)
-
-
-def _get_output_tensors(node: torch.fx.Node) -> tuple[TensorMeta, ...]:
+def _get_output_tensors(node: torch.fx.Node, aten_output_indices: list[int] = []) -> tuple[TensorMeta, ...]:
     if "tensor_meta" in node.meta:
         tensor_meta = node.meta["tensor_meta"]
         val = node.meta.get("val")
         if isinstance(tensor_meta, (tuple, list)):
             if all(isinstance(tm, TensorMetadata) for tm in tensor_meta):
                 if val is None:
-                    return tuple(_tensor_meta_to_mk_tensor(node, tm) for tm in tensor_meta)
+                    return tuple(TensorMeta.from_torch(tm) for tm in tensor_meta)
 
                 elif isinstance(val, torch.Tensor):
                     if len(tensor_meta) != 1:
@@ -94,7 +55,7 @@ def _get_output_tensors(node: torch.fx.Node) -> tuple[TensorMeta, ...]:
                             f"[MegaKittens] Node '{node.name}' has {len(tensor_meta)} tensor metadata outputs"
                             f" but single Tensor 'val' provided"
                         )
-                    return (_tensor_meta_to_mk_tensor(node, tensor_meta[0], fallback_device=val.device),)
+                    return (TensorMeta.from_torch(tensor_meta[0], fallback_device=val.device),)
 
                 if not isinstance(val, (tuple, list)):
                     raise RuntimeError(
@@ -113,16 +74,12 @@ def _get_output_tensors(node: torch.fx.Node) -> tuple[TensorMeta, ...]:
                     )
 
                 return tuple(
-                    _tensor_meta_to_mk_tensor(
-                        node,
-                        tm,
-                        fallback_device=val[idx].device,
-                    )
+                    TensorMeta.from_torch(tm, fallback_device=val[idx].device)
                     for idx, tm in enumerate(tensor_meta)
                 )
 
             elif isinstance(val, torch.Tensor):
-                return (_tensor_to_mk_tensor(node, val),)
+                return (TensorMeta.from_torch(val),)
 
             else:
                 raise RuntimeError(
@@ -137,7 +94,7 @@ def _get_output_tensors(node: torch.fx.Node) -> tuple[TensorMeta, ...]:
                     f" but 'val' is not a Tensor (type={type(val).__name__})"
                 )
             fallback_device = val.device if isinstance(val, torch.Tensor) else None
-            return (_tensor_meta_to_mk_tensor(node, tensor_meta, fallback_device=fallback_device),)
+            return (TensorMeta.from_torch(tensor_meta, fallback_device=fallback_device),)
         raise RuntimeError(
             f"[MegaKittens] Unsupported tensor_meta type for node '{node.name}'"
             f" (type={type(tensor_meta).__name__})"
@@ -147,16 +104,31 @@ def _get_output_tensors(node: torch.fx.Node) -> tuple[TensorMeta, ...]:
         value = node.meta["val"]
         if isinstance(value, (tuple, list)):
             tensors = []
-            for v in value:
-                if not isinstance(v, torch.Tensor):
-                    raise RuntimeError(
-                        f"[MegaKittens] Non-tensor entry in node metadata for node '{node.name}'"
-                        f" (indexed entry type={type(v).__name__})"
-                    )
-                tensors.append(_tensor_to_mk_tensor(node, v))
+            if aten_output_indices:
+                for i in aten_output_indices:
+                    if i >= len(value):
+                        raise RuntimeError(
+                            f"[MegaKittens] aten_output_indices[{i}] out of range for node '{node.name}'"
+                            f" (val has {len(value)} entries)"
+                        )
+                    if not isinstance(value[i], torch.Tensor):
+                        raise RuntimeError(
+                            f"[MegaKittens] Non-tensor entry at index {i} in node metadata for node '{node.name}'"
+                            f" (type={type(value[i]).__name__})"
+                        )
+                    tensors.append(TensorMeta.from_torch(value[i]))
+                return tuple(tensors)
+            else:
+                for v in value:
+                    if not isinstance(v, torch.Tensor):
+                        raise RuntimeError(
+                            f"[MegaKittens] Non-tensor entry in node metadata for node '{node.name}'"
+                            f" (indexed entry type={type(v).__name__})"
+                        )
+                    tensors.append(TensorMeta.from_torch(v))
             return tuple(tensors)
         elif isinstance(value, torch.Tensor):
-            return (_tensor_to_mk_tensor(node, value),)
+            return (TensorMeta.from_torch(value),)
         else:
             raise RuntimeError(
                 f"[MegaKittens] Node metadata is not a Tensor for node '{node.name}'"
@@ -259,17 +231,23 @@ def fx_graph_to_mk_dag(
         and not (n.op == "call_function" and n.target == operator.getitem)
     ]
 
+    # Maps FX node name -> {aten_output_idx: itype_output_idx} for multi-output ops
+    output_idx_remap: Dict[str, Dict[int, int]] = {}
+
     # Extract all DAG nodes
     _input_index: int = 0
     node_by_name: Dict[str, Node] = {}
     dag_nodes: List[Node] = []
 
     for node in graph_nodes:
+        is_input = False
+        is_output = False
+        itype: IType | None = None
         input_index: int | None = None
         out_tensors: tuple[TensorMeta, ...] | None = None
 
         if node.op == "placeholder":
-            optype = OpType.input
+            is_input = True
             input_nodes = list(node.all_input_nodes)
             if _input_index >= len(example_inputs):
                 raise RuntimeError("[MegaKittens] Number of input nodes is greater than len(example_inputs)")
@@ -277,29 +255,33 @@ def fx_graph_to_mk_dag(
             example_input = example_inputs[_input_index]
             _input_index += 1
             if isinstance(example_input, torch.Tensor):
-                out_tensors = (_tensor_to_mk_tensor(node, example_input),)
+                out_tensors = (TensorMeta.from_torch(example_input),)
             else:
                 raise RuntimeError("[MegaKittens] Non-tensor inputs are not supported")
 
         elif node.op == "get_attr":
-            optype = OpType.input
+            is_input = True
             input_nodes = list(node.all_input_nodes)
             try:
                 attr = getattr(gm, node.target)
             except Exception:
                 raise RuntimeError("[MegaKittens] Invalid get_attr node")
             if isinstance(attr, torch.Tensor):
-                out_tensors = (_tensor_to_mk_tensor(node, attr),)
+                out_tensors = (TensorMeta.from_torch(attr),)
             else:
                 raise RuntimeError("[MegaKittens] Non-tensor attributes are not supported")
 
         elif node.op in {"call_function", "call_module", "call_method"}:
-            optype = _resolve_optype(gm, node)
+            itype, aten_output_indices = _resolve_itype(gm, node)
             input_nodes = list(node.all_input_nodes)
-            out_tensors = _get_output_tensors(node)
+            out_tensors = _get_output_tensors(node, aten_output_indices=aten_output_indices)
+            if aten_output_indices:
+                output_idx_remap[node.name] = {
+                    aten_idx: itype_idx for itype_idx, aten_idx in enumerate(aten_output_indices)
+                }
 
         elif node.op == "output":
-            optype = OpType.output
+            is_output = True
             if not node.args:
                 raise RuntimeError("[MegaKittens] Output node has no args")
             input_nodes = _flatten_output_nodes(node.args)
@@ -321,6 +303,8 @@ def fx_graph_to_mk_dag(
                     f"[MegaKittens] Invalid input graph edge: node '{node.name}' consumes output node '{input_node.name}'"
                 )
             resolved_node, output_idx = _resolve_input_node_and_output_index(input_node)
+            if resolved_node.name in output_idx_remap:
+                output_idx = output_idx_remap[resolved_node.name][output_idx]
             if resolved_node.name not in node_by_name:
                 raise RuntimeError(f"[MegaKittens] No source node '{resolved_node.name}' exists for '{node.name}'")
             source_node = node_by_name[resolved_node.name]
@@ -339,7 +323,9 @@ def fx_graph_to_mk_dag(
             )
 
         current_node = Node(
-            optype=optype,
+            is_input=is_input,
+            is_output=is_output,
+            itype=itype,
             out_tensors=out_tensors,
             in_nodes=tuple(in_nodes_list),
             out_nodes=tuple([] for _ in out_tensors),
@@ -368,49 +354,66 @@ def fx_graph_to_mk_dag(
 def megakittens_backend(
     fn: Callable[..., Any],
     *,
+    dry_run: bool = False,
     verify: bool = False,
-    debug: bool = False,
+    profile: bool = False,
     save_dag: bool = False,
     save_schedule: bool = False,
     use_jit_cache: bool = True,
+    verbose: bool = True,
+    global_work_queue: bool = False,
 ) -> Callable[[torch.fx.GraphModule, List[Any]], Callable[..., Any]]:
     def _megakittens_backend(gm: torch.fx.GraphModule, example_inputs: List[Any]) -> Callable[..., Any]:
-        if debug:
+        if verbose:
             print(f"[MegaKittens] Compiling function `{fn.__qualname__}`")
             print(f"[MegaKittens] FX graph:")
             gm.graph.print_tabular()
-        
-        dag = fx_graph_to_mk_dag(gm, example_inputs)
-        (
-            instruction_metas,
-            tensor_metas,
-            instructions,
-            num_barriers,
-            input_tensor_indices,
-            output_tensor_indices,
-        ) = schedule(dag)
 
         if save_dag or save_schedule:
-            base_path = utils.create_log_base_path(fn=fn)
+            base_path = create_log_base_path(fn=fn)
+
+        with timed("Built DAG from FX graph", verbose):
+            dag = fx_graph_to_mk_dag(gm, example_inputs)
 
         if save_dag:
-            dag_json = utils.save_dag_as_png_as_json(dag, base_path)
-            utils.save_dag_as_png(dag_json, base_path)
+            with timed("Saved DAG as JSON", verbose):
+                dag_json = save_dag_as_png_as_json(dag, base_path)
+            with timed("Saved DAG as PNG", verbose):
+                save_dag_as_png(dag_json, base_path)
+
+        if dry_run:
+            if verbose:
+                print(f"[MegaKittens] Dry run mode; returning original function")
+            return make_boxed_func(gm)
+
+        with timed("Scheduled instructions", verbose):
+            (
+                instruction_metas,
+                tensor_metas,
+                instructions,
+                num_barriers,
+                input_tensor_indices,
+                output_tensor_indices,
+            ) = schedule(dag, verbose=verbose)
 
         if save_schedule:
-            utils.save_schedule_as_txt(
-                tensor_metas, instructions, instruction_metas, num_barriers, base_path
-            )
+            with timed("Saved schedule as TXT", verbose):
+                save_schedule_as_txt(
+                    tensor_metas, instructions, instruction_metas, num_barriers, base_path
+                )
 
-        dispatcher = Dispatcher(
-            instruction_metas=instruction_metas,
-            tensor_metas=tensor_metas,
-            instructions=instructions,
-            num_barriers=num_barriers,
-            input_tensor_indices=input_tensor_indices,
-            output_tensor_indices=output_tensor_indices,
-            use_jit_cache=use_jit_cache,
-        )
+        with timed("Created dispatcher", verbose):
+            dispatcher = Dispatcher(
+                instruction_metas=instruction_metas,
+                tensor_metas=tensor_metas,
+                instructions=instructions,
+                num_barriers=num_barriers,
+                input_tensor_indices=input_tensor_indices,
+                output_tensor_indices=output_tensor_indices,
+                use_jit_cache=use_jit_cache,
+                verbose=verbose,
+                global_work_queue=global_work_queue,
+            )
 
         return make_boxed_func(dispatcher)
 

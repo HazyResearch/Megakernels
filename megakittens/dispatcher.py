@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import ctypes
 import struct
-from dataclasses import dataclass
 from typing import Any, Sequence
 
 import cuda.bindings.driver as cuda_driver
@@ -12,27 +10,8 @@ from .schema.device import Device
 from .schema.dtype import DType
 from .schema.tensor import TensorMeta
 from .schema.instruction import Instruction, InstructionMeta
-from .jit.c_utils import c_int, c_float, align_up, pack_struct, pack_args
+from .jit.c_utils import pack_args
 from .jit.pykittens import gl
-
-
-@dataclass
-class ScalarField:
-    """A scalar field appended to MKGlobals."""
-    name: str
-    cpp_type: str   # "unsigned int", "float", "bool"
-    size: int       # sizeof in bytes
-    align: int      # alignof in bytes
-
-    def pack(self, value: Any) -> bytes:
-        if self.cpp_type == "float":
-            return c_float(value)
-        elif self.cpp_type in ("unsigned int", "int"):
-            return c_int(int(value))
-        elif self.cpp_type == "bool":
-            return c_int(int(bool(value)))
-        else:
-            raise ValueError(f"Unknown scalar cpp_type: {self.cpp_type}")
 
 
 from .jit.cuda_utils import (
@@ -90,34 +69,24 @@ def _pack_instruction(inst: Instruction) -> list[int]:
     return inst_packed
 
 
-def _pack_instructions(instructions: list[Instruction], *, device: str) -> torch.Tensor:
+def _pack_instructions_global(instructions: list[Instruction], *, device: str) -> torch.Tensor:
     """Pack a list of Instruction objects into an (N, 64) int32 tensor."""
     buf = [_pack_instruction(inst) for inst in instructions]
     return torch.tensor(buf, dtype=torch.int32, device=device)
 
 
-_NOOP_INSTRUCTION = Instruction(
-    icode=0, src_tensors=(), dst_tensors=(), indices=(),
-    src_barriers=(), src_barrier_targets=(),
-    num_input_barriers=0, num_reuse_barriers=0, num_dst_barriers=0,
-    dst_barriers=(),
-)
-
-
-def _pack_sm_queues(instructions: list[Instruction], sm_count: int, *, device: str) -> torch.Tensor:
-    """Assign instructions round-robin to SMs, pad with NoOps, return (num_sms, max_queue_len, 64) tensor."""
-    sm_queues: list[list[Instruction]] = [[] for _ in range(sm_count)]
+def _pack_instructions_per_sm(instructions: list[Instruction], sm_count: int, device: str) -> torch.Tensor:
+    """Pack a list of Instruction objects into a (max_per_sm_insts, sm_count, 64) int32 tensor."""
+    if sm_count % Dispatcher.CLUSTER_SIZE != 0:
+        raise RuntimeError(f"[MegaKittens] sm_count must be a multiple of {Dispatcher.CLUSTER_SIZE}, got {sm_count}")
+    max_per_sm_insts = -(-len(instructions) // sm_count) if len(instructions) > 0 else 1
+    buf = [0] * (max_per_sm_insts * sm_count * 64)
     for i, inst in enumerate(instructions):
-        sm_queues[i % sm_count].append(inst)
-    max_queue_len = max(len(q) for q in sm_queues) if sm_queues else 0
-    buf: list[list[int]] = []
-    for queue in sm_queues:
-        for inst in queue:
-            buf.append(_pack_instruction(inst))
-        for _ in range(max_queue_len - len(queue)):
-            buf.append(_pack_instruction(_NOOP_INSTRUCTION))
-    t = torch.tensor(buf, dtype=torch.int32, device=device)
-    return t.view(sm_count, max_queue_len, 64)
+        wave = i // sm_count
+        sm = i % sm_count
+        offset = wave*sm_count*64 + sm*64
+        buf[offset:offset+64] = _pack_instruction(inst)
+    return torch.tensor(buf, dtype=torch.int32, device=device).reshape(max_per_sm_insts, sm_count, 64)
 
 
 def _validate_tensor_against_meta(
@@ -154,7 +123,7 @@ class Dispatcher:
 
     # Must match default_config in csrc/schema.cuh
     INSTRUCTION_PIPE_STAGES = 2
-    CLUSTER_SIZE = 1
+    CLUSTER_SIZE = 2
     NUM_CONSUMER_WARPS = 8
     NUM_WARPS = 4 + NUM_CONSUMER_WARPS
     NUM_THREADS = NUM_WARPS * 32
@@ -174,7 +143,8 @@ class Dispatcher:
         input_tensor_indices: Sequence[int],
         output_tensor_indices: Sequence[int],
         use_jit_cache: bool = True,
-        scalar_fields: list[ScalarField] | None = None,
+        verbose: bool = True,
+        global_work_queue: bool = False,
     ) -> None:
         if not tensor_metas:
             raise RuntimeError("[MegaKittens] 'tensor_metas' must not be empty")
@@ -232,24 +202,14 @@ class Dispatcher:
         self.all_tensors: list[torch.Tensor | None] = [None] * (2 + len(tensor_metas))
         self.gls: list[gl | None] = [None] * len(self.all_tensors)
         self.use_jit_cache = use_jit_cache
-        self.scalar_fields: list[ScalarField] = scalar_fields or []
-        self.scalars: dict[str, Any] = {sf.name: 0 for sf in self.scalar_fields}
-        # Launch cache: avoids rebuilding gl structs + TMA descriptors every call
-        self._cached_globals_buf: bytearray | None = None
-        self._cached_scalar_offsets: list[int] = []
-        self._cached_c_buf: ctypes.Array | None = None
-        self._cached_packed_params: ctypes.Array | None = None
-        self._cached_grid: tuple[int, ...] | None = None
-        self._cached_device_index: int | None = None
+        self.verbose = verbose
+        self.global_work_queue = global_work_queue
 
     def __del__(self) -> None:
-        try:
-            if self._cubin_module is not None:
-                unload_cubin_module(self._cubin_module)
-                self._cubin_module = None
-                self._kernel_fn = None
-        except TypeError:
-            pass  # module already garbage collected during shutdown
+        if self._cubin_module is not None:
+            unload_cubin_module(self._cubin_module)
+            self._cubin_module = None
+            self._kernel_fn = None
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         return self.call(*args, **kwargs)
@@ -259,24 +219,15 @@ class Dispatcher:
             raise RuntimeError("[MegaKittens] Dispatcher does not support keyword arguments")
 
         num_tensors = len(self.input_tensor_indices)
-        num_scalars = len(self.scalar_fields)
-        expected = num_tensors + num_scalars
-        if len(args) != expected:
+        if len(args) != num_tensors:
             raise RuntimeError(
-                f"[MegaKittens] Dispatcher arg count mismatch: expected {num_tensors} tensors + "
-                f"{num_scalars} scalars = {expected}, but got {len(args)}"
+                f"[MegaKittens] Dispatcher arg count mismatch: expected {num_tensors} tensors, got {len(args)}"
             )
 
-        tensor_args = args[:num_tensors]
-        scalar_args = args[num_tensors:]
-
         if not self._materialized:
-            self._materialize(tensor_args)
+            self._materialize(args)
         else:
-            self._materialize_inputs(tensor_args)
-
-        for sf, val in zip(self.scalar_fields, scalar_args):
-            self.scalars[sf.name] = val
+            self._materialize_inputs(args)
 
         self._launch()
 
@@ -296,11 +247,12 @@ class Dispatcher:
                 meta.shape, dtype=meta.dtype.torch_dtype, device=str(meta.device),
             )
 
-        # Allocate instruction and barrier tensors (per-SM queues)
+        # Allocate instruction and barrier tensors
         device_index = self.device.index if self.device.index else torch.cuda.current_device()
-        num_sms = get_sm_count(device_index)
-        self.instruction_tensor = _pack_sm_queues(self.instructions, num_sms, device=str(self.device))
-        self._num_sms = num_sms
+        if self.global_work_queue:
+            self.instruction_tensor = _pack_instructions_global(self.instructions, device=str(self.device))
+        else:
+            self.instruction_tensor = _pack_instructions_per_sm(self.instructions, get_sm_count(device_index), device=str(self.device))
         self.barrier_tensor = torch.zeros(
             max(self.num_barriers, 1), dtype=torch.int32, device=str(self.device),
         )
@@ -320,10 +272,11 @@ class Dispatcher:
         self.all_tensors = [self.instruction_tensor, self.barrier_tensor] + self.tensors
         for i, t in enumerate(self.all_tensors):
             mk_dtype = DType.from_torch(t.dtype)
-            if i == 0:  # instructions: 3D (num_sms, max_queue_len, 64)
-                self.gls[i] = gl(dtype=mk_dtype, b=1, d=-1, r=-1, c=64)
-            elif i == 1:  # barriers
-                self.gls[i] = gl(dtype=mk_dtype, b=1, d=1, r=-1, c=-1)
+            if i < 2:  # instructions and barriers
+                if i == 0 and not self.global_work_queue:
+                    self.gls[i] = gl(dtype=mk_dtype, b=1, d=-1, r=-1, c=-1)
+                else:
+                    self.gls[i] = gl(dtype=mk_dtype, b=1, d=1, r=-1, c=-1)
             else:
                 tma = tensor_tma_types.get(i - 2, [])
                 self.gls[i] = gl(dtype=mk_dtype, b=-1, d=-1, r=-1, c=-1, tma_types=tma)
@@ -342,9 +295,6 @@ class Dispatcher:
             _validate_tensor_against_meta(
                 src, self.tensor_metas[tensor_idx], f"Input {input_arg_idx}"
             )
-            # Invalidate launch cache if a different tensor is passed
-            if self._cached_globals_buf is not None and self.all_tensors[2 + tensor_idx] is not src:
-                self._cached_globals_buf = None
             self.tensors[tensor_idx] = src
             self.all_tensors[2 + tensor_idx] = src  # TODO: if input dims change, all other dims + gls should change
 
@@ -353,17 +303,8 @@ class Dispatcher:
         initialize_cuda_context(device_index)
         major, minor = get_sm_arch(device_index)  # TODO: Generate config and globals correctly based on instructions
 
-        # megakittens.cuh pulls in Blackwell-only ThunderKittens (CLC handles, tcgen05 tensor_allocator).
-        # NVRTC uses KITTENS_HOPPER on sm_90, which omits those symbols — compilation fails on H100.
-        if major < 10:
-            raise RuntimeError(
-                "[MegaKittens] These kernels require NVIDIA Blackwell (compute capability sm_100+). "
-                "Hopper (H100) and earlier GPUs are not supported. Use B200/B300-class hardware."
-            )
-
         itype_includes = "\n".join(f'#include "{inst_meta.itype.cpp_include}"' for inst_meta in self.instruction_metas if inst_meta.itype.cpp_include)
         gl_fields = "\n".join(f"{self.gls[i + 2].cpp_type} tensor_{i};" for i in range(len(self.gls) - 2))
-        scalar_fields_str = "\n".join(f"{sf.cpp_type} {sf.name};" for sf in self.scalar_fields)
         gls_body = "\n".join(f"{'if' if i == 0 else 'else if'} constexpr (I == {i}) return tensor_{i};" for i in range(len(self.gls) - 2))
         dispatch_cases = []
         for inst_meta in self.instruction_metas:
@@ -374,17 +315,16 @@ class Dispatcher:
             op = template.format(tensors=tensor_args)
             dispatch_cases.append(f"case {inst_meta.icode}: return dispatch_instruction<{op}, worker_type, T>(args...);")
         dispatch_cases = "\n".join(dispatch_cases)
+        config_struct = "static constexpr bool GLOBAL_WORK_QUEUE = true;" if self.global_work_queue else ""
         source = f"""
             #include "megakittens.cuh"
             {itype_includes}
             namespace megakittens {{
-                struct MKConfig : default_config {{
-                }};
+                struct MKConfig : default_config {{{config_struct}}};
                 struct MKGlobals {{
                     {self.gls[0].cpp_type} instructions;
                     {self.gls[1].cpp_type} barriers;
                     {gl_fields}
-                    {scalar_fields_str}
                     template <int I> __device__ __forceinline__ auto& gls() const {{{gls_body}}}
                 }};
                 template <WorkerType worker_type, typename T, typename Config, typename Globals, typename... Args>
@@ -398,7 +338,7 @@ class Dispatcher:
         """
         cubin, (kernel_name,) = compile_source_to_cubin(
             source, (b"megakittens::kernel<megakittens::MKConfig, megakittens::MKGlobals>",), major, minor,
-            use_file_cache=self.use_jit_cache,
+            use_file_cache=self.use_jit_cache, verbose=self.verbose,
         )
         self._cubin_module = load_cubin_module(cubin)
         self._kernel_fn = get_kernel_from_cubin_module(self._cubin_module, kernel_name)
@@ -407,83 +347,23 @@ class Dispatcher:
     def _launch(self) -> None:
         if self._kernel_fn is None:
             self._compile_kernel()
-
+        device_index = self.device.index if self.device.index else torch.cuda.current_device()
         # Reset barriers before each launch
         if self.num_barriers > 0:
             self.barrier_tensor.zero_()
-        if self._cached_globals_buf is not None:
-            # Fast path: patch only scalar fields into cached buffer
-            for sf, sf_offset in zip(self.scalar_fields, self._cached_scalar_offsets):
-                self._cached_globals_buf[sf_offset:sf_offset + sf.size] = sf.pack(self.scalars[sf.name])
-            stream = torch.cuda.current_stream(self._cached_device_index).cuda_stream
-            launch_kernel(
-                self._kernel_fn,
-                self._cached_packed_params,
-                grid=self._cached_grid,
-                block=(self.NUM_THREADS,),
-                dynamic_smem_bytes=self.DYNAMIC_SHARED_MEMORY,
-                stream=stream,
-                cluster=None,
-            )
-            return
-
-        # First call: build everything and cache
-        device_index = self.device.index if self.device.index else torch.cuda.current_device()
         fields = [(g.tensor_to_gl(t), g.size, g.align) for g, t in zip(self.gls, self.all_tensors)]
-        num_gl_fields = len(fields)
-        for sf in self.scalar_fields:
-            fields.append((sf.pack(self.scalars[sf.name]), sf.size, sf.align))
-        # Compute scalar field byte offsets within packed struct
-        scalar_offsets = []
-        offset = 0
-        for i, (_, size, field_align) in enumerate(fields):
-            offset = align_up(offset, field_align)
-            if num_gl_fields <= i < num_gl_fields + len(self.scalar_fields):
-                scalar_offsets.append(offset)
-            offset += size
-
-        # Build packed buffer and cache
-        buf = pack_struct(fields)
-        self._cached_globals_buf = buf
-        self._cached_scalar_offsets = scalar_offsets
-        self._cached_c_buf = (ctypes.c_char * len(buf)).from_buffer(buf)
-        self._cached_packed_params = (ctypes.c_void_p * 1)(ctypes.addressof(self._cached_c_buf))
-        self._cached_grid = (self._num_sms,)
-        self._cached_device_index = device_index
-
+        _globals_holder, globals_packed = pack_args(fields)
+        if self.global_work_queue:
+            grid_size = -(-len(self.instructions) // self.CLUSTER_SIZE) * self.CLUSTER_SIZE  # round up
+        else:
+            grid_size = get_sm_count(device_index)
         stream = torch.cuda.current_stream(device_index).cuda_stream
         launch_kernel(
             self._kernel_fn,
-            self._cached_packed_params,
-            grid=self._cached_grid,
+            globals_packed,
+            grid=(grid_size,),
             block=(self.NUM_THREADS,),
             dynamic_smem_bytes=self.DYNAMIC_SHARED_MEMORY,
             stream=stream,
-            cluster=None,
-        )
-
-    def relaunch(self, **scalars: Any) -> None:
-        """Minimal-overhead relaunch using cached globals. Only patches the given scalars.
-
-        Must be called after at least one regular call() to build the cache.
-        Skips tensor validation, arg unpacking, and output construction.
-        """
-        if self._cached_globals_buf is None:
-            raise RuntimeError(
-                "[MegaKittens] relaunch() requires a prior call() to build the launch cache"
-            )
-        if self.num_barriers > 0:
-            self.barrier_tensor.zero_()
-        for sf, sf_offset in zip(self.scalar_fields, self._cached_scalar_offsets):
-            if sf.name in scalars:
-                self._cached_globals_buf[sf_offset:sf_offset + sf.size] = sf.pack(scalars[sf.name])
-        stream = torch.cuda.current_stream(self._cached_device_index).cuda_stream
-        launch_kernel(
-            self._kernel_fn,
-            self._cached_packed_params,
-            grid=self._cached_grid,
-            block=(self.NUM_THREADS,),
-            dynamic_smem_bytes=self.DYNAMIC_SHARED_MEMORY,
-            stream=stream,
-            cluster=None,
+            cluster=(self.CLUSTER_SIZE,),
         )

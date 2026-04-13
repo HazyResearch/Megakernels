@@ -73,8 +73,10 @@ struct RMSNorm {
     struct loader {
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
             const auto &instruction = s.instruction();
-            const int row_start = instruction.indices[0];
-            const int num_rows  = instruction.indices[1];
+            const int batch     = instruction.indices[0];
+            const int depth     = instruction.indices[1];
+            const int row_start = instruction.indices[2];
+            const int num_rows  = instruction.indices[3];
 
             if (kittens::warp::elect_leader()) {
                 all_input_barrier_wait<Config>(g, instruction);
@@ -86,7 +88,7 @@ struct RMSNorm {
 
                 kittens::tma::expect_bytes(inputs_arrived(s), num_rows * sizeof(row_vec));
                 for (int i = 0; i < num_rows; i++) {
-                    kittens::tma::load_async(rows[i], x_gl, {row_start + i, 0}, inputs_arrived(s));
+                    kittens::tma::load_async(rows[i], x_gl, {batch, depth, row_start + i, 0}, inputs_arrived(s));
                 }
             } else if (kittens::warp::elect_leader_from_active()) {
                 // Release unused pages immediately
@@ -117,8 +119,10 @@ struct RMSNorm {
             kittens::wait(inputs_arrived(s), 0);
 
             const auto &instruction = s.instruction();
-            const int row_start = instruction.indices[0];
-            const int num_rows  = instruction.indices[1];
+            const int batch     = instruction.indices[0];
+            const int depth     = instruction.indices[1];
+            const int row_start = instruction.indices[2];
+            const int num_rows  = instruction.indices[3];
             const int lane      = kittens::laneid();
             const int warp_id   = kittens::warpid();
 
@@ -182,7 +186,7 @@ struct RMSNorm {
                 auto &y_gl = g.template gls<DST>();
                 all_reuse_barrier_wait<Config>(g, instruction);
                 for (int i = 0; i < num_rows; i++) {
-                    kittens::tma::store_async(y_gl, rows[i], {row_start + i, 0});
+                    kittens::tma::store_async(y_gl, rows[i], {batch, depth, row_start + i, 0});
                 }
                 kittens::tma::store_async_wait();
                 s.page_finish(pid);

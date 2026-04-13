@@ -58,7 +58,7 @@ def _save_to_cache(key: str, cubin: bytes, mangled_names: tuple[bytes, ...]) -> 
 @functools.cache
 def compile_source_to_cubin(
     src: str, kernel_symbols: tuple[bytes, ...], major: int, minor: int,
-    *, use_file_cache: bool = True,
+    *, use_file_cache: bool = True, verbose: bool = True,
 ) -> tuple[bytes, tuple[bytes, ...]]:
     # 0. Check file-backed cache
     cache_key = _cache_key(src, kernel_symbols, major, minor)
@@ -99,7 +99,7 @@ def compile_source_to_cubin(
     (err,) = nvrtc.nvrtcGetProgramLog(nvrtc_prog, log)
     check_nvrtc(err)
     decoded_log = log.decode(errors="ignore").strip()
-    if decoded_log:
+    if decoded_log and (verbose or err_compile != nvrtc.nvrtcResult.NVRTC_SUCCESS):
         print(decoded_log)
     check_nvrtc(err_compile)
 

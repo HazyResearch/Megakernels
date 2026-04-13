@@ -1,9 +1,22 @@
+import operator
 from typing import List, Tuple
+
+import torch
 
 from ..schema.dtype import DType
 from ..schema.itype import IType
 from ..schema.tensor import TensorMeta, TensorSpec
 from ..jit.pykittens import st
+
+
+@torch.library.custom_op("megakittens::gemm", mutates_args=())
+def gemm_op(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    return a @ b
+
+
+@gemm_op.register_fake
+def _gemm_fake(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    return torch.empty(*a.shape[:-1], b.shape[-1], dtype=a.dtype, device=a.device)
 
 
 class Gemm(IType):
@@ -12,25 +25,38 @@ class Gemm(IType):
     TILE_K = 64
     SUPERGROUP_SIZE = 8
 
+    torch_functions_map = {
+        torch.matmul: None, torch.mm: None, torch.bmm: None, operator.matmul: None,
+        torch.ops.aten.mm: None, torch.ops.aten.mm.default: None,
+        torch.ops.aten.bmm: None, torch.ops.aten.bmm.default: None,
+        torch.ops.aten.matmul: None, torch.ops.aten.matmul.default: None,
+    }
+    torch_methods_map = {"gemm": None}
+
     A_TMA = st(dtype=DType.bf16, rows=128, cols=64) # st_bf<Mb/2, Kb>
     B_TMA = st(dtype=DType.bf16, rows=64, cols=128) # st_bf<Kb, Nb/2> (B is K×N)
     D_TMA = st(dtype=DType.bf16, rows=128, cols=32) # st_bf<Mb/2, Nb/EPI_PIPE_DEPTH>
 
-    @property
-    def name(self) -> str:
-        return "gemm"
+    test_cases = [
+        ((), (512, 256, 64)), ((), (512, 256, 256)), ((), (512, 512, 256)),
+        ((), (1024, 1024, 512)), ((), (2560, 2560, 64)),
+        ((), (2, 512, 256, 64)), ((), (2, 3, 512, 256, 64)),
+    ]
+    bench_cases = [((), (16384, 16384, 16384)), ((), (16384, 32768, 16384)), ((), (32768, 16384, 16384)), ((), (32768, 32768, 16384))]
 
-    @property
-    def cpp_template(self) -> str:
-        return "Gemm<MKConfig, MKGlobals, {tensors}>"
+    def test_args(self, case: tuple) -> tuple[torch.Tensor, ...]:
+        *outer, R, C, K = case
+        return (
+            torch.randn(*outer, R, K, dtype=torch.bfloat16, device="cuda"),
+            torch.randn(*outer, K, C, dtype=torch.bfloat16, device="cuda"),
+        )
 
-    @property
-    def cpp_include(self) -> str:
-        return "itypes/gemm.cuh"
-
-    @property
-    def op_type(self) -> str:
-        return "gemm"
+    def bench_flops(self, case: tuple) -> float:
+        *outer, R, C, K = case
+        n = 1
+        for d in outer:
+            n *= d
+        return 2.0 * n * R * C * K
 
     @property
     def inputs(self) -> list[TensorSpec]:
@@ -67,35 +93,49 @@ class Gemm(IType):
         return tiles
 
     def block_indices(self, src_metas: Tuple[TensorMeta, ...], dst_metas: Tuple[TensorMeta, ...]) -> List[Tuple[int, ...]]:
-        M, K = src_metas[0].shape
-        N = src_metas[1].shape[1]
-        m_tiles = M // self.TILE_M
-        n_tiles = N // self.TILE_N
+        B, D, _R, _K = (1,) * (4 - len(src_metas[0].shape)) + src_metas[0].shape
+        R = _R // self.TILE_M
+        C = src_metas[1].shape[-1] // self.TILE_N
         indices = []
-        for tile_row, tile_col in self._swizzled_tile_order(m_tiles, n_tiles, self.SUPERGROUP_SIZE):
-            indices.append((tile_row, tile_col))
-            indices.append((tile_row, tile_col))  # duplicate for CTA 1
+        for b in range(B):
+            for d in range(D):
+                for r, c in self._swizzled_tile_order(R, C, self.SUPERGROUP_SIZE):
+                    indices.append((b, d, r, c))
+                    indices.append((b, d, r, c))  # duplicate for CTA 1
         return indices
 
     def num_instructions(self, src_metas: Tuple[TensorMeta, ...], dst_metas: Tuple[TensorMeta, ...]) -> int:
-        M, K = src_metas[0].shape
-        N = src_metas[1].shape[1]
-        return (M // self.TILE_M) * (N // self.TILE_N) * 2  # x2 for cluster
+        B, D, _R, _K = (1,) * (4 - len(src_metas[0].shape)) + src_metas[0].shape
+        R = _R // self.TILE_M
+        C = src_metas[1].shape[-1] // self.TILE_N
+        return B * D * R * C * 2
+
+    def access_regions(self, block_index, src_metas, dst_metas):
+        b, d, r, c = block_index
+        K = src_metas[0].shape[-1]
+        a_region = ((b, b + 1), (d, d + 1), (r * self.TILE_M, (r + 1) * self.TILE_M), (0, K))
+        b_region = ((b, b + 1), (d, d + 1), (0, K), (c * self.TILE_N, (c + 1) * self.TILE_N))
+        d_region = ((b, b + 1), (d, d + 1), (r * self.TILE_M, (r + 1) * self.TILE_M), (c * self.TILE_N, (c + 1) * self.TILE_N))
+        return [a_region, b_region], [d_region]
 
     def validate(self, src_metas: Tuple[TensorMeta, ...], dst_metas: Tuple[TensorMeta, ...]) -> None:
         super().validate(src_metas, dst_metas)
         A_shape = src_metas[0].shape
         B_shape = src_metas[1].shape
         C_shape = dst_metas[0].shape
-        if A_shape[1] != B_shape[0]:
+        if A_shape[:-2] != B_shape[:-2]:
             raise RuntimeError(
-                f"[MegaKittens] Gemm K-dim mismatch: A has K={A_shape[1]}, B has K={B_shape[0]}"
+                f"[MegaKittens] Gemm outer dims mismatch: A has {A_shape[:-2]}, B has {B_shape[:-2]}"
             )
-        if A_shape[1] % self.TILE_K != 0:
+        if A_shape[-1] != B_shape[-2]:
             raise RuntimeError(
-                f"[MegaKittens] Gemm requires K ({A_shape[1]}) to be a multiple of {self.TILE_K}"
+                f"[MegaKittens] Gemm K-dim mismatch: A has K={A_shape[-1]}, B has K={B_shape[-2]}"
             )
-        if C_shape != (A_shape[0], B_shape[1]):
+        if A_shape[-1] % self.TILE_K != 0:
             raise RuntimeError(
-                f"[MegaKittens] Gemm output shape mismatch: expected ({A_shape[0]}, {B_shape[1]}), got {C_shape}"
+                f"[MegaKittens] Gemm requires K ({A_shape[-1]}) to be a multiple of {self.TILE_K}"
+            )
+        if C_shape[-2:] != (A_shape[-2], B_shape[-1]):
+            raise RuntimeError(
+                f"[MegaKittens] Gemm output shape mismatch: expected ({A_shape[-2]}, {B_shape[-1]}), got {C_shape[-2:]}"
             )

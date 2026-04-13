@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import contextlib
 import itertools
 import json
 import re
+import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 
@@ -11,6 +13,17 @@ from .schema.tensor import TensorMeta
 from .schema.instruction import Instruction, InstructionMeta
 
 _LOG_DUMP_COUNTER = itertools.count()
+
+
+@contextlib.contextmanager
+def timed(msg: str, enable: bool):
+    if enable:
+        t0 = time.perf_counter()
+        yield
+        t1 = time.perf_counter()
+        print(f"[MegaKittens] {msg} ({(t1 - t0) * 1000:.1f} ms)")
+    else:
+        yield
 
 
 def create_log_base_path(fn: Callable[..., Any]) -> Path:
@@ -35,7 +48,7 @@ def save_dag_as_png_as_json(
         "nodes": [
             {
                 "id": idx,
-                "optype": node.optype.value,
+                "itype": "input" if node.is_input else "output" if node.is_output else repr(node.itype),
                 "input_index": node.input_index,
                 "in_nodes": [
                     [node_index_by_id[in_node.id], input_slot]
@@ -87,8 +100,8 @@ def save_dag_as_png(
 
     for node in dag_json["nodes"]:
         nid = str(node["id"])
-        optype = node["optype"]
-        op_line = f"Input[{node['input_index']}]" if optype == "input" else optype.capitalize()
+        itype = node["itype"]
+        op_line = f"Input[{node['input_index']}]" if itype == "input" else itype
         lines = [f"#{nid}", op_line]
         for t in node["out_tensors"]:
             shape_str = "\u00d7".join(str(d) for d in t["shape"])
@@ -97,9 +110,9 @@ def save_dag_as_png(
             lines.append(f"- {t['dtype'].upper()} [{shape_str}] {device_str.upper()}")
         label = "\\n".join(lines)
 
-        if optype == "input":
+        if itype == "input":
             dot.node(nid, label=label, fillcolor="#a8d8a8")
-        elif optype == "output":
+        elif itype == "output":
             dot.node(nid, label=label, fillcolor="#d8a8a8")
         else:
             dot.node(nid, label=label, fillcolor="#a8c8d8")
@@ -152,7 +165,7 @@ def save_schedule_as_txt(
 
     if instructions:
         id_strs = [f"I{idx}" for idx in range(len(instructions))]
-        icode_to_name = {m.icode: m.itype.name for m in instruction_metas}
+        icode_to_name = {m.icode: repr(m.itype) for m in instruction_metas}
         itype_strs = [icode_to_name.get(inst.icode, f"icode={inst.icode}") for inst in instructions]
         src_strs = [f"src=[{', '.join(f'T{t}' for t in inst.src_tensors)}]" for inst in instructions]
         dst_strs = [f"dst=[{', '.join(f'T{t}' for t in inst.dst_tensors)}]" for inst in instructions]

@@ -1,25 +1,32 @@
 from typing import List, Tuple
 
+import torch
+
 from ..schema.itype import IType
 from ..schema.tensor import TensorMeta, TensorSpec
 
 
+@torch.library.custom_op("megakittens::noop", mutates_args=())
+def noop_op() -> None:
+    pass
+
+
+@noop_op.register_fake
+def _noop_fake() -> None:
+    pass
+
+
 class Noop(IType):
-    @property
-    def name(self) -> str:
-        return "noop"
+    torch_functions_map: dict = {}
+    test_cases: list[tuple] = []
+    bench_cases: list[tuple] = []
+
+    def test_args(self, case):
+        return ()
 
     @property
     def cpp_template(self) -> str:
         return "Noop<MKConfig, MKGlobals>"
-
-    @property
-    def cpp_include(self) -> str:
-        return "itypes/noop.cuh"
-
-    @property
-    def op_type(self) -> str:
-        return "noop"
 
     @property
     def inputs(self) -> list[TensorSpec]:
@@ -31,6 +38,9 @@ class Noop(IType):
 
     def block_indices(self, src_metas: Tuple[TensorMeta, ...], dst_metas: Tuple[TensorMeta, ...]) -> List[Tuple[int, ...]]:
         return [()]
+
+    def access_regions(self, block_index, src_metas, dst_metas):
+        return [], []
 
     def validate(self, src_metas: Tuple[TensorMeta, ...], dst_metas: Tuple[TensorMeta, ...]) -> None:
         super().validate(src_metas, dst_metas)

@@ -56,8 +56,10 @@ struct Gemm {
     struct loader {
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
             const auto &instruction = s.instruction();
-            const int tile_row = instruction.indices[0];
-            const int tile_col = instruction.indices[1];
+            const int batch = instruction.indices[0];
+            const int depth = instruction.indices[1];
+            const int tile_row = instruction.indices[2];
+            const int tile_col = instruction.indices[3];
             const int cta_rank = kittens::cluster_ctarank();
             auto &a_gl = g.template gls<SRC_A>();
             auto &b_gl = g.template gls<SRC_B>();
@@ -77,8 +79,8 @@ struct Gemm {
                     if (i < num_iters) {
                         #pragma unroll
                         for (int cid = 0; cid < NUM_CONSUMERS; cid++)
-                            kittens::tma::cluster::load_async(a_st(s, stage, cid), a_gl, {(tile_row*2+cta_rank)*NUM_CONSUMERS+cid, i}, inputs_arrived(s, stage), (uint16_t)(1<<cta_rank), 0);
-                        kittens::tma::cluster::load_async(b_st(s, stage), b_gl, {i, tile_col*2+cta_rank}, inputs_arrived(s, stage), (uint16_t)(1<<cta_rank), 0);
+                            kittens::tma::cluster::load_async(a_st(s, stage, cid), a_gl, {batch, depth, (tile_row*2+cta_rank)*NUM_CONSUMERS+cid, i}, inputs_arrived(s, stage), (uint16_t)(1<<cta_rank), 0);
+                        kittens::tma::cluster::load_async(b_st(s, stage), b_gl, {batch, depth, i, tile_col*2+cta_rank}, inputs_arrived(s, stage), (uint16_t)(1<<cta_rank), 0);
                     } else {
                         if (stage != 0) s.page_finish(s.lid_to_pid(A_LIDS[stage]));
                         if (stage%2 == 1) s.page_finish(s.lid_to_pid(B_LIDS[(stage-1)/2]));
@@ -126,7 +128,8 @@ struct Gemm {
 
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
             const auto &instruction = s.instruction();
-            const int tile_row = instruction.indices[0], tile_col = instruction.indices[1];
+            const int batch = instruction.indices[0], depth = instruction.indices[1];
+            const int tile_row = instruction.indices[2], tile_col = instruction.indices[3];
             const int cta_rank = kittens::cluster_ctarank();
             auto &d_gl = g.template gls<DST_D>();
             const int cid = kittens::warpgroup::groupid();
@@ -149,7 +152,7 @@ struct Gemm {
                 kittens::warpgroup::sync(cid + 1);
                 kittens::warpgroup::store(d_st(s, cid, i%NUM_D_TILES), d_reg[i]);
                 kittens::warpgroup::sync(cid + 1);
-                kittens::warpgroup::tma::store_async<kittens::dim::ROW, kittens::cache_policy::EVICT_FIRST>(d_gl, d_st(s, cid, i%NUM_D_TILES), {(2*tile_row+cta_rank)*NUM_CONSUMERS+cid, EPI_PIPE_DEPTH*tile_col+i});
+                kittens::warpgroup::tma::store_async<kittens::dim::ROW, kittens::cache_policy::EVICT_FIRST>(d_gl, d_st(s, cid, i%NUM_D_TILES), {batch, depth, (2*tile_row+cta_rank)*NUM_CONSUMERS+cid, EPI_PIPE_DEPTH*tile_col+i});
             }
 
             kittens::warpgroup::tma::store_async_wait(); // wait for all write to complete

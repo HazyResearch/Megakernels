@@ -44,6 +44,8 @@ struct instruction_t {
 static_assert(sizeof(instruction_t) == 256);
 
 struct default_config {
+    static constexpr bool GLOBAL_WORK_QUEUE = false;
+
     static constexpr int INSTRUCTION_PIPE_STAGES = 2;
     static constexpr int CLUSTER_SIZE = 1;
     static constexpr int MIN_BLOCKS_PER_SM = 1;

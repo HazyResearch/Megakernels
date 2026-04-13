@@ -1,9 +1,9 @@
-
 import math
 from typing import List, Tuple
 
 import torch
 
+from ..dispatcher import Dispatcher
 from ..schema.dtype import DType
 from ..schema.itype import IType
 from ..schema.tensor import TensorMeta, TensorSpec
@@ -14,102 +14,131 @@ from ..jit.pykittens import sv
 def rmsnorm_op(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
     return torch.rms_norm(x, [x.shape[-1]], weight, eps)
 
+
 @rmsnorm_op.register_fake
 def _rmsnorm_fake(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
     return torch.empty_like(x)
 
 
-_PAGE_BYTES = 32768  # Config::PAGE_SIZE
+def _rows_per_inst(C: int) -> int:
+    """How many full rows of width C fit in one page."""
+    row_bytes = ((C * 2 + 127) // 128) * 128  # sv<bf16, C> padded to 128-byte boundary
+    return Dispatcher.PAGE_SIZE // row_bytes
 
 
-def _sv_sizeof_bytes(n: int) -> int:
-    """sizeof(sv<bf16, N>) on Blackwell -- padded to 128-byte boundary."""
-    raw = n * 2  # bf16 = 2 bytes
-    return ((raw + 127) // 128) * 128
+def _resolve_rmsnorm(args, kwargs):
+    x_node = args[0]
+    col_dim = x_node.meta['val'].shape[-1]
+    return RMSNorm(col_dim=col_dim)
 
 
-def _rows_per_inst(N: int) -> int:
-    """How many full rows of width N fit in one page."""
-    row_bytes = _sv_sizeof_bytes(N)
-    return _PAGE_BYTES // row_bytes
+def _resolve_aten_fused_rms_norm(args, kwargs):
+    x_node = args[0]
+    col_dim = x_node.meta['val'].shape[-1]
+    return RMSNorm(col_dim=col_dim), [0]
 
 
 class RMSNorm(IType):
-    def __init__(self):
-        self._n = 0
+    torch_functions_map = {
+        torch.ops.megakittens.rmsnorm: _resolve_rmsnorm,
+        torch.ops.megakittens.rmsnorm.default: _resolve_rmsnorm,
+        torch.ops.aten._fused_rms_norm: _resolve_aten_fused_rms_norm,
+        torch.ops.aten._fused_rms_norm.default: _resolve_aten_fused_rms_norm,
+    }
+    torch_methods_map = {"rmsnorm": _resolve_rmsnorm}
+    torch_modules_map = {torch.nn.RMSNorm: _resolve_rmsnorm}
 
-    @property
-    def name(self) -> str:
-        return "rmsnorm"
+    test_cases = [
+        ((), (1, 64)),
+        ((), (1, 2048)), ((), (4, 2048)), ((), (32, 2048)),
+        ((), (16, 4096)), ((), (32, 4096)), ((), (8, 8192)),
+        ((), (2, 4, 2048)), ((), (2, 3, 4, 2048)),
+    ]
+    test_atol = 1e-2
+    test_rtol = 1e-2
+    bench_cases = [((), (32768, 256)), ((), (32768, 512)), ((), (32768, 1536)), ((), (32768, 2048)), ((), (32768, 4096)), ((), (32768, 8192)), ((), (32768, 16384))]
+
+    def test_args(self, case: tuple) -> tuple:
+        C = case[-1]
+        return (
+            torch.randn(*case, dtype=torch.bfloat16, device="cuda"),
+            torch.randn(C, dtype=torch.bfloat16, device="cuda"),
+            1e-6,
+        )
+
+    def bench_bytes(self, case: tuple) -> float:
+        num_elements = 1
+        for d in case:
+            num_elements *= d
+        C = case[-1]
+        return num_elements * 2 * 2 + C * 2
+
+    def __init__(self, col_dim: int = 0):
+        self.col_dim = col_dim
 
     @property
     def cpp_template(self) -> str:
-        return f"RMSNorm<MKConfig, MKGlobals, {self._n}, {{tensors}}>"
-
-    @property
-    def cpp_include(self) -> str:
-        return "itypes/rmsnorm.cuh"
-
-    @property
-    def op_type(self) -> str:
-        return "rmsnorm"
+        return f"RMSNorm<MKConfig, MKGlobals, {self.col_dim}, {{tensors}}>"
 
     @property
     def inputs(self) -> list[TensorSpec]:
-        if self._n > 0:
+        if self.col_dim > 0:
             return [
-                TensorSpec(dtype=DType.bf16, granularity=(1, 16), tma_types=[sv(dtype=DType.bf16, length=self._n)]),
-                TensorSpec(dtype=DType.bf16, granularity=(16,)),
+                TensorSpec(dtype=DType.bf16, granularity=(1, 64), tma_types=[sv(dtype=DType.bf16, length=self.col_dim)]),
+                TensorSpec(dtype=DType.bf16, granularity=(64,)),
             ]
         return [
-            TensorSpec(dtype=DType.bf16, granularity=(1, 16)),
-            TensorSpec(dtype=DType.bf16, granularity=(16,)),
+            TensorSpec(dtype=DType.bf16, granularity=(1, 64)),
+            TensorSpec(dtype=DType.bf16, granularity=(64,)),
         ]
 
     @property
     def outputs(self) -> list[TensorSpec]:
-        if self._n > 0:
+        if self.col_dim > 0:
             return [
-                TensorSpec(dtype=DType.bf16, granularity=(1, 16), tma_types=[sv(dtype=DType.bf16, length=self._n)]),
+                TensorSpec(dtype=DType.bf16, granularity=(1, 64), tma_types=[sv(dtype=DType.bf16, length=self.col_dim)]),
             ]
         return [
-            TensorSpec(dtype=DType.bf16, granularity=(1, 16)),
+            TensorSpec(dtype=DType.bf16, granularity=(1, 64)),
         ]
 
     def block_indices(self, src_metas: Tuple[TensorMeta, ...], dst_metas: Tuple[TensorMeta, ...]) -> List[Tuple[int, ...]]:
-        M, N = src_metas[0].shape[-2], src_metas[0].shape[-1]
-        rpi = _rows_per_inst(N)
+        shape = src_metas[0].shape
+        B, D, R, C = (1,) * (4 - len(shape)) + shape
+        rows_per_inst = _rows_per_inst(C)
         indices = []
-        row = 0
-        while row < M:
-            rows_this = min(rpi, M - row)
-            indices.append((row, rows_this))
-            row += rows_this
+        for b in range(B):
+            for d in range(D):
+                r = 0
+                while r < R:
+                    n = min(rows_per_inst, R - r)
+                    indices.append((b, d, r, n))
+                    r += n
         return indices
 
     def num_instructions(self, src_metas: Tuple[TensorMeta, ...], dst_metas: Tuple[TensorMeta, ...]) -> int:
-        M, N = src_metas[0].shape[-2], src_metas[0].shape[-1]
-        rpi = _rows_per_inst(N)
-        return math.ceil(M / rpi)
+        shape = src_metas[0].shape
+        B, D, R, C = (1,) * (4 - len(shape)) + shape
+        return B * D * math.ceil(R / _rows_per_inst(C))
+
+    def access_regions(self, block_index, src_metas, dst_metas):
+        b, d, r, n = block_index
+        C = src_metas[0].shape[-1]
+        x_region = ((b, b + 1), (d, d + 1), (r, r + n), (0, C))
+        w_region = ((0, C),)
+        y_region = ((b, b + 1), (d, d + 1), (r, r + n), (0, C))
+        return [x_region, w_region], [y_region]
 
     def validate(self, src_metas: Tuple[TensorMeta, ...], dst_metas: Tuple[TensorMeta, ...]) -> None:
-        x_meta = src_metas[0]
-        w_meta = src_metas[1]
-        N = x_meta.shape[-1]
-
-        # Set N for TMA type generation (used by inputs/outputs/cpp_template)
-        self._n = N
-
         super().validate(src_metas, dst_metas)
 
-        if len(x_meta.shape) < 2:
-            raise RuntimeError(
-                f"[MegaKittens] RMSNorm requires x with at least 2 dims, got shape {x_meta.shape}"
-            )
+        x_meta = src_metas[0]
+        w_meta = src_metas[1]
+        C = x_meta.shape[-1]
 
-        if w_meta.shape != (N,):
+        if w_meta.shape != (C,):
             raise RuntimeError(
-                f"[MegaKittens] RMSNorm weight shape {w_meta.shape} doesn't match x last dim {N}"
+                f"[MegaKittens] RMSNorm weight shape {w_meta.shape} doesn't match x last dim {C}"
             )
 
         if dst_metas[0].shape != x_meta.shape:
@@ -117,22 +146,16 @@ class RMSNorm(IType):
                 f"[MegaKittens] RMSNorm output shape {dst_metas[0].shape} doesn't match input shape {x_meta.shape}"
             )
 
-        # sv requires length divisible by 16
-        if N % 16 != 0:
-            raise RuntimeError(
-                f"[MegaKittens] RMSNorm requires N divisible by 16, got {N}"
-            )
-
         # TMA sv constraint: length <= 256 OR (length * sizeof(dtype)) % 128 == 0
-        if N > 256 and (N * 2) % 128 != 0:
+        if C > 256 and (C * 2) % 128 != 0:
             raise RuntimeError(
-                f"[MegaKittens] RMSNorm requires N <= 256 or N*2 divisible by 128, got {N}"
+                f"[MegaKittens] RMSNorm requires C <= 256 or C*2 divisible by 128, got {C}"
             )
 
         # Row must fit in one page
-        row_bytes = _sv_sizeof_bytes(N)
-        if row_bytes > _PAGE_BYTES:
+        row_bytes = ((C * 2 + 127) // 128) * 128
+        if row_bytes > Dispatcher.PAGE_SIZE:
             raise RuntimeError(
                 f"[MegaKittens] RMSNorm row size {row_bytes}B exceeds page size "
-                f"{_PAGE_BYTES}B. N={N} is too large for single-page TMA path."
+                f"{Dispatcher.PAGE_SIZE}B. C={C} is too large for single-page TMA path."
             )
