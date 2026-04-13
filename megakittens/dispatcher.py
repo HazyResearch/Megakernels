@@ -336,6 +336,12 @@ class Dispatcher:
                 }}
             }}
         """
+        if self.verbose:
+            print("=== GENERATED DISPATCH CASES ===")
+            print(dispatch_cases)
+            print("=== GL FIELDS ===")
+            print(gl_fields)
+            print("================================")
         cubin, (kernel_name,) = compile_source_to_cubin(
             source, (b"megakittens::kernel<megakittens::MKConfig, megakittens::MKGlobals>",), major, minor,
             use_file_cache=self.use_jit_cache, verbose=self.verbose,
