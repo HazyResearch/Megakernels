@@ -790,7 +790,7 @@ def benchmark_tok_per_sec(prompt="Hello, my name is", max_new_tokens=200, num_sa
     def _decode_step(pos_id, input_token):
         hidden_states.copy_(embedding(input_token))
         pos_id_tensor.fill_(pos_id)
-        dispatcher._launch()
+        dispatcher.relaunch()
         return torch.argmax(logits, dim=-1)
 
     dispatcher(*mk_tensors)

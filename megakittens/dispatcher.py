@@ -10,7 +10,7 @@ from .schema.device import Device
 from .schema.dtype import DType
 from .schema.tensor import TensorMeta
 from .schema.instruction import Instruction, InstructionMeta
-from .jit.c_utils import pack_args
+from .jit.c_utils import pack_args, pack_struct
 from .jit.pykittens import gl
 
 
@@ -204,6 +204,11 @@ class Dispatcher:
         self.use_jit_cache = use_jit_cache
         self.verbose = verbose
         self.global_work_queue = global_work_queue
+        # Launch cache: avoids rebuilding gl structs every call
+        self._cached_c_buf: ctypes.Array | None = None
+        self._cached_packed_params: ctypes.Array | None = None
+        self._cached_grid: tuple[int, ...] | None = None
+        self._cached_device_index: int | None = None
 
     def __del__(self) -> None:
         if self._cubin_module is not None:
@@ -357,17 +362,57 @@ class Dispatcher:
         # Reset barriers before each launch
         if self.num_barriers > 0:
             self.barrier_tensor.zero_()
+        if self._cached_packed_params is not None:
+            # Fast path: reuse cached globals (tensor pointers unchanged)
+            stream = torch.cuda.current_stream(self._cached_device_index).cuda_stream
+            launch_kernel(
+                self._kernel_fn,
+                self._cached_packed_params,
+                grid=self._cached_grid,
+                block=(self.NUM_THREADS,),
+                dynamic_smem_bytes=self.DYNAMIC_SHARED_MEMORY,
+                stream=stream,
+                cluster=(self.CLUSTER_SIZE,),
+            )
+            return
         fields = [(g.tensor_to_gl(t), g.size, g.align) for g, t in zip(self.gls, self.all_tensors)]
-        _globals_holder, globals_packed = pack_args(fields)
+        buf = pack_struct(fields)
+        self._cached_c_buf = (ctypes.c_char * len(buf)).from_buffer(buf)
+        self._cached_packed_params = (ctypes.c_void_p * 1)(ctypes.addressof(self._cached_c_buf))
         if self.global_work_queue:
-            grid_size = -(-len(self.instructions) // self.CLUSTER_SIZE) * self.CLUSTER_SIZE  # round up
+            grid_size = -(-len(self.instructions) // self.CLUSTER_SIZE) * self.CLUSTER_SIZE
         else:
             grid_size = get_sm_count(device_index)
+        self._cached_grid = (grid_size,)
+        self._cached_device_index = device_index
         stream = torch.cuda.current_stream(device_index).cuda_stream
         launch_kernel(
             self._kernel_fn,
-            globals_packed,
-            grid=(grid_size,),
+            self._cached_packed_params,
+            grid=self._cached_grid,
+            block=(self.NUM_THREADS,),
+            dynamic_smem_bytes=self.DYNAMIC_SHARED_MEMORY,
+            stream=stream,
+            cluster=(self.CLUSTER_SIZE,),
+        )
+
+    def relaunch(self) -> None:
+        """Minimal-overhead relaunch using cached globals.
+
+        Tensor values (including scalars) are updated in-place on the GPU,
+        so no globals patching is needed — just zero barriers and re-launch.
+        """
+        if self._cached_packed_params is None:
+            raise RuntimeError(
+                "[MegaKittens] relaunch() requires a prior call() to build the launch cache"
+            )
+        if self.num_barriers > 0:
+            self.barrier_tensor.zero_()
+        stream = torch.cuda.current_stream(self._cached_device_index).cuda_stream
+        launch_kernel(
+            self._kernel_fn,
+            self._cached_packed_params,
+            grid=self._cached_grid,
             block=(self.NUM_THREADS,),
             dynamic_smem_bytes=self.DYNAMIC_SHARED_MEMORY,
             stream=stream,
