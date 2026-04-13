@@ -21,8 +21,5 @@ dev = ["pytest>=9,<10", "transformers>=4.56,<5"]
 [tool.setuptools.packages.find]
 include = ["megakittens*"]
 
-[tool.setuptools.packages.find]
-include = ["megakittens*"]
-
 [tool.pytest.ini_options]
 testpaths = ["tests"]
