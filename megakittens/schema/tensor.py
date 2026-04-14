@@ -113,7 +113,7 @@ class TensorRange(BaseModel, frozen=True):
             if new_stop > first_range.stop:
                 raise ValueError(
                     f"[MegaKittens] Composed range exceeds parent: "
-                    f"parent=[{first_range.start},{first_range.stop}), child=[{o.start},{o.stop})"
+                    f"parent=[{first_range.start},{first_range.stop}), child=[{second_range.start},{second_range.stop})"
                 )
             new_ranges.append(DimRange(start=new_start, stop=new_stop))
         return TensorRange(ranges=tuple(new_ranges))
