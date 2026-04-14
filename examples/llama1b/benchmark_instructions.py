@@ -798,7 +798,7 @@ def benchmark_tok_per_sec(prompt="Hello, my name is", max_new_tokens=200, num_sa
         _pos_id_buf[0] = pos_id
         stream = torch.cuda.current_stream().cuda_stream
         cuda_driver.cuMemcpyHtoDAsync(_pos_id_gpu_ptr, _pos_id_buf, 4, stream)
-        dispatcher.relaunch()
+        dispatcher(*mk_tensors)
         return torch.argmax(logits, dim=-1)
 
     dispatcher(*mk_tensors)

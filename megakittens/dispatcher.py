@@ -391,25 +391,3 @@ class Dispatcher:
             cluster=(self.CLUSTER_SIZE,) if self.CLUSTER_SIZE > 1 else None,
         )
 
-    def relaunch(self) -> None:
-        """Minimal-overhead relaunch using cached globals.
-
-        Tensor values (including scalars) are updated in-place on the GPU,
-        so no globals patching is needed — just zero barriers and re-launch.
-        """
-        if self._cached_packed_params is None:
-            raise RuntimeError(
-                "[MegaKittens] relaunch() requires a prior call() to build the launch cache"
-            )
-        if self.num_barriers > 0:
-            self.barrier_tensor.zero_()
-        stream = torch.cuda.current_stream(self._cached_device_index).cuda_stream
-        launch_kernel(
-            self._kernel_fn,
-            self._cached_packed_params,
-            grid=self._cached_grid,
-            block=(self.NUM_THREADS,),
-            dynamic_smem_bytes=self.DYNAMIC_SHARED_MEMORY,
-            stream=stream,
-            cluster=(self.CLUSTER_SIZE,) if self.CLUSTER_SIZE > 1 else None,
-        )
