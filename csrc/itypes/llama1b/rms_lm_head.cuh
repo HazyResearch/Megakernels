@@ -9,7 +9,6 @@ namespace megakittens {
 
 template <typename Config, typename Globals, int N, int SRC0, int SRC1, int SRC2, int SCALAR_RMS_EPS, int DST>
 struct RmsLmHead {
-
     struct parsed_instruction {
         int start_block_idx, end_block_idx, iters;
         __device__ inline parsed_instruction(const instruction_t &instruction) {
@@ -26,8 +25,7 @@ struct RmsLmHead {
             all_input_barrier_wait<Config>(g, s.instruction());
         }
 
-        __device__ static inline void
-        load_iter(state_t<Config> &s, const Globals &g, parsed_instruction &inst,
+        __device__ static inline void load_iter(state_t<Config> &s, const Globals &g, parsed_instruction &inst,
                   int iter, int col_idx,
                   kittens::st_bf<16, 512> &weight_chunk,
                   kittens::semaphore &sem) {
@@ -37,25 +35,18 @@ struct RmsLmHead {
                                      {block_idx, col_idx}, sem);
         }
 
-        __device__ static inline void
-        store(state_t<Config> &s, const Globals &g, parsed_instruction &inst,
+        __device__ static inline void store(state_t<Config> &s, const Globals &g, parsed_instruction &inst,
               int output_idx, int output_stage) {
             int block_idx = inst.start_block_idx + output_idx;
-
             uint8_t *output_scratch = pipeline::get_output_start(s, output_stage);
-
             kittens::rv_fl<16> logits_rv;
             llama1b::matvec_reduce<Config, pipeline::SCRATCH_BYTES_PER_WARP>(
                 output_scratch, logits_rv);
-
-            // Reuse output scratch as TMA staging (reduce already read from it)
             kittens::sv_bf<16> &logits_smem =
                 *reinterpret_cast<kittens::sv_bf<16> *>(output_scratch);
-
             kittens::warp::sync();
             kittens::warp::store(logits_smem, logits_rv);
             kittens::warp::sync();
-
             if (kittens::warp::elect_leader()) {
                 kittens::tma::store_async<kittens::cache_policy::EVICT_LAST>(g.template gls<DST>(), logits_smem, {0, block_idx});
                 kittens::tma::store_async_read_wait();
@@ -68,12 +59,10 @@ struct RmsLmHead {
         Config, Globals, N, parsed_instruction, pipeline_specifics, SRC0, SRC1, SCALAR_RMS_EPS>;
 
     struct controller {
-        __device__ __forceinline__ static int
-        lid_release_order(const Globals &g, state_t<Config> &s, int query) {
+        __device__ __forceinline__ static int lid_release_order(const Globals &g, state_t<Config> &s, int query) {
             return pipeline::lid_release_order(g, s, query);
         }
-        __device__ __forceinline__ static int
-        init_semaphores(const Globals &g, state_t<Config> &s) {
+        __device__ __forceinline__ static int init_semaphores(const Globals &g, state_t<Config> &s) {
             return pipeline::init_semaphores(g, s);
         }
     };

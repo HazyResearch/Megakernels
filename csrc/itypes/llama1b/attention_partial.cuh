@@ -44,28 +44,14 @@ struct AttentionPartial {
             : parsed_instruction(s.instruction()) {}
     };
 
-    __device__ static inline kittens::semaphore &Q_arrived(state_t<Config> &s) {
-        return s.semaphores()[0];
-    }
-    __device__ static inline kittens::semaphore &O_arrived(state_t<Config> &s) {
-        return s.semaphores()[1];
-    }
-    __device__ static inline kittens::semaphore &L_arrived(state_t<Config> &s) {
-        return s.semaphores()[2];
-    }
-    __device__ static inline kittens::semaphore &K_arrived(state_t<Config> &s, int stage) {
-        return s.semaphores()[3 + stage * 2];
-    }
-    __device__ static inline kittens::semaphore &V_arrived(state_t<Config> &s, int stage) {
-        return s.semaphores()[3 + stage * 2 + 1];
-    }
-    __device__ static inline kittens::semaphore &K_finished(state_t<Config> &s, int stage) {
-        return s.semaphores()[3 + NUM_STAGES * 2 + stage * 2];
-    }
-    __device__ static inline kittens::semaphore &V_finished(state_t<Config> &s, int stage) {
-        return s.semaphores()[3 + NUM_STAGES * 2 + stage * 2 + 1];
-    }
     static constexpr int SEM_COUNT = 3 + 4 * NUM_STAGES;
+    __device__ static inline kittens::semaphore &Q_arrived(state_t<Config> &s)          { return s.semaphores()[0]; }
+    __device__ static inline kittens::semaphore &O_arrived(state_t<Config> &s)          { return s.semaphores()[1]; }
+    __device__ static inline kittens::semaphore &L_arrived(state_t<Config> &s)          { return s.semaphores()[2]; }
+    __device__ static inline kittens::semaphore &K_arrived(state_t<Config> &s, int stage)  { return s.semaphores()[3 + stage * 2]; }
+    __device__ static inline kittens::semaphore &V_arrived(state_t<Config> &s, int stage)  { return s.semaphores()[3 + stage * 2 + 1]; }
+    __device__ static inline kittens::semaphore &K_finished(state_t<Config> &s, int stage) { return s.semaphores()[3 + NUM_STAGES * 2 + stage * 2]; }
+    __device__ static inline kittens::semaphore &V_finished(state_t<Config> &s, int stage) { return s.semaphores()[3 + NUM_STAGES * 2 + stage * 2 + 1]; }
 
     __device__ static inline int qol_pid(state_t<Config> &s) { return s.lid_to_pid(QOL_PAGE); }
     __device__ static inline int kv_pid(state_t<Config> &s)  { return s.lid_to_pid(KV_PAGE); }
@@ -74,20 +60,16 @@ struct AttentionPartial {
         return s.pages[qol_pid(s)].template as<q_st>();
     }
     __device__ static inline o_sv (&get_O_smem(state_t<Config> &s))[4] {
-        return *reinterpret_cast<o_sv(*)[4]>(
-            reinterpret_cast<char *>(s.pages[qol_pid(s)].ptr(sizeof(q_st))));
+        return s.pages[qol_pid(s)].template as<o_sv[4]>(sizeof(q_st));
     }
     __device__ static inline l_sv &get_L_smem(state_t<Config> &s) {
-        return *reinterpret_cast<l_sv *>(
-            reinterpret_cast<char *>(s.pages[qol_pid(s)].ptr(sizeof(q_st) + sizeof(o_sv) * 4)));
+        return s.pages[qol_pid(s)].template as<l_sv>(sizeof(q_st) + sizeof(o_sv) * 4);
     }
     __device__ static inline kv_st &get_K_smem(state_t<Config> &s, int stage) {
-        return *reinterpret_cast<kv_st *>(
-            reinterpret_cast<char *>(s.pages[kv_pid(s)].ptr(sizeof(kv_st) * (stage * 2))));
+        return s.pages[kv_pid(s)].template as<kv_st>(sizeof(kv_st) * (stage * 2));
     }
     __device__ static inline kv_st &get_V_smem(state_t<Config> &s, int stage) {
-        return *reinterpret_cast<kv_st *>(
-            reinterpret_cast<char *>(s.pages[kv_pid(s)].ptr(sizeof(kv_st) * (1 + stage * 2))));
+        return s.pages[kv_pid(s)].template as<kv_st>(sizeof(kv_st) * (1 + stage * 2));
     }
 
     __device__ static inline void
@@ -96,10 +78,9 @@ struct AttentionPartial {
         constexpr int elem_per_memcpy = sizeof(float4) / sizeof(kittens::bf16); // 8
         constexpr int memcpy_per_row = HEAD_DIM / elem_per_memcpy;              // 8
 
-        const kittens::bf16 *src_ptr = reinterpret_cast<const kittens::bf16 *>(
-            g.template gls<SRC_Q>().raw_ptr) + q_head_start_idx * HEAD_DIM;
-        uint32_t dst_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(
-            &dst.data[(q_head_start_idx % 16) * HEAD_DIM]));
+        const kittens::bf16 *src_ptr =
+            reinterpret_cast<const kittens::bf16 *>(g.template gls<SRC_Q>().raw_ptr) + q_head_start_idx * HEAD_DIM;
+        uint32_t dst_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(&dst.data[(q_head_start_idx % 16) * HEAD_DIM]));
 
         int laneid = kittens::laneid();
         int row = laneid / memcpy_per_row;
@@ -139,10 +120,8 @@ struct AttentionPartial {
             int data_idx2 = (row4idx / 2 == 0) ? 2 : 3;
             for (int j = 0; j < src.width; j++) {
                 U2 tmp[2];
-                tmp[0] = kittens::base_types::convertor<U2, T2>::convert(
-                    src.tiles[0][j].data[data_idx]);
-                tmp[1] = kittens::base_types::convertor<U2, T2>::convert(
-                    src.tiles[0][j].data[data_idx2]);
+                tmp[0] = kittens::base_types::convertor<U2, T2>::convert(src.tiles[0][j].data[data_idx]);
+                tmp[1] = kittens::base_types::convertor<U2, T2>::convert(src.tiles[0][j].data[data_idx2]);
                 int col_idx = local_col_idx * 2 + j * 16;
                 kittens::move<U2>::sts(dst_ptr[local_row_idx] + sizeof(U) * col_idx, tmp[0]);
                 kittens::move<U2>::sts(dst_ptr[local_row_idx] + sizeof(U) * (col_idx + 8), tmp[1]);
@@ -152,10 +131,8 @@ struct AttentionPartial {
             int data_idx2 = (row4idx / 2 == 0) ? 2 : 3;
             for (int j = 0; j < src.width; j++) {
                 U2 tmp[2];
-                tmp[0] = kittens::base_types::convertor<U2, T2>::convert(
-                    src.tiles[0][j].data[data_idx]);
-                tmp[1] = kittens::base_types::convertor<U2, T2>::convert(
-                    src.tiles[0][j].data[data_idx2]);
+                tmp[0] = kittens::base_types::convertor<U2, T2>::convert(src.tiles[0][j].data[data_idx]);
+                tmp[1] = kittens::base_types::convertor<U2, T2>::convert(src.tiles[0][j].data[data_idx2]);
                 int col_idx = local_col_idx * 2 + j * 16;
                 kittens::move<U2>::sts(dst_ptr[local_row_idx] + sizeof(U) * col_idx, tmp[0]);
                 kittens::move<U2>::sts(dst_ptr[local_row_idx] + sizeof(U) * (col_idx + 8), tmp[1]);
@@ -174,8 +151,7 @@ struct AttentionPartial {
             for (int j = 0; j < dst.width; j++) {
                 #pragma unroll
                 for (int k = 0; k < dst.packed_per_tile; k++) {
-                    int col_idx_x = (j * dst.tile_size_col) + ((k / 2) * 8) +
-                                    ((kittens::laneid() % 4) * 2);
+                    int col_idx_x = (j * dst.tile_size_col) + ((k / 2) * 8) + ((kittens::laneid() % 4) * 2);
                     int col_idx_y = col_idx_x + 1;
                     dst.tiles[i][j].data[k].x = (col_idx_x >= col_idx) ? val : src.tiles[i][j].data[k].x;
                     dst.tiles[i][j].data[k].y = (col_idx_y >= col_idx) ? val : src.tiles[i][j].data[k].y;
@@ -218,22 +194,15 @@ struct AttentionPartial {
                 parsed_instruction inst{s};
                 int seq_len = g.template gls<SCALAR_POS_ID>().raw_ptr[0] + 1;
                 int total_attn_blocks = (seq_len + KV_BLOCK_SIZE - 1) / KV_BLOCK_SIZE;
-
                 s.page_wait(kv_pid(s));
-
-                if (total_attn_blocks == 0) {
+                if (total_attn_blocks == 0)
                     s.page_finish(kv_pid(s));
-                }
-
                 for (int i = 0; i < total_attn_blocks; i++) {
                     int stage = i % NUM_STAGES;
                     kv_st &K_smem = get_K_smem(s, stage);
                     kv_st &V_smem = get_V_smem(s, stage);
-
-                    if (i == total_attn_blocks - 1) {
+                    if (i == total_attn_blocks - 1)
                         all_reuse_barrier_wait<Config>(g, s.instruction());
-                    }
-
                     if (i >= NUM_STAGES) {
                         kittens::wait(K_finished(s, stage), (i / NUM_STAGES - 1) % 2);
                         kittens::wait(V_finished(s, stage), (i / NUM_STAGES - 1) % 2);
@@ -258,7 +227,6 @@ struct AttentionPartial {
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
             s.tensor_wait();
             if (kittens::warp::elect_leader()) s.tensor_finish();
-
             int laneid = kittens::laneid();
             if (laneid >= 2 && laneid < Config::NUM_PAGES) {
                 int pid = s.lid_to_pid(laneid);
@@ -376,9 +344,7 @@ struct AttentionPartial {
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
             parsed_instruction inst{s};
             int q_head_start_idx = inst.kv_head_idx * GQA_RATIO;
-
             o_sv (&O_smem)[4] = get_O_smem(s);
-
             if (kittens::warp::elect_leader())
                 kittens::wait(O_arrived(s), 0);
             kittens::warp::sync();
@@ -387,13 +353,11 @@ struct AttentionPartial {
             for (int head_offset = 0; head_offset < GQA_RATIO; head_offset++) {
                 auto &smem_fl = O_smem[head_offset];
                 auto &smem_bf = *reinterpret_cast<o_sv_bf *>(&smem_fl);
-
                 kittens::warp::load(O_bf, smem_fl);
                 kittens::warp::sync();
                 kittens::warp::store(smem_bf, O_bf);
                 kittens::warp::sync();
             }
-
             if (kittens::warp::elect_leader()) {
                 for (int head_offset = 0; head_offset < GQA_RATIO; head_offset++) {
                     auto &smem_bf = *reinterpret_cast<o_sv_bf *>(&O_smem[head_offset]);
@@ -402,12 +366,10 @@ struct AttentionPartial {
                         {0, q_head_start_idx + head_offset});
                 }
             }
-
             kittens::warp::sync();
             kittens::tma::store_async_wait();
             if (kittens::warp::elect_leader())
                 s.page_finish(qol_pid(s));
-
             // Signal the attn_red barrier (skip_attn_reduction path — no
             // reduction step, so we signal o_proj's dependency directly).
             // barrier_base points to attn_red slot; add GQA_RATIO for

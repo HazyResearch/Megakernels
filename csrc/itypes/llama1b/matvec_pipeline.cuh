@@ -32,40 +32,23 @@ struct matvec_pipeline {
     // offsets on activation page
     static constexpr int OUTPUT_SCRATCH_OFFSET = N * sizeof(kittens::bf16);
 
-    __device__ static inline kittens::semaphore &activations_arrived(state_t<Config> &s) {
-        return s.semaphores()[0];
-    }
-    __device__ static inline kittens::semaphore &weights_arrived(state_t<Config> &s, int stage) {
-        return s.semaphores()[1 + stage];
-    }
-    __device__ static inline kittens::semaphore &weights_finished(state_t<Config> &s, int stage) {
-        return s.semaphores()[1 + INPUT_PIPELINE_STAGES + stage];
-    }
-    __device__ static inline kittens::semaphore &outputs_arrived(state_t<Config> &s, int stage) {
-        return s.semaphores()[1 + 2 * INPUT_PIPELINE_STAGES + stage];
-    }
-    __device__ static inline kittens::semaphore &outputs_finished(state_t<Config> &s, int stage) {
-        return s.semaphores()[1 + 2 * INPUT_PIPELINE_STAGES + OUTPUT_PIPELINE_STAGES + stage];
-    }
+    __device__ static inline kittens::semaphore &activations_arrived(state_t<Config> &s)            { return s.semaphores()[0]; }
+    __device__ static inline kittens::semaphore &weights_arrived(state_t<Config> &s, int stage)    { return s.semaphores()[1 + stage]; }
+    __device__ static inline kittens::semaphore &weights_finished(state_t<Config> &s, int stage)   { return s.semaphores()[1 + INPUT_PIPELINE_STAGES + stage]; }
+    __device__ static inline kittens::semaphore &outputs_arrived(state_t<Config> &s, int stage)    { return s.semaphores()[1 + 2 * INPUT_PIPELINE_STAGES + stage]; }
+    __device__ static inline kittens::semaphore &outputs_finished(state_t<Config> &s, int stage)   { return s.semaphores()[1 + 2 * INPUT_PIPELINE_STAGES + OUTPUT_PIPELINE_STAGES + stage]; }
 
-    __device__ static inline int get_activation_page(state_t<Config> &s) {
-        return s.lid_to_pid(ACTIVATION_PAGE);
-    }
-    __device__ static inline int get_weight_page(state_t<Config> &s, int stage, int page) {
-        return s.lid_to_pid(WEIGHTS_START_PAGE + stage * STAGE_PAGES + page);
-    }
+    __device__ static inline int get_activation_page(state_t<Config> &s)                    { return s.lid_to_pid(ACTIVATION_PAGE); }
+    __device__ static inline int get_weight_page(state_t<Config> &s, int stage, int page)  { return s.lid_to_pid(WEIGHTS_START_PAGE + stage * STAGE_PAGES + page); }
 
     __device__ static inline kittens::sv_bf<N> &get_activations(state_t<Config> &s) {
         return s.pages[get_activation_page(s)].template as<kittens::sv_bf<N>>();
     }
     __device__ static inline uint8_t *get_output_start(state_t<Config> &s, int stage) {
-        return reinterpret_cast<uint8_t *>(
-            s.pages[get_activation_page(s)].ptr(OUTPUT_SCRATCH_OFFSET + stage * SCRATCH_BYTES_PER_STAGE));
+        return static_cast<uint8_t *>(s.pages[get_activation_page(s)].ptr(OUTPUT_SCRATCH_OFFSET + stage * SCRATCH_BYTES_PER_STAGE));
     }
 
-
-    __device__ static inline int
-    lid_release_order(const Globals &g, state_t<Config> &s, int query) {
+    __device__ static inline int lid_release_order(const Globals &g, state_t<Config> &s, int query) {
         // last query is always activation page because our scratch is inside it
         if (query == Config::NUM_PAGES - 1) return ACTIVATION_PAGE;
 
@@ -106,19 +89,15 @@ struct matvec_pipeline {
         return SEM_COUNT;
     }
 
-
-    __device__ static inline void launcher_loop(state_t<Config> &s,
-                                               const Globals &g) {
+    __device__ static inline void launcher_loop(state_t<Config> &s, const Globals &g) {
         s.tensor_wait();
         if (kittens::warp::elect_leader()) s.tensor_finish();
     }
 
-    __device__ static inline void loader_loop(state_t<Config> &s,
-                                              const Globals &g) {
+    __device__ static inline void loader_loop(state_t<Config> &s, const Globals &g) {
         parsed_instruction inst{s.instruction()};
 
-        int needed_pages = 
-            1 + min(inst.iters, INPUT_PIPELINE_STAGES) * STAGE_PAGES;
+        int needed_pages = 1 + min(inst.iters, INPUT_PIPELINE_STAGES) * STAGE_PAGES;
 
         if (kittens::laneid() == 0) {
             s.page_wait(get_activation_page(s));
@@ -154,13 +133,10 @@ struct matvec_pipeline {
     }
 
     template <int output_scratch_off = OUTPUT_SCRATCH_OFFSET, typename rv_t>
-    __device__ static inline void
-    consumer_loop(state_t<Config> &s, const Globals &g, rv_t &activations_vec) {
-        
+    __device__ static inline void consumer_loop(state_t<Config> &s, const Globals &g, rv_t &activations_vec) {
         parsed_instruction inst{s.instruction()};
         int page_index = kittens::warpid() / WARPS_PER_PAGE;
         int activation_page = get_activation_page(s);
-
         int input_stage = 0, output_stage = 0;
         for (int i = 0; i < inst.iters; i++) {
             int weight_page = get_weight_page(s, input_stage, page_index);
@@ -168,19 +144,14 @@ struct matvec_pipeline {
                 (i % (2 * INPUT_PIPELINE_STAGES)) >= INPUT_PIPELINE_STAGES);
             kittens::wait(outputs_finished(s, output_stage),
                 (i % (2 * OUTPUT_PIPELINE_STAGES)) < OUTPUT_PIPELINE_STAGES);
-            kittens::st_bf<MATVEC_BLOCK_SIZE, REDUCTION_DIM_PER_WARP> &weights =
-                reinterpret_cast<kittens::st_bf<MATVEC_BLOCK_SIZE, REDUCTION_DIM_PER_WARP> *>(
-                    s.pages[weight_page].ptr())[kittens::warpid() % WARPS_PER_PAGE];
-
-            uint8_t *output_scratch_start = reinterpret_cast<uint8_t *>(
-                s.pages[activation_page].ptr(
-                    output_scratch_off + output_stage * SCRATCH_BYTES_PER_STAGE));
+            using weight_tile_t = kittens::st_bf<MATVEC_BLOCK_SIZE, REDUCTION_DIM_PER_WARP>;
+            weight_tile_t &weights = s.pages[weight_page].template as<weight_tile_t>(
+                (kittens::warpid() % WARPS_PER_PAGE) * sizeof(weight_tile_t));
+            int scratch_off = output_scratch_off + output_stage * SCRATCH_BYTES_PER_STAGE
+                + kittens::warpid() * SCRATCH_BYTES_PER_WARP;
             kittens::sv_fl<MATVEC_BLOCK_SIZE> &out_smem =
-                *reinterpret_cast<kittens::sv_fl<MATVEC_BLOCK_SIZE> *>(
-                    output_scratch_start + kittens::warpid() * SCRATCH_BYTES_PER_WARP);
-
+                s.pages[activation_page].template as<kittens::sv_fl<MATVEC_BLOCK_SIZE>>(scratch_off);
             llama1b::matvec(out_smem, weights, activations_vec);
-
             kittens::warp::arrive(outputs_arrived(s, output_stage));
             kittens::warp::arrive(weights_finished(s, input_stage));
 
@@ -201,7 +172,6 @@ struct matvec_pipeline {
     template <int iter_scale = 1>
     __device__ static inline void storer_loop(state_t<Config> &s, const Globals &g) {
         parsed_instruction inst{s.instruction()};
-        
         int output_stage = 0;
         for (int i = 0; i < inst.iters; i++) {
             kittens::wait(outputs_arrived(s, output_stage),
@@ -245,20 +215,16 @@ struct rms_matvec_pipeline
 
     static constexpr int SEM_COUNT = pipeline::SEM_COUNT + 1;
 
-    __device__ static inline kittens::semaphore &rms_scale_arrived(state_t<Config> &s) {
-        return s.semaphores()[pipeline::SEM_COUNT];
-    }
+    __device__ static inline kittens::semaphore &rms_scale_arrived(state_t<Config> &s) { return s.semaphores()[pipeline::SEM_COUNT]; }
     __device__ static inline kittens::sv_bf<N> &get_rms_scale(state_t<Config> &s) {
         return s.pages[pipeline::get_activation_page(s)].template as<kittens::sv_bf<N>>(RMS_SCALE_OFFSET);
     }
     __device__ static inline uint8_t *get_output_start(state_t<Config> &s, int stage) {
-        return reinterpret_cast<uint8_t *>(
-            s.pages[pipeline::get_activation_page(s)].ptr(
-                OUTPUT_SCRATCH_OFFSET + stage * pipeline::SCRATCH_BYTES_PER_STAGE));
+        return static_cast<uint8_t *>(s.pages[pipeline::get_activation_page(s)].ptr(
+            OUTPUT_SCRATCH_OFFSET + stage * pipeline::SCRATCH_BYTES_PER_STAGE));
     }
 
-    __device__ static inline int
-    lid_release_order(const Globals &g, state_t<Config> &s, int query) {
+    __device__ static inline int lid_release_order(const Globals &g, state_t<Config> &s, int query) {
         return pipeline::lid_release_order(g, s, query);
     }
 
@@ -272,14 +238,11 @@ struct rms_matvec_pipeline
     __device__ static inline void loader_loop(state_t<Config> &s, const Globals &g, int norm_layer_idx = 0) {
         if (kittens::warp::elect_leader()) {
             s.page_wait(pipeline::get_activation_page(s));
-
-            // RMS scale does not depend on previous instruction finishing
             auto &rms_scale = get_rms_scale(s);
             auto &rms_sem = rms_scale_arrived(s);
             kittens::tma::expect_bytes(rms_sem, sizeof(rms_scale));
-            kittens::tma::load_async<kittens::cache_policy::EVICT_LAST>(rms_scale, g.template gls<SRC_NORM>(), {0, 0, norm_layer_idx, 0}, rms_sem);
-
-            // upstream barrier wait and activation load now in consumer
+            kittens::tma::load_async<kittens::cache_policy::EVICT_LAST>(
+                rms_scale, g.template gls<SRC_NORM>(), {0, 0, norm_layer_idx, 0}, rms_sem);
         }
         pipeline::loader_loop(s, g);
     }
@@ -288,32 +251,24 @@ struct rms_matvec_pipeline
         constexpr int ELEMS_PER_WARP = N / Config::NUM_CONSUMER_WARPS;
         using sv_slice_t = kittens::sv_bf<ELEMS_PER_WARP>;
         using rv_t = kittens::rv_fl<ELEMS_PER_WARP>;
-
-        if (kittens::warpid() == 0 && kittens::warp::elect_leader()) {
+        if (kittens::warpid() == 0 && kittens::warp::elect_leader())
             pipeline_specifics::gmem_wait(g, s);
-        }
         kittens::group<Config::NUM_CONSUMER_WARPS>::sync(4);
 
-        // consumers load activations so loader can fetch weights earlier
         rv_t activations_vec;
         const kittens::bf16 *act_src = reinterpret_cast<const kittens::bf16 *>(
             g.template gls<SRC_ACT>().raw_ptr) + kittens::warpid() * ELEMS_PER_WARP;
         #pragma unroll
-        for (int w = 0; w < rv_t::outer_dim; w++) {
+        for (int w = 0; w < rv_t::outer_dim; w++)
             activations_vec.data[w][0] = __bfloat162float(
                 act_src[w * kittens::WARP_THREADS + kittens::laneid()]);
-        }
 
         kittens::wait(rms_scale_arrived(s), 0);
-
         auto &rms_scale_smem = reinterpret_cast<sv_slice_t *>(&get_rms_scale(s))[kittens::warpid()];
-        float *rms_scratch = reinterpret_cast<float *>(
-            s.pages[pipeline::get_activation_page(s)].ptr(RMS_SCRATCH_OFFSET));
+        float *rms_scratch = static_cast<float *>(s.pages[pipeline::get_activation_page(s)].ptr(RMS_SCRATCH_OFFSET));
         activations_vec = llama1b::rms_norm<Config, N>(
             activations_vec, rms_scale_smem, g.template gls<SCALAR_RMS_EPS>().raw_ptr[0], rms_scratch);
-
         kittens::warp::sync();
-
         pipeline::template consumer_loop<OUTPUT_SCRATCH_OFFSET>(s, g, activations_vec);
     }
 };

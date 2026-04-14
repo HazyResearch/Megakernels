@@ -9,7 +9,6 @@ namespace megakittens {
 
 template <typename Config, typename Globals, int N, int SRC0, int SRC1, int DST>
 struct MatVecAdds {
-
     struct parsed_instruction {
         int layer_idx, start_block_idx, end_block_idx, reduction_col_offset, iters;
         __device__ inline parsed_instruction(const instruction_t &instruction) {
@@ -40,20 +39,13 @@ struct MatVecAdds {
         store(state_t<Config> &s, const Globals &g, parsed_instruction &inst,
               int output_idx, int output_stage) {
             int block_idx = inst.start_block_idx + output_idx;
-
             uint8_t *output_scratch = pipeline::get_output_start(s, output_stage);
-
             kittens::rv_fl<16> output_rv;
-            llama1b::matvec_reduce<Config, pipeline::SCRATCH_BYTES_PER_WARP>(
-                output_scratch, output_rv);
-
-            kittens::sv_bf<16> &output_smem_bf =
-                *reinterpret_cast<kittens::sv_bf<16> *>(output_scratch);
-
+            llama1b::matvec_reduce<Config, pipeline::SCRATCH_BYTES_PER_WARP>(output_scratch, output_rv);
+            kittens::sv_bf<16> &output_smem_bf = *reinterpret_cast<kittens::sv_bf<16> *>(output_scratch);
             kittens::warp::sync();
             kittens::warp::store(output_smem_bf, output_rv);
             kittens::warp::sync();
-
             if (kittens::warp::elect_leader()) {
                 kittens::tma::store_add_async<kittens::cache_policy::EVICT_LAST>(g.template gls<DST>(), output_smem_bf, {0, block_idx});
                 kittens::tma::store_async_wait();
@@ -97,9 +89,7 @@ struct MatVecAdds {
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
             constexpr int ELEMS_PER_WARP = N / Config::NUM_CONSUMER_WARPS;
             using rv_t = kittens::rv_fl<ELEMS_PER_WARP>;
-
             parsed_instruction inst{s};
-
             if (kittens::warpid() == 0 && kittens::warp::elect_leader()) {
                 s.page_wait(pipeline::get_activation_page(s));
                 all_input_barrier_wait<Config>(g, s.instruction());

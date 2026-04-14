@@ -7,15 +7,12 @@ namespace llama1b {
 
 // rmsnorm, activations already in registers (used by rms_matvec_pipeline consumer)
 template <typename Config, int N>
-__device__ static inline auto
-rms_norm(kittens::rv_fl<N / Config::NUM_CONSUMER_WARPS> activations_vec,
+__device__ static inline auto rms_norm(kittens::rv_fl<N / Config::NUM_CONSUMER_WARPS> activations_vec,
          const kittens::sv_bf<N / Config::NUM_CONSUMER_WARPS> &rms_scale_smem,
          float rms_norm_eps, float *scratch_memory) {
-
     constexpr int ELEMS_PER_WARP = N / Config::NUM_CONSUMER_WARPS;
     using rv_t = kittens::rv_fl<ELEMS_PER_WARP>;
     rv_t sq_activations_vec, rms_scale_vec;
-
     kittens::warp::copy(sq_activations_vec, activations_vec);
     kittens::warp::mul(sq_activations_vec, sq_activations_vec, sq_activations_vec);
     float partial_sum = kittens::warp::sum(sq_activations_vec);
@@ -43,11 +40,9 @@ rms_norm(kittens::rv_fl<N / Config::NUM_CONSUMER_WARPS> activations_vec,
 
 // rmsnorm, activations in smem
 template <typename Config, int N>
-__device__ static inline auto
-rms_norm(const kittens::sv_bf<N / Config::NUM_CONSUMER_WARPS> &rms_scale_smem,
+__device__ static inline auto rms_norm(const kittens::sv_bf<N / Config::NUM_CONSUMER_WARPS> &rms_scale_smem,
          const kittens::sv_bf<N / Config::NUM_CONSUMER_WARPS> &activations_smem,
          float rms_norm_eps, float *scratch_memory) {
-
     constexpr int ELEMS_PER_WARP = N / Config::NUM_CONSUMER_WARPS;
     using rv_t = kittens::rv_fl<ELEMS_PER_WARP>;
     rv_t activations_vec;

@@ -9,7 +9,6 @@ namespace megakittens {
 
 template <typename Config, typename Globals, int N, int SRC_ACT, int SRC_NORM, int SRC_UP, int SRC_GATE, int SCALAR_RMS_EPS, int DST>
 struct RmsUpgateSilu {
-
     struct parsed_instruction {
         int layer_idx, sm_idx, sm_count, total_blocks, barrier_base, iters;
         __device__ inline parsed_instruction(const instruction_t &instruction) {
@@ -32,8 +31,7 @@ struct RmsUpgateSilu {
             all_input_barrier_wait<Config>(g, s.instruction());
         }
 
-        __device__ static inline void
-        load_iter(state_t<Config> &s, const Globals &g, parsed_instruction &inst,
+        __device__ static inline void load_iter(state_t<Config> &s, const Globals &g, parsed_instruction &inst,
                   int iter, int col_idx,
                   kittens::st_bf<16, 512> &weight_chunk,
                   kittens::semaphore &sem) {
@@ -49,8 +47,7 @@ struct RmsUpgateSilu {
             }
         }
 
-        __device__ static inline void
-        store(state_t<Config> &s, const Globals &g, parsed_instruction &inst,
+        __device__ static inline void store(state_t<Config> &s, const Globals &g, parsed_instruction &inst,
               int output_idx, int output_stage) {
             // unused — storer inlines the loop to cache up_out across iterations
         }
@@ -61,12 +58,10 @@ struct RmsUpgateSilu {
     static_assert(pipeline::OUTPUT_PIPELINE_STAGES == 3);
 
     struct controller {
-        __device__ __forceinline__ static int
-        lid_release_order(const Globals &g, state_t<Config> &s, int query) {
+        __device__ __forceinline__ static int lid_release_order(const Globals &g, state_t<Config> &s, int query) {
             return pipeline::lid_release_order(g, s, query);
         }
-        __device__ __forceinline__ static int
-        init_semaphores(const Globals &g, state_t<Config> &s) {
+        __device__ __forceinline__ static int init_semaphores(const Globals &g, state_t<Config> &s) {
             return pipeline::init_semaphores(g, s);
         }
     };
