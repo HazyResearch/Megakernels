@@ -367,7 +367,7 @@ class Dispatcher:
                 block=(self.NUM_THREADS,),
                 dynamic_smem_bytes=self.DYNAMIC_SHARED_MEMORY,
                 stream=stream,
-                cluster=self._cached_cluster,
+                cluster=(self.CLUSTER_SIZE,) if self.CLUSTER_SIZE > 1 else None,
             )
             return
         fields = [(g.tensor_to_gl(t), g.size, g.align) for g, t in zip(self.gls, self.all_tensors)]
@@ -379,7 +379,6 @@ class Dispatcher:
         else:
             grid_size = get_sm_count(device_index)
         self._cached_grid = (grid_size,)
-        self._cached_cluster = (self.CLUSTER_SIZE,) if self.CLUSTER_SIZE > 1 else None
         self._cached_device_index = device_index
         stream = torch.cuda.current_stream(device_index).cuda_stream
         launch_kernel(
@@ -389,7 +388,7 @@ class Dispatcher:
             block=(self.NUM_THREADS,),
             dynamic_smem_bytes=self.DYNAMIC_SHARED_MEMORY,
             stream=stream,
-            cluster=self._cached_cluster,
+            cluster=(self.CLUSTER_SIZE,) if self.CLUSTER_SIZE > 1 else None,
         )
 
     def relaunch(self) -> None:
@@ -412,5 +411,5 @@ class Dispatcher:
             block=(self.NUM_THREADS,),
             dynamic_smem_bytes=self.DYNAMIC_SHARED_MEMORY,
             stream=stream,
-            cluster=self._cached_cluster,
+            cluster=(self.CLUSTER_SIZE,) if self.CLUSTER_SIZE > 1 else None,
         )
