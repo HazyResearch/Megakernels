@@ -849,6 +849,6 @@ def benchmark_tok_per_sec(prompt="Hello, my name is", max_new_tokens=200, num_sa
 
 
 if __name__ == "__main__":
+    benchmark_tok_per_sec()
     benchmark_instructions()
     benchmark_decode_e2e()
-    benchmark_tok_per_sec()
