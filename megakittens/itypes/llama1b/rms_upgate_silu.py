@@ -20,9 +20,19 @@ def _fake(x, norm_weight, gate_weight, up_weight, eps):
     return torch.empty((*x.shape[:-1], gate_weight.shape[0]), dtype=x.dtype, device=x.device)
 
 
+def _resolve_rms_upgate_silu(args, kwargs):
+    x = args[0]
+    return RmsUpgateSilu(n=x.shape[-1])
+
+
 class RmsUpgateSilu(IType):
 
-    def __init__(self, n=0):
+    torch_functions_map = {
+        torch.ops.megakittens.rms_upgate_silu: _resolve_rms_upgate_silu,
+        torch.ops.megakittens.rms_upgate_silu.default: _resolve_rms_upgate_silu,
+    }
+
+    def __init__(self, n):
         self._n = n
 
     @property
@@ -43,24 +53,16 @@ class RmsUpgateSilu(IType):
 
     @property
     def inputs(self) -> list[TensorSpec]:
-        if self._n > 0:
-            return [
-                TensorSpec(dtype=DType.bf16, granularity=(1,),                           # hidden_states
-                           tma_types=[sv(dtype=DType.bf16, length=self._n)]),
-                TensorSpec(dtype=DType.bf16, granularity=(1, 1),                         # norm_weight
-                           tma_types=[sv(dtype=DType.bf16, length=self._n)]),
-                TensorSpec(dtype=DType.bf16, granularity=(1, 1, 1),                      # up_weights
-                           tma_types=[st(dtype=DType.bf16, rows=16, cols=512)]),
-                TensorSpec(dtype=DType.bf16, granularity=(1, 1, 1),                      # gate_weights
-                           tma_types=[st(dtype=DType.bf16, rows=16, cols=512)]),
-                TensorSpec(dtype=DType.fp32, granularity=(1,)),                         # rms_norm_eps
-            ]
         return [
-            TensorSpec(dtype=DType.bf16, granularity=(1,)),
-            TensorSpec(dtype=DType.bf16, granularity=(1, 1)),
-            TensorSpec(dtype=DType.bf16, granularity=(1, 1, 1)),
-            TensorSpec(dtype=DType.bf16, granularity=(1, 1, 1)),
-            TensorSpec(dtype=DType.fp32, granularity=(1,)),
+            TensorSpec(dtype=DType.bf16, granularity=(1,),                           # hidden_states
+                       tma_types=[sv(dtype=DType.bf16, length=self._n)]),
+            TensorSpec(dtype=DType.bf16, granularity=(1, 1),                         # norm_weight
+                       tma_types=[sv(dtype=DType.bf16, length=self._n)]),
+            TensorSpec(dtype=DType.bf16, granularity=(1, 1, 1),                      # up_weights
+                       tma_types=[st(dtype=DType.bf16, rows=16, cols=512)]),
+            TensorSpec(dtype=DType.bf16, granularity=(1, 1, 1),                      # gate_weights
+                       tma_types=[st(dtype=DType.bf16, rows=16, cols=512)]),
+            TensorSpec(dtype=DType.fp32, granularity=(1,)),                         # rms_norm_eps
         ]
 
     @property
@@ -80,5 +82,8 @@ class RmsUpgateSilu(IType):
         return [], []
 
     def validate(self, src_metas, dst_metas):
-        x_meta = src_metas[0]
-        self._n = x_meta.shape[-1]
+        super().validate(src_metas, dst_metas)
+        if src_metas[0].shape[-1] != self._n:
+            raise RuntimeError(
+                f"[MegaKittens] {self.name}: expected n={self._n}, got {src_metas[0].shape[-1]}"
+            )

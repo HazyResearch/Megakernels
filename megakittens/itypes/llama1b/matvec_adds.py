@@ -23,9 +23,19 @@ def _matvec_adds_fake(x, down_weights, residual):
 BLOCK_SIZE = 16
 
 
+def _resolve_mat_vec_adds(args, kwargs):
+    x = args[0]
+    return MatVecAdds(n=x.shape[-1])
+
+
 class MatVecAdds(IType):
 
-    def __init__(self, n=0):
+    torch_functions_map = {
+        torch.ops.megakittens.mat_vec_adds: _resolve_mat_vec_adds,
+        torch.ops.megakittens.mat_vec_adds.default: _resolve_mat_vec_adds,
+    }
+
+    def __init__(self, n):
         self._n = n
 
     @property
@@ -46,25 +56,18 @@ class MatVecAdds(IType):
 
     @property
     def inputs(self) -> list[TensorSpec]:
-        if self._n > 0:
-            return [
-                TensorSpec(dtype=DType.bf16, granularity=(1,)),                          # activations
-                TensorSpec(dtype=DType.bf16, granularity=(1, 1, 1),                      # weights
-                           tma_types=[st(dtype=DType.bf16, rows=16, cols=512)]),
-            ]
         return [
-            TensorSpec(dtype=DType.bf16, granularity=(1,)),
-            TensorSpec(dtype=DType.bf16, granularity=(1, 1, 1)),
+            TensorSpec(dtype=DType.bf16, granularity=(1,)),                          # activations
+            TensorSpec(dtype=DType.bf16, granularity=(1, 1, 1),                      # weights
+                       tma_types=[st(dtype=DType.bf16, rows=16, cols=512)]),
         ]
 
     @property
     def outputs(self) -> list[TensorSpec]:
-        if self._n > 0:
-            return [
-                TensorSpec(dtype=DType.bf16, granularity=(1,),                           # output (store_add)
-                           tma_types=[sv(dtype=DType.bf16, length=16)]),
-            ]
-        return [TensorSpec(dtype=DType.bf16, granularity=(1,))]
+        return [
+            TensorSpec(dtype=DType.bf16, granularity=(1,),                           # output (store_add)
+                       tma_types=[sv(dtype=DType.bf16, length=16)]),
+        ]
 
     def block_indices(self, src_metas, dst_metas):
         return [()]
@@ -76,5 +79,8 @@ class MatVecAdds(IType):
         return [], []
 
     def validate(self, src_metas, dst_metas):
-        if self._n == 0:
-            self._n = src_metas[0].shape[-1]
+        super().validate(src_metas, dst_metas)
+        if src_metas[0].shape[-1] != self._n:
+            raise RuntimeError(
+                f"[MegaKittens] {self.name}: expected n={self._n}, got {src_metas[0].shape[-1]}"
+            )

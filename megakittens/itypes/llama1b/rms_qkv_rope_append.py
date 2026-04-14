@@ -26,9 +26,23 @@ def _rms_qkv_rope_append_fake(hidden_states, attn_norm_weights, qkv_weights,
     return torch.empty(qkv_weights.shape[1], dtype=hidden_states.dtype, device=hidden_states.device)
 
 
+def _resolve_rms_qkv_rope_append(args, kwargs):
+    hidden_states = args[0]
+    return RmsQkvRopeAppend(
+        n=hidden_states.shape[-1],
+        head_dim=args[3].shape[-1],       # rope_cos last dim
+        num_kv_heads=args[5].shape[-2],   # k_cache second-to-last dim
+    )
+
+
 class RmsQkvRopeAppend(IType):
 
-    def __init__(self, n=0, head_dim=64, num_kv_heads=8):
+    torch_functions_map = {
+        torch.ops.megakittens.rms_qkv_rope_append: _resolve_rms_qkv_rope_append,
+        torch.ops.megakittens.rms_qkv_rope_append.default: _resolve_rms_qkv_rope_append,
+    }
+
+    def __init__(self, n, head_dim=64, num_kv_heads=8):
         self._n = n
         self._head_dim = head_dim
         self._num_kv_heads = num_kv_heads
@@ -52,35 +66,23 @@ class RmsQkvRopeAppend(IType):
 
     @property
     def inputs(self) -> list[TensorSpec]:
-        if self._n > 0:
-            return [
-                TensorSpec(dtype=DType.bf16, granularity=(1,),                           # hidden_states
-                           tma_types=[sv(dtype=DType.bf16, length=self._n)]),
-                TensorSpec(dtype=DType.bf16, granularity=(1, 1),                         # attn_norm_weights
-                           tma_types=[sv(dtype=DType.bf16, length=self._n)]),
-                TensorSpec(dtype=DType.bf16, granularity=(1, 1, 1),                      # qkv_weights
-                           tma_types=[st(dtype=DType.bf16, rows=16, cols=512)]),
-                TensorSpec(dtype=DType.fp32, granularity=(1, 1),                         # rope_cos
-                           tma_types=[sv(dtype=DType.fp32, length=self._head_dim)]),
-                TensorSpec(dtype=DType.fp32, granularity=(1, 1),                         # rope_sin
-                           tma_types=[sv(dtype=DType.fp32, length=self._head_dim)]),
-                TensorSpec(dtype=DType.bf16, granularity=(1, 1, 1, 1),                   # k_cache
-                           tma_types=[sv(dtype=DType.bf16, length=16)]),
-                TensorSpec(dtype=DType.bf16, granularity=(1, 1, 1, 1),                   # v_cache
-                           tma_types=[sv(dtype=DType.bf16, length=16)]),
-                TensorSpec(dtype=DType.int32, granularity=(1,)),                         # pos_id
-                TensorSpec(dtype=DType.fp32, granularity=(1,)),                          # rms_norm_eps
-            ]
         return [
-            TensorSpec(dtype=DType.bf16, granularity=(1,)),
-            TensorSpec(dtype=DType.bf16, granularity=(1, 1)),
-            TensorSpec(dtype=DType.bf16, granularity=(1, 1, 1)),
-            TensorSpec(dtype=DType.fp32, granularity=(1, 1)),
-            TensorSpec(dtype=DType.fp32, granularity=(1, 1)),
-            TensorSpec(dtype=DType.bf16, granularity=(1, 1, 1, 1)),
-            TensorSpec(dtype=DType.bf16, granularity=(1, 1, 1, 1)),
-            TensorSpec(dtype=DType.int32, granularity=(1,)),
-            TensorSpec(dtype=DType.fp32, granularity=(1,)),
+            TensorSpec(dtype=DType.bf16, granularity=(1,),                           # hidden_states
+                       tma_types=[sv(dtype=DType.bf16, length=self._n)]),
+            TensorSpec(dtype=DType.bf16, granularity=(1, 1),                         # attn_norm_weights
+                       tma_types=[sv(dtype=DType.bf16, length=self._n)]),
+            TensorSpec(dtype=DType.bf16, granularity=(1, 1, 1),                      # qkv_weights
+                       tma_types=[st(dtype=DType.bf16, rows=16, cols=512)]),
+            TensorSpec(dtype=DType.fp32, granularity=(1, 1),                         # rope_cos
+                       tma_types=[sv(dtype=DType.fp32, length=self._head_dim)]),
+            TensorSpec(dtype=DType.fp32, granularity=(1, 1),                         # rope_sin
+                       tma_types=[sv(dtype=DType.fp32, length=self._head_dim)]),
+            TensorSpec(dtype=DType.bf16, granularity=(1, 1, 1, 1),                   # k_cache
+                       tma_types=[sv(dtype=DType.bf16, length=16)]),
+            TensorSpec(dtype=DType.bf16, granularity=(1, 1, 1, 1),                   # v_cache
+                       tma_types=[sv(dtype=DType.bf16, length=16)]),
+            TensorSpec(dtype=DType.int32, granularity=(1,)),                         # pos_id
+            TensorSpec(dtype=DType.fp32, granularity=(1,)),                          # rms_norm_eps
         ]
 
     @property
@@ -100,4 +102,9 @@ class RmsQkvRopeAppend(IType):
         return [], []
 
     def validate(self, src_metas, dst_metas):
-        self._n = src_metas[0].shape[0]
+        super().validate(src_metas, dst_metas)
+        n = src_metas[0].shape[0]
+        if n != self._n:
+            raise RuntimeError(
+                f"[MegaKittens] {self.name}: expected n={self._n}, got {n}"
+            )

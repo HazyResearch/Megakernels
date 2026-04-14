@@ -85,4 +85,4 @@ class AttentionPartial(IType):
         return [], []
 
     def validate(self, src_metas, dst_metas):
-        pass
+        super().validate(src_metas, dst_metas)
