@@ -511,11 +511,12 @@ def _pt_decode(hidden, weights, k_cache, v_cache, rope_cos, rope_sin, pos_id):
     return weights["lm_head_weight"] @ normed
 
 
-def benchmark_decode_e2e():
+def benchmark_decode_e2e(num_partitions: int = 1):
     sm_count = get_sm_count()
-    pos_id = SEQ_LEN - 1
+    pos_id = 4096 - 1
+    seq_len = pos_id + 1
 
-    schedule = schedule_decode(sm_count=sm_count)
+    schedule = schedule_decode(sm_count=sm_count, num_partitions=num_partitions)
     instruction_metas, tensor_metas, instructions, num_barriers, input_indices, output_indices = schedule
 
     dispatcher = Dispatcher(
@@ -568,6 +569,8 @@ def benchmark_decode_e2e():
         pos_id_tensor,
         attn_scale_tensor,
         rms_norm_eps_tensor,
+        torch.zeros(NUM_ATTENTION_HEADS, num_partitions, HEAD_DIM, dtype=torch.float32, device=D),
+        torch.zeros(NUM_ATTENTION_HEADS, ((num_partitions + 15) // 16) * 16, dtype=torch.float32, device=D),
     ]
 
     mk_fn = lambda: dispatcher(*mk_tensors)
@@ -580,7 +583,7 @@ def benchmark_decode_e2e():
         QKV_DIM * HIDDEN_DIM * 2
         + HIDDEN_DIM * 2
         + 2 * HEAD_DIM * 4
-        + 2 * SEQ_LEN * NUM_KV_HEADS * HEAD_DIM * 2
+        + 2 * seq_len * NUM_KV_HEADS * HEAD_DIM * 2
         + HIDDEN_DIM * HIDDEN_DIM * 2
         + HIDDEN_DIM * 2
         + 2 * INTERMEDIATE_DIM * HIDDEN_DIM * 2
@@ -595,15 +598,71 @@ def benchmark_decode_e2e():
     mk_gbs = roofline_bytes / (mk_us * 1e-6) / 1e9
     pt_gbs = roofline_bytes / (pt_us * 1e-6) / 1e9
 
+    label = f"num_partitions={num_partitions}" if num_partitions > 1 else "no reduction"
     print()
-    print("Llama 3.2 1B full decode (bf16, M=1)")
-    print(f"Layers: {NUM_LAYERS}, seq_len: {SEQ_LEN}")
+    print(f"Llama 3.2 1B full decode (bf16, M=1, {label})")
+    print(f"Layers: {NUM_LAYERS}, seq_len: {seq_len}")
     print(f"Total model bytes: {roofline_bytes / 1e9:.2f} GB")
     print()
     print(f"  Megakernel:  {mk_us:>10.1f} us  ({mk_gbs:.1f} GB/s)  {mk_us / roof_us:.1f}x roofline")
     print(f"  PyTorch:     {pt_us:>10.1f} us  ({pt_gbs:.1f} GB/s)  {pt_us / roof_us:.1f}x roofline")
     print(f"  Roofline:    {roof_us:>10.1f} us")
 
+
+def check_reduction_correctness(num_partitions: int = 16):
+    """Compare single-partition vs multi-partition megakernel on same inputs."""
+    sm_count = get_sm_count()
+    pos_id = 4096 - 1
+    D = "cuda"
+
+    # Shared inputs
+    hidden = torch.randn(HIDDEN_DIM, dtype=torch.bfloat16, device=D)
+    weights_list = [
+        torch.randn(NUM_LAYERS, QKV_DIM, HIDDEN_DIM, dtype=torch.bfloat16, device=D),
+        torch.randn(NUM_LAYERS, HIDDEN_DIM, HIDDEN_DIM, dtype=torch.bfloat16, device=D),
+        torch.randn(NUM_LAYERS, HIDDEN_DIM, dtype=torch.bfloat16, device=D),
+        torch.randn(NUM_LAYERS, HIDDEN_DIM, dtype=torch.bfloat16, device=D),
+        torch.randn(NUM_LAYERS, INTERMEDIATE_DIM, HIDDEN_DIM, dtype=torch.bfloat16, device=D),
+        torch.randn(NUM_LAYERS, INTERMEDIATE_DIM, HIDDEN_DIM, dtype=torch.bfloat16, device=D),
+        torch.randn(NUM_LAYERS, HIDDEN_DIM, INTERMEDIATE_DIM, dtype=torch.bfloat16, device=D),
+        torch.randn(HIDDEN_DIM, dtype=torch.bfloat16, device=D),
+        torch.randn(VOCAB_SIZE, HIDDEN_DIM, dtype=torch.bfloat16, device=D),
+    ]
+    k_cache = torch.randn(NUM_LAYERS, MAX_SEQ_LEN, NUM_KV_HEADS, HEAD_DIM, dtype=torch.bfloat16, device=D)
+    v_cache = torch.randn(NUM_LAYERS, MAX_SEQ_LEN, NUM_KV_HEADS, HEAD_DIM, dtype=torch.bfloat16, device=D)
+    rope_cos = torch.randn(MAX_SEQ_LEN, HEAD_DIM, dtype=torch.float32, device=D)
+    rope_sin = torch.randn(MAX_SEQ_LEN, HEAD_DIM, dtype=torch.float32, device=D)
+    pos_id_t = torch.tensor([pos_id], dtype=torch.int32, device=D)
+    scale_t = torch.tensor([ATTN_SCALE], dtype=torch.float32, device=D)
+    eps_t = torch.tensor([RMS_NORM_EPS], dtype=torch.float32, device=D)
+
+    def make_tensors(np):
+        return weights_list + [
+            hidden.clone(),
+            torch.zeros(Q_DIM, dtype=torch.bfloat16, device=D),
+            torch.zeros(HIDDEN_DIM, dtype=torch.bfloat16, device=D),
+            torch.zeros(INTERMEDIATE_DIM, dtype=torch.bfloat16, device=D),
+            torch.zeros(VOCAB_SIZE, dtype=torch.bfloat16, device=D),
+            k_cache.clone(), v_cache.clone(), rope_cos, rope_sin,
+            pos_id_t, scale_t, eps_t,
+            torch.zeros(NUM_ATTENTION_HEADS, np, HEAD_DIM, dtype=torch.float32, device=D),
+            torch.zeros(NUM_ATTENTION_HEADS, ((np + 15) // 16) * 16, dtype=torch.float32, device=D),
+        ]
+
+    def run(np, num_layers=NUM_LAYERS):
+        sched = schedule_decode(sm_count=sm_count, num_partitions=np, num_layers=num_layers)
+        d = Dispatcher(*sched, use_jit_cache=False)
+        t = make_tensors(np)
+        d(*t)
+        return t[13].clone()  # logits
+
+    print(f"\nReduction correctness (1 vs {num_partitions} partitions, seq_len={pos_id+1}):")
+
+    for nl in [1, 16]:
+        logits_1 = run(1, num_layers=nl)
+        logits_n = run(num_partitions, num_layers=nl)
+        diff = (logits_1.float() - logits_n.float()).abs()
+        print(f"\n  {nl}-layer: max_diff={diff.max().item():.4f}  mean_diff={diff.mean().item():.6f}  argmax_match={logits_1.argmax().item() == logits_n.argmax().item()}")
 
 
 def _interleave_indices(num_heads, head_dim):
@@ -783,6 +842,8 @@ def benchmark_tok_per_sec(prompt="Hello, my name is", max_new_tokens=200, num_sa
         pos_id_tensor,
         attn_scale_tensor,
         rms_norm_eps_tensor,
+        torch.zeros(NUM_ATTENTION_HEADS, 1, HEAD_DIM, dtype=torch.float32, device=D),
+        torch.zeros(NUM_ATTENTION_HEADS, 16, dtype=torch.float32, device=D),
     ]
 
     model_size = sum(t.nelement() * t.element_size() for t in mk_tensors[:9])
@@ -851,4 +912,6 @@ def benchmark_tok_per_sec(prompt="Hello, my name is", max_new_tokens=200, num_sa
 if __name__ == "__main__":
     benchmark_tok_per_sec()
     benchmark_instructions()
-    benchmark_decode_e2e()
+    check_reduction_correctness(num_partitions=16)
+    benchmark_decode_e2e(num_partitions=1)
+    benchmark_decode_e2e(num_partitions=16)

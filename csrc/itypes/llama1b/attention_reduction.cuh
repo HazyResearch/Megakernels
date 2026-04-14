@@ -7,13 +7,12 @@
 namespace megakittens {
 
 template <typename Config, typename Globals,
-          int HEAD_DIM, int Q_HEADS_PER_INSTRUCTION,
+          int HEAD_DIM, int Q_HEADS_PER_INSTRUCTION, int MAX_PARTIALS,
           int SRC_LSE, int SRC_O_PARTIAL, int DST>
 struct AttentionReduction {
 
     static constexpr int NUM_STAGES = 2;
     static_assert(NUM_STAGES <= 2);
-    static constexpr int MAX_PARTIALS = 13;
     static constexpr int SHARED_DATA_PAGE = 0;
 
     using l_partial_sv = kittens::sv_fl<((MAX_PARTIALS + 15) / 16) * 16>;
@@ -29,17 +28,13 @@ struct AttentionReduction {
         int layer_idx;
         int q_head_start_idx;
         int num_partials;
-        int reduction_list[MAX_PARTIALS];
+        int barrier_base;
 
         __device__ inline parsed_instruction(const instruction_t &instruction) {
             layer_idx        = instruction.indices[0];
             q_head_start_idx = instruction.indices[1];
             num_partials     = instruction.indices[2];
-            #pragma unroll
-            for (int k = 0; k < MAX_PARTIALS; k++) {
-                if (k < num_partials)
-                    reduction_list[k] = instruction.indices[3 + k];
-            }
+            barrier_base     = instruction.indices[3];
         }
         __device__ inline parsed_instruction(state_t<Config> &s)
             : parsed_instruction(s.instruction()) {}
@@ -122,18 +117,16 @@ struct AttentionReduction {
 
                 for (int i = 0; i < inst.num_partials; i++) {
                     int stage = i % NUM_STAGES;
-                    int cur_partial_idx = inst.reduction_list[i];
                     for (int j = 0; j < Q_HEADS_PER_INSTRUCTION; j++) {
                         o_sv &O_smem = get_O_partial_smem(s, j, stage);
                         if (i >= NUM_STAGES) {
                             int prev_phase = (i / NUM_STAGES - 1) % 2;
                             kittens::wait(O_partial_finished(s, j, stage), prev_phase);
                         }
-
                         kittens::tma::expect(O_partial_arrived(s, j, stage), O_smem);
                         kittens::tma::load_async<kittens::cache_policy::EVICT_FIRST>(
                             O_smem, g.template gls<SRC_O_PARTIAL>(),
-                            {inst.q_head_start_idx + j, cur_partial_idx, 0},
+                            {inst.q_head_start_idx + j, i, 0},
                             O_partial_arrived(s, j, stage));
                     }
                 }
@@ -148,7 +141,7 @@ struct AttentionReduction {
             parsed_instruction inst{s};
             int q_head_local_idx = kittens::warpid();
             o_rv accumulated_out, current_out;
-            float accumulated_lse = -INFINITY, current_lse;
+            float accumulated_lse = -1e38f, current_lse;
             kittens::warp::zero(accumulated_out);
             kittens::warp::wait(L_partial_all_arrived(s, q_head_local_idx), 0);
             l_partial_sv &L_smem = get_L_partial_smem(s, q_head_local_idx);
@@ -157,9 +150,8 @@ struct AttentionReduction {
                 kittens::warp::wait(O_partial_arrived(s, q_head_local_idx, stage),
                                     (i / NUM_STAGES) % 2);
                 o_sv &O_smem = get_O_partial_smem(s, q_head_local_idx, stage);
-                int cur_partial_idx = inst.reduction_list[i];
                 uint32_t src_ptr_L = static_cast<uint32_t>(
-                    __cvta_generic_to_shared(&L_smem.data[cur_partial_idx]));
+                    __cvta_generic_to_shared(&L_smem.data[i]));
                 kittens::move<float>::lds(current_lse, src_ptr_L);
                 kittens::warp::load(current_out, O_smem);
                 float max_lse = max(accumulated_lse, current_lse);
@@ -203,7 +195,8 @@ struct AttentionReduction {
                 s.page_finish(data_pid(s));
             if (kittens::warp::elect_leader()) {
                 __threadfence();
-                all_barrier_arrive<Config>(g, s.instruction());
+                barrier_arrive<Config>(&g.barriers.raw_ptr[inst.barrier_base],
+                                       Q_HEADS_PER_INSTRUCTION);
             }
         }
     };

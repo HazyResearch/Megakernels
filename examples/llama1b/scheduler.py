@@ -7,7 +7,8 @@ matching the megakittens Instruction/InstructionMeta format.
 
 from __future__ import annotations
 
-from megakittens.itypes.llama1b.attention_partial import AttentionPartial
+from megakittens.itypes.llama1b.attention_partial import AttentionPartial, AttentionPartialMulti
+from megakittens.itypes.llama1b.attention_reduction import AttentionReduction
 from megakittens.itypes.noop import Noop
 from megakittens.itypes.llama1b.matvec_adds import MatVecAdds
 from megakittens.itypes.llama1b.rms_lm_head import RmsLmHead
@@ -30,7 +31,7 @@ HEAD_DIM = 64
 VOCAB_SIZE = 128256
 RMS_NORM_EPS = 1e-5
 MATVEC_BLOCK_SIZE = 16
-MAX_SEQ_LEN = 512
+MAX_SEQ_LEN = 4096
 
 # QKV layout: [Q rows | K rows | V rows] = [2048 | 512 | 512] = 3072
 Q_DIM = NUM_ATTENTION_HEADS * HEAD_DIM      # 2048
@@ -67,6 +68,8 @@ class T:
     POS_ID = 18              # [1] int32
     ATTN_SCALE = 19          # [1] fp32
     RMS_NORM_EPS = 20        # [1] fp32
+    ATTN_O_INTER = 21        # [NUM_ATTENTION_HEADS, num_partitions, HEAD_DIM] fp32
+    ATTN_L_INTER = 22        # [NUM_ATTENTION_HEADS, num_partitions] fp32
 _TENSOR_COUNT = max(v for k, v in vars(T).items() if not k.startswith('_') and isinstance(v, int)) + 1
 T.COUNT = _TENSOR_COUNT
 
@@ -112,7 +115,7 @@ def _pad_to_cluster(instructions: list[Instruction]) -> None:
     while len(instructions) % CLUSTER_SIZE != 0:
         instructions.append(_noop)
 
-def _make_tensor_metas(device: Device) -> list[TensorMeta]:
+def _make_tensor_metas(device: Device, num_partitions: int = 1) -> list[TensorMeta]:
     bf16 = DType.bf16
     fp32 = DType.fp32
     metas = [None] * T.COUNT
@@ -138,6 +141,10 @@ def _make_tensor_metas(device: Device) -> list[TensorMeta]:
     metas[T.POS_ID] = TensorMeta(dtype=DType.int32, shape=(1,), device=device)
     metas[T.ATTN_SCALE] = TensorMeta(dtype=fp32, shape=(1,), device=device)
     metas[T.RMS_NORM_EPS] = TensorMeta(dtype=fp32, shape=(1,), device=device)
+    metas[T.ATTN_O_INTER] = TensorMeta(dtype=fp32, shape=(NUM_ATTENTION_HEADS, num_partitions, HEAD_DIM), device=device)
+    # Pad L columns to multiple of 16 for TMA sv alignment
+    l_cols = ((num_partitions + 15) // 16) * 16
+    metas[T.ATTN_L_INTER] = TensorMeta(dtype=fp32, shape=(NUM_ATTENTION_HEADS, l_cols), device=device)
 
     return metas
 
@@ -204,6 +211,66 @@ def _schedule_attention(
             src_barrier_targets=src_targets,
             num_input_barriers=GQA_RATIO,       # Q barriers (consumer)
             num_reuse_barriers=2,                # K + V barriers (launcher, deferred)
+            num_dst_barriers=0,
+            dst_barriers=(),
+        ))
+    _pad_to_cluster(instructions)
+    return instructions
+
+
+def _schedule_attention_multi(
+    layer_idx: int,
+    icode: int,
+    num_partitions: int,
+) -> list[Instruction]:
+    attn_barrier_base = _barrier_index(layer_idx, 1, 0)
+    instructions = []
+    for kv_head in range(NUM_KV_HEADS):
+        q_head_start = kv_head * GQA_RATIO
+        src_barriers = tuple(
+            _barrier_index(layer_idx, 0, q_head_start + h) for h in range(GQA_RATIO)
+        ) + (
+            _barrier_index(layer_idx, 0, NUM_ATTENTION_HEADS + kv_head),
+            _barrier_index(layer_idx, 0, NUM_ATTENTION_HEADS + NUM_KV_HEADS + kv_head),
+        )
+        src_targets = (QKV_TARGET_PER_SUB,) * (GQA_RATIO + 2)
+        attn_barrier = _barrier_index(layer_idx, 1, kv_head)
+        for partial_idx in range(num_partitions):
+            instructions.append(Instruction(
+                icode=icode,
+                src_tensors=(T.Q_POST_ROPE, T.K_CACHE, T.V_CACHE),
+                dst_tensors=(T.ATTN_O_INTER, T.ATTN_L_INTER),
+                indices=(layer_idx, kv_head, partial_idx, num_partitions, attn_barrier),
+                src_barriers=src_barriers,
+                src_barrier_targets=src_targets,
+                num_input_barriers=GQA_RATIO,
+                num_reuse_barriers=2,
+                num_dst_barriers=0,
+                dst_barriers=(),
+            ))
+    _pad_to_cluster(instructions)
+    return instructions
+
+
+def _schedule_attention_reduction(
+    layer_idx: int,
+    icode: int,
+    num_partitions: int,
+) -> list[Instruction]:
+    attn_red_barrier = _barrier_index(layer_idx, 2, 0)
+    instructions = []
+    for kv_head in range(NUM_KV_HEADS):
+        q_head_start = kv_head * GQA_RATIO
+        attn_barrier = _barrier_index(layer_idx, 1, kv_head)
+        instructions.append(Instruction(
+            icode=icode,
+            src_tensors=(T.ATTN_L_INTER, T.ATTN_O_INTER),
+            dst_tensors=(T.ATTN_OUT,),
+            indices=(layer_idx, q_head_start, num_partitions, attn_red_barrier),
+            src_barriers=(attn_barrier,),
+            src_barrier_targets=(num_partitions * GQA_RATIO,),
+            num_input_barriers=1,
+            num_reuse_barriers=0,
             num_dst_barriers=0,
             dst_barriers=(),
         ))
@@ -348,6 +415,8 @@ ICODE_O_PROJ = 3
 ICODE_UPGATE = 4
 ICODE_DOWNPROJ = 5
 ICODE_LM_HEAD = 6
+ICODE_ATTENTION_MULTI = 7
+ICODE_ATTENTION_RED = 8
 
 
 def schedule_decode(
@@ -356,15 +425,20 @@ def schedule_decode(
     device: Device | None = None,
     noop: bool = False,
     oproj_max_instructions: int | None = 64,
+    num_partitions: int = 1,
 ):
     if device is None:
         device = Device(type="cuda", index=0)
 
-    tensor_metas = _make_tensor_metas(device)
+    use_multi_partition = num_partitions > 1
+
+    tensor_metas = _make_tensor_metas(device, num_partitions=num_partitions)
 
     # Icode mapping — noop mode sets everything to 0
     icode_qkv = 0 if noop else ICODE_QKV
     icode_attn = 0 if noop else ICODE_ATTENTION
+    icode_attn_multi = 0 if noop else ICODE_ATTENTION_MULTI
+    icode_attn_red = 0 if noop else ICODE_ATTENTION_RED
     icode_oproj = 0 if noop else ICODE_O_PROJ
     icode_upgate = 0 if noop else ICODE_UPGATE
     icode_downproj = 0 if noop else ICODE_DOWNPROJ
@@ -373,6 +447,11 @@ def schedule_decode(
     # Instruction metas (drive JIT codegen)
     _matvec_adds_itype = MatVecAdds(n=HIDDEN_DIM)
     _attention_partial_itype = AttentionPartial()
+    _attention_partial_multi_itype = AttentionPartialMulti()
+    _attention_reduction_itype = AttentionReduction(
+        head_dim=HEAD_DIM, q_heads_per_instruction=GQA_RATIO,
+        max_partials=num_partitions,
+    )
     _rms_qkv_itype = RmsQkvRopeAppend(n=HIDDEN_DIM, head_dim=HEAD_DIM, num_kv_heads=NUM_KV_HEADS)
     _rms_upgate_silu_itype = RmsUpgateSilu(n=HIDDEN_DIM)
     _rms_lm_head_itype = RmsLmHead(n=HIDDEN_DIM)
@@ -384,10 +463,6 @@ def schedule_decode(
                                      T.K_CACHE, T.V_CACHE,
                                      T.POS_ID, T.RMS_NORM_EPS),
                         dst_tensors=(T.Q_POST_ROPE,)),
-        InstructionMeta(icode=ICODE_ATTENTION, itype=_attention_partial_itype,
-                        src_tensors=(T.Q_POST_ROPE, T.K_CACHE, T.V_CACHE,
-                                     T.POS_ID, T.ATTN_SCALE),
-                        dst_tensors=(T.ATTN_OUT,)),
         InstructionMeta(icode=ICODE_O_PROJ, itype=_matvec_adds_itype,
                         src_tensors=(T.ATTN_OUT, T.O_WEIGHTS),
                         dst_tensors=(T.HIDDEN_STATES,)),
@@ -405,6 +480,24 @@ def schedule_decode(
                         dst_tensors=(T.LOGITS,)),
     ]
 
+    if use_multi_partition:
+        instruction_metas += [
+            InstructionMeta(icode=ICODE_ATTENTION_MULTI, itype=_attention_partial_multi_itype,
+                            src_tensors=(T.Q_POST_ROPE, T.K_CACHE, T.V_CACHE,
+                                         T.POS_ID, T.ATTN_SCALE),
+                            dst_tensors=(T.ATTN_O_INTER, T.ATTN_L_INTER)),
+            InstructionMeta(icode=ICODE_ATTENTION_RED, itype=_attention_reduction_itype,
+                            src_tensors=(T.ATTN_L_INTER, T.ATTN_O_INTER),
+                            dst_tensors=(T.ATTN_OUT,)),
+        ]
+    else:
+        instruction_metas.append(
+            InstructionMeta(icode=ICODE_ATTENTION, itype=_attention_partial_itype,
+                            src_tensors=(T.Q_POST_ROPE, T.K_CACHE, T.V_CACHE,
+                                         T.POS_ID, T.ATTN_SCALE),
+                            dst_tensors=(T.ATTN_OUT,)),
+        )
+
     instructions: list[Instruction] = []
     num_barriers = num_layers * NUM_BARRIER_SLOTS * MAX_SUB_BARRIERS
 
@@ -416,7 +509,16 @@ def schedule_decode(
             sm_count, layer_idx, icode_qkv,
             prev_layer_barrier, prev_layer_target,
         )
-        attn_insts = _schedule_attention(layer_idx, icode_attn)
+
+        if use_multi_partition:
+            attn_insts = _schedule_attention_multi(
+                layer_idx, icode_attn_multi, num_partitions)
+            attn_red_insts = _schedule_attention_reduction(
+                layer_idx, icode_attn_red, num_partitions)
+        else:
+            attn_insts = _schedule_attention(layer_idx, icode_attn)
+            attn_red_insts = []
+
         oproj_insts = _schedule_o_proj(sm_count, layer_idx, icode_oproj,
                                        max_instructions=oproj_max_instructions)
         upgate_insts = _schedule_upgate(sm_count, layer_idx, icode_upgate)
@@ -424,6 +526,7 @@ def schedule_decode(
 
         instructions.extend(qkv_insts)
         instructions.extend(attn_insts)
+        instructions.extend(attn_red_insts)
         instructions.extend(oproj_insts)
         instructions.extend(upgate_insts)
         instructions.extend(downproj_insts)

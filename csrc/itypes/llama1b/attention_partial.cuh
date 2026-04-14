@@ -8,8 +8,16 @@ namespace megakittens {
 
 template <typename Config, typename Globals,
           int HEAD_DIM, int KV_BLOCK_SIZE, int GQA_RATIO,
-          int SRC_Q, int SRC_K_CACHE, int SRC_V_CACHE, int SCALAR_POS_ID, int SCALAR_ATTN_SCALE, int DST>
+          int SRC_Q, int SRC_K_CACHE, int SRC_V_CACHE, int SCALAR_POS_ID, int SCALAR_ATTN_SCALE,
+          int DST, int DST_L = -1>
 struct AttentionPartial {
+
+    // When DST_L >= 0: multi-partition mode.
+    //   DST  = fp32 O intermediate [num_heads, num_partitions, HEAD_DIM]
+    //   DST_L = fp32 L intermediate [num_heads, num_partitions]
+    // When DST_L == -1: single-partition mode (current behavior).
+    //   DST  = bf16 attn_out [HIDDEN_DIM]
+    static constexpr bool MULTI_PARTITION = (DST_L >= 0);
 
     static_assert(GQA_RATIO == 4, "GQA_RATIO must be 4.");
     static constexpr int NUM_STAGES = 3;
@@ -34,11 +42,21 @@ struct AttentionPartial {
     struct parsed_instruction {
         int layer_idx;
         int kv_head_idx;
+        int partial_idx;
+        int num_partials;
         int barrier_base;
         __device__ inline parsed_instruction(const instruction_t &instruction) {
             layer_idx    = instruction.indices[0];
             kv_head_idx  = instruction.indices[1];
-            barrier_base = instruction.indices[2];
+            if constexpr (MULTI_PARTITION) {
+                partial_idx  = instruction.indices[2];
+                num_partials = instruction.indices[3];
+                barrier_base = instruction.indices[4];
+            } else {
+                partial_idx  = 0;
+                num_partials = 1;
+                barrier_base = instruction.indices[2];
+            }
         }
         __device__ inline parsed_instruction(state_t<Config> &s)
             : parsed_instruction(s.instruction()) {}
@@ -190,24 +208,30 @@ struct AttentionPartial {
     struct loader {
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
             if (kittens::warp::elect_leader()) {
-
                 parsed_instruction inst{s};
                 int seq_len = g.template gls<SCALAR_POS_ID>().raw_ptr[0] + 1;
                 int total_attn_blocks = (seq_len + KV_BLOCK_SIZE - 1) / KV_BLOCK_SIZE;
+
+                // Compute this partition's block range
+                int blocks_per_partial = (total_attn_blocks + inst.num_partials - 1) / inst.num_partials;
+                int start_block = inst.partial_idx * blocks_per_partial;
+                int end_block = min(start_block + blocks_per_partial, total_attn_blocks);
+                int num_local_blocks = end_block - start_block;
+
                 s.page_wait(kv_pid(s));
-                if (total_attn_blocks == 0)
+                if (num_local_blocks == 0)
                     s.page_finish(kv_pid(s));
-                for (int i = 0; i < total_attn_blocks; i++) {
-                    int stage = i % NUM_STAGES;
+                for (int local_i = 0; local_i < num_local_blocks; local_i++) {
+                    int i = start_block + local_i;
+                    int stage = local_i % NUM_STAGES;
                     kv_st &K_smem = get_K_smem(s, stage);
                     kv_st &V_smem = get_V_smem(s, stage);
-                    if (i == total_attn_blocks - 1)
+                    if (local_i == num_local_blocks - 1)
                         all_reuse_barrier_wait<Config>(g, s.instruction());
-                    if (i >= NUM_STAGES) {
-                        kittens::wait(K_finished(s, stage), (i / NUM_STAGES - 1) % 2);
-                        kittens::wait(V_finished(s, stage), (i / NUM_STAGES - 1) % 2);
+                    if (local_i >= NUM_STAGES) {
+                        kittens::wait(K_finished(s, stage), (local_i / NUM_STAGES - 1) % 2);
+                        kittens::wait(V_finished(s, stage), (local_i / NUM_STAGES - 1) % 2);
                     }
-
                     kittens::tma::expect(K_arrived(s, stage), K_smem);
                     kittens::tma::load_async<kittens::dim::DEPTH, kittens::cache_policy::EVICT_FIRST>(
                         K_smem, g.template gls<SRC_K_CACHE>(),
@@ -245,7 +269,13 @@ struct AttentionPartial {
             int q_head_local_idx = (q_head_start_idx % 16) / 4;
             int seq_len = g.template gls<SCALAR_POS_ID>().raw_ptr[0] + 1;
             int total_attn_blocks = (seq_len + KV_BLOCK_SIZE - 1) / KV_BLOCK_SIZE;
-            float softmax_temp = g.template gls<SCALAR_ATTN_SCALE>().raw_ptr[0] * 1.44269504089f; // 1 / (sqrt(D_h) * ln(2))
+            float softmax_temp = g.template gls<SCALAR_ATTN_SCALE>().raw_ptr[0] * 1.44269504089f;
+
+            // Compute this partition's block range
+            int blocks_per_partial = (total_attn_blocks + inst.num_partials - 1) / inst.num_partials;
+            int start_block = inst.partial_idx * blocks_per_partial;
+            int end_block = min(start_block + blocks_per_partial, total_attn_blocks);
+            int num_local_blocks = end_block - start_block;
 
             q_rt Q_reg;
             k_rt K_reg;
@@ -277,13 +307,14 @@ struct AttentionPartial {
             kittens::warp::load_async_wait();
             kittens::warp::load(Q_reg, Q_smem);
 
-            for (int i = 0; i < total_attn_blocks; i++) {
-                int stage = i % NUM_STAGES;
+            for (int local_i = 0; local_i < num_local_blocks; local_i++) {
+                int i = start_block + local_i;
+                int stage = local_i % NUM_STAGES;
                 kv_st &K_smem_tile = get_K_smem(s, stage);
                 kv_st &V_smem_tile = get_V_smem(s, stage);
 
                 kittens::warp::zero(attn_fl_reg);
-                kittens::warp::wait(K_arrived(s, stage), (i / NUM_STAGES) % 2);
+                kittens::warp::wait(K_arrived(s, stage), (local_i / NUM_STAGES) % 2);
                 kittens::warp::load(K_reg, K_smem_tile);
                 kittens::warp::mma_ABt(attn_fl_reg, Q_reg, K_reg, attn_fl_reg);
                 kittens::warp::sync();
@@ -294,18 +325,15 @@ struct AttentionPartial {
                                seq_len % KV_BLOCK_SIZE, -999999999999.f);
 
                 kittens::warp::row_max(max_vec_reg, attn_fl_reg, max_vec_reg);
-
                 kittens::warp::mul(attn_fl_reg, attn_fl_reg, softmax_temp);
                 kittens::warp::mul(scaled_max_vec_reg, max_vec_reg, softmax_temp);
-
                 kittens::warp::sub_row(attn_fl_reg, attn_fl_reg, scaled_max_vec_reg);
                 kittens::warp::exp2(attn_fl_reg, attn_fl_reg);
-
                 kittens::warp::sub(diff_scaled_max_vec_reg, last_scaled_max_vec_reg, scaled_max_vec_reg);
                 kittens::warp::exp2(diff_scaled_max_vec_reg, diff_scaled_max_vec_reg);
 
                 kittens::warp::mul_row(O_reg, O_reg, diff_scaled_max_vec_reg);
-                kittens::warp::wait(V_arrived(s, stage), (i / NUM_STAGES) % 2);
+                kittens::warp::wait(V_arrived(s, stage), (local_i / NUM_STAGES) % 2);
                 kittens::warp::load(V_reg, V_smem_tile);
                 kittens::warp::copy(attn_bf_reg, attn_fl_reg);
                 kittens::warp::mma_AB(O_reg, attn_bf_reg, V_reg, O_reg);
@@ -314,13 +342,12 @@ struct AttentionPartial {
 
                 kittens::warp::mul(norm_vec_reg, norm_vec_reg, diff_scaled_max_vec_reg);
                 kittens::warp::row_sum(norm_vec_reg, attn_fl_reg, norm_vec_reg);
-
                 kittens::warp::copy(last_scaled_max_vec_reg, scaled_max_vec_reg);
             }
 
             kittens::warp::sync();
 
-            if (total_attn_blocks > 0) {
+            if (num_local_blocks > 0) {
                 if (kittens::warp::elect_leader())
                     s.page_finish(kv_pid(s));
                 kittens::warp::div_row(O_reg, O_reg, norm_vec_reg);
@@ -345,37 +372,76 @@ struct AttentionPartial {
             parsed_instruction inst{s};
             int q_head_start_idx = inst.kv_head_idx * GQA_RATIO;
             o_sv (&O_smem)[4] = get_O_smem(s);
+            l_sv &L_smem = get_L_smem(s);
             if (kittens::warp::elect_leader())
                 kittens::wait(O_arrived(s), 0);
             kittens::warp::sync();
 
-            kittens::rv_bf<HEAD_DIM> O_bf;
-            for (int head_offset = 0; head_offset < GQA_RATIO; head_offset++) {
-                auto &smem_fl = O_smem[head_offset];
-                auto &smem_bf = *reinterpret_cast<o_sv_bf *>(&smem_fl);
-                kittens::warp::load(O_bf, smem_fl);
-                kittens::warp::sync();
-                kittens::warp::store(smem_bf, O_bf);
-                kittens::warp::sync();
-            }
-            if (kittens::warp::elect_leader()) {
-                for (int head_offset = 0; head_offset < GQA_RATIO; head_offset++) {
-                    auto &smem_bf = *reinterpret_cast<o_sv_bf *>(&O_smem[head_offset]);
-                    kittens::tma::store_async<kittens::cache_policy::EVICT_LAST>(
-                        g.template gls<DST>(), smem_bf,
-                        {0, q_head_start_idx + head_offset});
+            if constexpr (MULTI_PARTITION) {
+                // Multi-partition: store fp32 O to intermediate via TMA
+                if (kittens::warp::elect_leader()) {
+                    for (int head_offset = 0; head_offset < GQA_RATIO; head_offset++) {
+                        kittens::tma::store_async<kittens::cache_policy::EVICT_LAST>(
+                            g.template gls<DST>(), O_smem[head_offset],
+                            {0, q_head_start_idx + head_offset, inst.partial_idx, 0});
+                    }
                 }
-            }
-            kittens::warp::sync();
-            kittens::tma::store_async_wait();
-            if (kittens::warp::elect_leader())
-                s.page_finish(qol_pid(s));
-            // Signal the attn_red barrier (skip_attn_reduction path — no
-            // reduction step, so we signal o_proj's dependency directly).
-            // barrier_base points to attn_red slot; add GQA_RATIO for
-            // the 4 Q heads this instruction covers.
-            if (kittens::warp::elect_leader()) {
-                barrier_arrive<Config>(&g.barriers.raw_ptr[inst.barrier_base], GQA_RATIO);
+                kittens::warp::sync();
+                kittens::tma::store_async_wait();
+
+                // Store fp32 L to intermediate via raw global store
+                if (kittens::warp::elect_leader())
+                    kittens::wait(L_arrived(s), 0);
+                kittens::warp::sync();
+
+                float *l_global = reinterpret_cast<float *>(g.template gls<DST_L>().raw_ptr);
+                // Stride must match the padded column count used by tensor allocation
+                int l_cols = ((inst.num_partials + 15) / 16) * 16;
+                int q_head_local_start = q_head_start_idx % 16;
+                if (kittens::laneid() < GQA_RATIO) {
+                    int head_offset = kittens::laneid();
+                    int q_head = q_head_start_idx + head_offset;
+                    float l_val;
+                    uint32_t src_ptr = static_cast<uint32_t>(
+                        __cvta_generic_to_shared(&L_smem.data[q_head_local_start + head_offset]));
+                    kittens::move<float>::lds(l_val, src_ptr);
+                    l_global[q_head * l_cols + inst.partial_idx] = l_val;
+                }
+                kittens::warp::sync();
+                if (kittens::warp::elect_leader())
+                    s.page_finish(qol_pid(s));
+                // Fence + signal barrier for reduction to consume
+                if (kittens::warp::elect_leader()) {
+                    __threadfence();
+                    barrier_arrive<Config>(&g.barriers.raw_ptr[inst.barrier_base], GQA_RATIO);
+                }
+            } else {
+                // Single-partition: store bf16 O directly to attn_out
+                kittens::rv_bf<HEAD_DIM> O_bf;
+                for (int head_offset = 0; head_offset < GQA_RATIO; head_offset++) {
+                    auto &smem_fl = O_smem[head_offset];
+                    auto &smem_bf = *reinterpret_cast<o_sv_bf *>(&smem_fl);
+                    kittens::warp::load(O_bf, smem_fl);
+                    kittens::warp::sync();
+                    kittens::warp::store(smem_bf, O_bf);
+                    kittens::warp::sync();
+                }
+                if (kittens::warp::elect_leader()) {
+                    for (int head_offset = 0; head_offset < GQA_RATIO; head_offset++) {
+                        auto &smem_bf = *reinterpret_cast<o_sv_bf *>(&O_smem[head_offset]);
+                        kittens::tma::store_async<kittens::cache_policy::EVICT_LAST>(
+                            g.template gls<DST>(), smem_bf,
+                            {0, q_head_start_idx + head_offset});
+                    }
+                }
+                kittens::warp::sync();
+                kittens::tma::store_async_wait();
+                if (kittens::warp::elect_leader())
+                    s.page_finish(qol_pid(s));
+                // Signal the attn_red barrier directly (no reduction step).
+                if (kittens::warp::elect_leader()) {
+                    barrier_arrive<Config>(&g.barriers.raw_ptr[inst.barrier_base], GQA_RATIO);
+                }
             }
         }
     };

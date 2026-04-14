@@ -144,13 +144,15 @@ struct matvec_pipeline {
                 (i % (2 * INPUT_PIPELINE_STAGES)) >= INPUT_PIPELINE_STAGES);
             kittens::wait(outputs_finished(s, output_stage),
                 (i % (2 * OUTPUT_PIPELINE_STAGES)) < OUTPUT_PIPELINE_STAGES);
-            using weight_tile_t = kittens::st_bf<MATVEC_BLOCK_SIZE, REDUCTION_DIM_PER_WARP>;
-            weight_tile_t &weights = s.pages[weight_page].template as<weight_tile_t>(
-                (kittens::warpid() % WARPS_PER_PAGE) * sizeof(weight_tile_t));
-            int scratch_off = output_scratch_off + output_stage * SCRATCH_BYTES_PER_STAGE
-                + kittens::warpid() * SCRATCH_BYTES_PER_WARP;
+            kittens::st_bf<MATVEC_BLOCK_SIZE, REDUCTION_DIM_PER_WARP> &weights =
+                reinterpret_cast<kittens::st_bf<MATVEC_BLOCK_SIZE, REDUCTION_DIM_PER_WARP> *>(
+                    s.pages[weight_page].ptr())[kittens::warpid() % WARPS_PER_PAGE];
+            uint8_t *output_scratch_start = reinterpret_cast<uint8_t *>(
+                s.pages[activation_page].ptr(
+                    output_scratch_off + output_stage * SCRATCH_BYTES_PER_STAGE));
             kittens::sv_fl<MATVEC_BLOCK_SIZE> &out_smem =
-                s.pages[activation_page].template as<kittens::sv_fl<MATVEC_BLOCK_SIZE>>(scratch_off);
+                *reinterpret_cast<kittens::sv_fl<MATVEC_BLOCK_SIZE> *>(
+                    output_scratch_start + kittens::warpid() * SCRATCH_BYTES_PER_WARP);
             llama1b::matvec(out_smem, weights, activations_vec);
             kittens::warp::arrive(outputs_arrived(s, output_stage));
             kittens::warp::arrive(weights_finished(s, input_stage));
