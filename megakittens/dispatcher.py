@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import ctypes
 import struct
 from typing import Any, Sequence
 
@@ -11,7 +10,7 @@ from .schema.device import Device
 from .schema.dtype import DType
 from .schema.tensor import TensorMeta
 from .schema.instruction import Instruction, InstructionMeta
-from .jit.c_utils import pack_args, pack_struct
+from .jit.c_utils import pack_args
 from .jit.pykittens import gl
 
 
@@ -77,17 +76,17 @@ def _pack_instructions_global(instructions: list[Instruction], *, device: str) -
 
 
 def _pack_instructions_per_sm(instructions: list[Instruction], sm_count: int, device: str) -> torch.Tensor:
-    """Pack a list of Instruction objects into a (sm_count, max_per_sm_insts, 64) int32 tensor."""
+    """Pack a list of Instruction objects into a (max_per_sm_insts, sm_count, 64) int32 tensor."""
     if sm_count % Dispatcher.CLUSTER_SIZE != 0:
         raise RuntimeError(f"[MegaKittens] sm_count must be a multiple of {Dispatcher.CLUSTER_SIZE}, got {sm_count}")
     max_per_sm_insts = -(-len(instructions) // sm_count) if len(instructions) > 0 else 1
-    buf = [0] * (sm_count * max_per_sm_insts * 64)
+    buf = [0] * (max_per_sm_insts * sm_count * 64)
     for i, inst in enumerate(instructions):
+        wave = i // sm_count
         sm = i % sm_count
-        slot = i // sm_count
-        offset = sm*max_per_sm_insts*64 + slot*64
+        offset = wave*sm_count*64 + sm*64
         buf[offset:offset+64] = _pack_instruction(inst)
-    return torch.tensor(buf, dtype=torch.int32, device=device).reshape(sm_count, max_per_sm_insts, 64)
+    return torch.tensor(buf, dtype=torch.int32, device=device).reshape(max_per_sm_insts, sm_count, 64)
 
 
 def _validate_tensor_against_meta(
@@ -124,7 +123,7 @@ class Dispatcher:
 
     # Must match default_config in csrc/schema.cuh
     INSTRUCTION_PIPE_STAGES = 2
-    CLUSTER_SIZE = 1
+    CLUSTER_SIZE = 2
     NUM_CONSUMER_WARPS = 8
     NUM_WARPS = 4 + NUM_CONSUMER_WARPS
     NUM_THREADS = NUM_WARPS * 32
@@ -205,11 +204,6 @@ class Dispatcher:
         self.use_jit_cache = use_jit_cache
         self.verbose = verbose
         self.global_work_queue = global_work_queue
-        # Launch cache: avoids rebuilding gl structs every call
-        self._cached_c_buf: ctypes.Array | None = None
-        self._cached_packed_params: ctypes.Array | None = None
-        self._cached_grid: tuple[int, ...] | None = None
-        self._cached_device_index: int | None = None
 
     def __del__(self) -> None:
         if self._cubin_module is not None:
@@ -280,7 +274,7 @@ class Dispatcher:
             mk_dtype = DType.from_torch(t.dtype)
             if i < 2:  # instructions and barriers
                 if i == 0 and not self.global_work_queue:
-                    self.gls[i] = gl(dtype=mk_dtype, b=1, d=-1, r=-1, c=64)
+                    self.gls[i] = gl(dtype=mk_dtype, b=1, d=-1, r=-1, c=-1)
                 else:
                     self.gls[i] = gl(dtype=mk_dtype, b=1, d=1, r=-1, c=-1)
             else:
@@ -357,37 +351,19 @@ class Dispatcher:
         # Reset barriers before each launch
         if self.num_barriers > 0:
             self.barrier_tensor.zero_()
-        if self._cached_packed_params is not None:
-            # Fast path: reuse cached globals (tensor pointers unchanged)
-            stream = torch.cuda.current_stream(self._cached_device_index).cuda_stream
-            launch_kernel(
-                self._kernel_fn,
-                self._cached_packed_params,
-                grid=self._cached_grid,
-                block=(self.NUM_THREADS,),
-                dynamic_smem_bytes=self.DYNAMIC_SHARED_MEMORY,
-                stream=stream,
-                cluster=(self.CLUSTER_SIZE,) if self.CLUSTER_SIZE > 1 else None,
-            )
-            return
         fields = [(g.tensor_to_gl(t), g.size, g.align) for g, t in zip(self.gls, self.all_tensors)]
-        buf = pack_struct(fields)
-        self._cached_c_buf = (ctypes.c_char * len(buf)).from_buffer(buf)
-        self._cached_packed_params = (ctypes.c_void_p * 1)(ctypes.addressof(self._cached_c_buf))
+        _globals_holder, globals_packed = pack_args(fields)
         if self.global_work_queue:
-            grid_size = -(-len(self.instructions) // self.CLUSTER_SIZE) * self.CLUSTER_SIZE
+            grid_size = -(-len(self.instructions) // self.CLUSTER_SIZE) * self.CLUSTER_SIZE  # round up
         else:
             grid_size = get_sm_count(device_index)
-        self._cached_grid = (grid_size,)
-        self._cached_device_index = device_index
         stream = torch.cuda.current_stream(device_index).cuda_stream
         launch_kernel(
             self._kernel_fn,
-            self._cached_packed_params,
-            grid=self._cached_grid,
+            globals_packed,
+            grid=(grid_size,),
             block=(self.NUM_THREADS,),
             dynamic_smem_bytes=self.DYNAMIC_SHARED_MEMORY,
             stream=stream,
-            cluster=(self.CLUSTER_SIZE,) if self.CLUSTER_SIZE > 1 else None,
+            cluster=(self.CLUSTER_SIZE,),
         )
-

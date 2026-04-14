@@ -47,9 +47,9 @@ struct default_config {
     static constexpr bool GLOBAL_WORK_QUEUE = false;
 
     static constexpr int INSTRUCTION_PIPE_STAGES = 2;
-    static constexpr int CLUSTER_SIZE = 1;
+    static constexpr int CLUSTER_SIZE = 2;
     static constexpr int MIN_BLOCKS_PER_SM = 1;
-    static_assert(INSTRUCTION_PIPE_STAGES == 2 && CLUSTER_SIZE == 1 && MIN_BLOCKS_PER_SM == 1); // should not change
+    static_assert(INSTRUCTION_PIPE_STAGES == 2 && CLUSTER_SIZE == 2 && MIN_BLOCKS_PER_SM == 1); // should not change
 
     static constexpr int NUM_CONSUMER_WARPS = 8;
     static constexpr int NUM_WARPS = 4 + NUM_CONSUMER_WARPS;
@@ -107,6 +107,9 @@ struct state_t {
     uint32_t iter;
     uint32_t stage;
 
+    kittens::clc::handle (&clc_handle)[Config::INSTRUCTION_PIPE_STAGES];
+    kittens::semaphore (&clc_arrived)[Config::INSTRUCTION_PIPE_STAGES];
+
     instruction_state_t<Config> (&instruction_states)[Config::INSTRUCTION_PIPE_STAGES];
     kittens::semaphore (&instruction_arrived)[Config::INSTRUCTION_PIPE_STAGES];
     kittens::semaphore (&instruction_finished)[Config::INSTRUCTION_PIPE_STAGES];
@@ -115,7 +118,7 @@ struct state_t {
     kittens::semaphore (&page_finished)[Config::NUM_PAGES];
 
     kittens::semaphore &tensor_finished;
-    kittens::tensor_allocator<1, 1> &tensor_alloc;
+    kittens::tensor_allocator<1, Config::CLUSTER_SIZE> &tensor_alloc;
 
     __device__ __forceinline__ const instruction_t &instruction() const {
         return instruction_states[stage].instruction;
