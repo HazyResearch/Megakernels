@@ -65,3 +65,64 @@ class TensorSpec(BaseModel):
                     f"tma_types[{i}].dtype={tma.dtype} doesn't match spec dtype={self.dtype}"
                 )
         return self
+
+
+class DimRange(BaseModel, frozen=True):
+    start: NonNegativeInt
+    stop: NonNegativeInt  # exclusive
+    stride: conint(gt=0) = 1
+
+    @model_validator(mode='after')
+    def _validate(self):
+        if self.stop < self.start:
+            raise ValueError(f"[MegaKittens] DimRange stop ({self.stop}) < start ({self.start})")
+        return self
+
+    @property
+    def size(self) -> int:
+        if self.stride == 1:
+            return self.stop - self.start
+        return -(-( self.stop - self.start) // self.stride)  # ceiling division
+
+
+class TensorRange(BaseModel, frozen=True):
+    ranges: Tuple[DimRange, ...]
+
+    def __getitem__(self, idx: int) -> DimRange:
+        return self.ranges[idx]
+
+    def __len__(self) -> int:
+        return len(self.ranges)
+
+    @property
+    def effective_shape(self) -> Tuple[int, ...]:
+        return tuple(d.size for d in self.ranges)
+
+    @classmethod
+    def compose(first: "TensorRange", second: "TensorRange") -> "TensorRange":
+        """Compose two ranges: first is applied first (closer to source tensor), 
+           second is relative to first's effective_shape."""
+        if len(first) != len(second):
+            raise ValueError("[MegaKittens] Cannot compose ranges with different ndim")
+        new_ranges = []
+        for first_range, second_range in zip(first.ranges, second.ranges):
+            if first_range.stride != 1 or second_range.stride != 1:
+                raise ValueError("[MegaKittens] Cannot compose ranges with stride != 1")
+            new_start = first_range.start + second_range.start
+            new_stop = first_range.start + second_range.stop
+            if new_stop > first_range.stop:
+                raise ValueError(
+                    f"[MegaKittens] Composed range exceeds parent: "
+                    f"parent=[{first_range.start},{first_range.stop}), child=[{o.start},{o.stop})"
+                )
+            new_ranges.append(DimRange(start=new_start, stop=new_stop))
+        return TensorRange(ranges=tuple(new_ranges))
+
+    def is_full(self, shape: Tuple[int, ...]) -> bool:
+        """Return True if this range covers the entire tensor."""
+        if len(self) != len(shape):
+            return False
+        return all(
+            d.start == 0 and d.stop == s and d.stride == 1
+            for d, s in zip(self.ranges, shape)
+        )
