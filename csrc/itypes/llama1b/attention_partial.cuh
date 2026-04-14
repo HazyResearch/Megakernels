@@ -213,20 +213,6 @@ struct AttentionPartial {
 
     struct loader {
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
-            int laneid = kittens::laneid();
-            if (laneid >= 2 && laneid < Config::NUM_PAGES) {
-                int pid = s.lid_to_pid(laneid);
-                s.page_wait(pid);
-                s.page_finish(pid);
-            }
-        }
-    };
-
-    struct launcher {
-        __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
-            s.tensor_wait();
-            if (kittens::warp::elect_leader()) s.tensor_finish();
-
             if (kittens::warp::elect_leader()) {
 
                 parsed_instruction inst{s};
@@ -264,6 +250,20 @@ struct AttentionPartial {
                         {inst.layer_idx, i, inst.kv_head_idx, 0},
                         V_arrived(s, stage));
                 }
+            }
+        }
+    };
+
+    struct launcher {
+        __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
+            s.tensor_wait();
+            if (kittens::warp::elect_leader()) s.tensor_finish();
+
+            int laneid = kittens::laneid();
+            if (laneid >= 2 && laneid < Config::NUM_PAGES) {
+                int pid = s.lid_to_pid(laneid);
+                s.page_wait(pid);
+                s.page_finish(pid);
             }
         }
     };
