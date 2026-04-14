@@ -35,7 +35,9 @@ class MatVecAdds(IType):
         torch.ops.megakittens.mat_vec_adds.default: _resolve_mat_vec_adds,
     }
 
-    def __init__(self, n):
+    test_cases = []
+
+    def __init__(self, n=0):
         self._n = n
 
     @property

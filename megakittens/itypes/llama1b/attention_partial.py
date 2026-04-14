@@ -19,7 +19,7 @@ def attention_partial_op(
     scale = attn_scale.item()
     qh = q.view(num_kv_heads, gqa_ratio, head_dim)
     k = k_cache[0, :seq_len].permute(1, 2, 0)
-    v = k_cache[0, :seq_len].permute(1, 0, 2)
+    v = v_cache[0, :seq_len].permute(1, 0, 2)
     scores = torch.bmm(qh, k) * scale
     w = F.softmax(scores.float(), dim=-1).to(q.dtype)
     return torch.bmm(w, v).reshape(-1)
@@ -31,6 +31,15 @@ def _attention_partial_fake(q, k_cache, v_cache, pos_id, attn_scale):
 
 
 class AttentionPartial(IType):
+
+    test_cases = [
+        ((), (8, 32, 32)),  # (num_kv_heads, seq_len, max_seq_len)
+    ]
+    test_atol = 1e-2
+    test_rtol = 1e-2
+    bench_cases = [
+        ((), (8, 32, 32)),
+    ]
 
     def __init__(self, head_dim=64, kv_block_size=16, gqa_ratio=4):
         self._head_dim = head_dim
@@ -75,14 +84,38 @@ class AttentionPartial(IType):
                        tma_types=[sv(dtype=DType.bf16, length=self._head_dim)]),
         ]
 
+    def num_instructions(self, src_metas, dst_metas):
+        return src_metas[1].shape[2]
+
     def block_indices(self, src_metas, dst_metas):
-        return [()]
+        num_kv_heads = src_metas[1].shape[2]
+        return [(0, kv_head) for kv_head in range(num_kv_heads)]
 
     def test_args(self, case):
-        return ()
+        num_kv_heads, seq_len, max_seq_len = case
+        head_dim = self._head_dim
+        gqa_ratio = self._gqa_ratio
+        q = torch.randn(num_kv_heads * gqa_ratio * head_dim, dtype=torch.bfloat16, device="cuda")
+        k_cache = torch.randn(1, max_seq_len, num_kv_heads, head_dim, dtype=torch.bfloat16, device="cuda")
+        v_cache = torch.randn(1, max_seq_len, num_kv_heads, head_dim, dtype=torch.bfloat16, device="cuda")
+        pos_id = torch.tensor([seq_len - 1], dtype=torch.int32, device="cuda")
+        attn_scale = torch.tensor([1.0 / (head_dim ** 0.5)], dtype=torch.float32, device="cuda")
+        return (q, k_cache, v_cache, pos_id, attn_scale)
 
     def access_regions(self, block_index, src_metas, dst_metas):
-        return [], []
+        _, kv_head = block_index
+        head_dim = self._head_dim
+        gqa_ratio = self._gqa_ratio
+        group_size = gqa_ratio * head_dim
+        q_start = kv_head * group_size
+        q_end = q_start + group_size
+        num_layers, max_seq_len, num_kv_heads, _ = src_metas[1].shape
+        q_region = ((q_start, q_end),)
+        kv_region = ((0, num_layers), (0, max_seq_len), (kv_head, kv_head + 1), (0, head_dim))
+        pos_region = ((0, 1),)
+        scale_region = ((0, 1),)
+        out_region = ((q_start, q_end),)
+        return [q_region, kv_region, kv_region, pos_region, scale_region], [out_region]
 
     def validate(self, src_metas, dst_metas):
         super().validate(src_metas, dst_metas)

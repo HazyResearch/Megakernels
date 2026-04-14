@@ -32,7 +32,9 @@ class RmsUpgateSilu(IType):
         torch.ops.megakittens.rms_upgate_silu.default: _resolve_rms_upgate_silu,
     }
 
-    def __init__(self, n):
+    test_cases = []
+
+    def __init__(self, n=0):
         self._n = n
 
     @property

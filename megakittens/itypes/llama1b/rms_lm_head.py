@@ -34,7 +34,9 @@ class RmsLmHead(IType):
         torch.ops.megakittens.rms_lm_head.default: _resolve_rms_lm_head,
     }
 
-    def __init__(self, n):
+    test_cases = []
+
+    def __init__(self, n=0):
         self._n = n
 
     @property

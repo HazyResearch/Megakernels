@@ -42,7 +42,9 @@ class RmsQkvRopeAppend(IType):
         torch.ops.megakittens.rms_qkv_rope_append.default: _resolve_rms_qkv_rope_append,
     }
 
-    def __init__(self, n, head_dim=64, num_kv_heads=8):
+    test_cases = []
+
+    def __init__(self, n=0, head_dim=64, num_kv_heads=8):
         self._n = n
         self._head_dim = head_dim
         self._num_kv_heads = num_kv_heads
