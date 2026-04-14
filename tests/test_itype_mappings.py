@@ -15,7 +15,9 @@ def collect_mappings(names=None):
             continue
         inst = cls()
         tensors = tuple(
-            torch.randn(*spec.granularity, dtype=spec.dtype.torch_dtype, device="cuda").abs() + 1e-3
+            torch.randint(0, 10, spec.granularity, dtype=spec.dtype.torch_dtype, device="cuda")
+            if spec.dtype.torch_dtype in (torch.int32, torch.int64)
+            else torch.randn(*spec.granularity, dtype=spec.dtype.torch_dtype, device="cuda").abs() + 1e-3
             for spec in inst.inputs
         )
 

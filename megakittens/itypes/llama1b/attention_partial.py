@@ -38,7 +38,7 @@ class AttentionPartial(IType):
     test_atol = 1e-2
     test_rtol = 1e-2
     bench_cases = [
-        ((), (8, 32, 32)),
+        ((), (8, 128, 512)),
     ]
 
     def __init__(self, head_dim=64, kv_block_size=16, gqa_ratio=4):

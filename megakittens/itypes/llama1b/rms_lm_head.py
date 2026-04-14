@@ -42,7 +42,7 @@ class RmsLmHead(IType):
     test_atol = 1e-2
     test_rtol = 1e-2
     bench_cases = [
-        ((2048,), (1024,)),
+        ((2048,), (128256,)),
     ]
 
     def __init__(self, n=0):

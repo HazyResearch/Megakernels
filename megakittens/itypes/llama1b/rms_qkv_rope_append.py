@@ -68,7 +68,7 @@ class RmsQkvRopeAppend(IType):
     test_atol = 2.0
     test_rtol = 1e-2
     bench_cases = [
-        ((2048, 64, 8), (0, 16)),
+        ((2048, 64, 8), (0, 512)),
     ]
 
     def __init__(self, n=0, head_dim=64, num_kv_heads=8):
