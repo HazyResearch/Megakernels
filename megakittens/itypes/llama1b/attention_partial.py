@@ -103,15 +103,15 @@ class AttentionPartial(IType):
         return (q, k_cache, v_cache, pos_id, attn_scale)
 
     def access_regions(self, block_index, src_metas, dst_metas):
-        _, kv_head = block_index
+        layer_idx, kv_head = block_index
         head_dim = self._head_dim
         gqa_ratio = self._gqa_ratio
         group_size = gqa_ratio * head_dim
         q_start = kv_head * group_size
         q_end = q_start + group_size
-        num_layers, max_seq_len, num_kv_heads, _ = src_metas[1].shape
+        _, max_seq_len, num_kv_heads, _ = src_metas[1].shape
         q_region = ((q_start, q_end),)
-        kv_region = ((0, num_layers), (0, max_seq_len), (kv_head, kv_head + 1), (0, head_dim))
+        kv_region = ((layer_idx, layer_idx + 1), (0, max_seq_len), (kv_head, kv_head + 1), (0, head_dim))
         pos_region = ((0, 1),)
         scale_region = ((0, 1),)
         out_region = ((q_start, q_end),)
