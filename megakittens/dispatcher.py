@@ -77,17 +77,17 @@ def _pack_instructions_global(instructions: list[Instruction], *, device: str) -
 
 
 def _pack_instructions_per_sm(instructions: list[Instruction], sm_count: int, device: str) -> torch.Tensor:
-    """Pack a list of Instruction objects into a (max_per_sm_insts, sm_count, 64) int32 tensor."""
+    """Pack a list of Instruction objects into a (sm_count, max_per_sm_insts, 64) int32 tensor."""
     if sm_count % Dispatcher.CLUSTER_SIZE != 0:
         raise RuntimeError(f"[MegaKittens] sm_count must be a multiple of {Dispatcher.CLUSTER_SIZE}, got {sm_count}")
     max_per_sm_insts = -(-len(instructions) // sm_count) if len(instructions) > 0 else 1
-    buf = [0] * (max_per_sm_insts * sm_count * 64)
+    buf = [0] * (sm_count * max_per_sm_insts * 64)
     for i, inst in enumerate(instructions):
-        wave = i // sm_count
         sm = i % sm_count
-        offset = wave*sm_count*64 + sm*64
+        slot = i // sm_count
+        offset = sm*max_per_sm_insts*64 + slot*64
         buf[offset:offset+64] = _pack_instruction(inst)
-    return torch.tensor(buf, dtype=torch.int32, device=device).reshape(max_per_sm_insts, sm_count, 64)
+    return torch.tensor(buf, dtype=torch.int32, device=device).reshape(sm_count, max_per_sm_insts, 64)
 
 
 def _validate_tensor_against_meta(
@@ -280,7 +280,7 @@ class Dispatcher:
             mk_dtype = DType.from_torch(t.dtype)
             if i < 2:  # instructions and barriers
                 if i == 0 and not self.global_work_queue:
-                    self.gls[i] = gl(dtype=mk_dtype, b=1, d=-1, r=-1, c=-1)
+                    self.gls[i] = gl(dtype=mk_dtype, b=1, d=-1, r=-1, c=64)
                 else:
                     self.gls[i] = gl(dtype=mk_dtype, b=1, d=1, r=-1, c=-1)
             else:

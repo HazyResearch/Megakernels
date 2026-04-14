@@ -7,7 +7,7 @@ namespace megakittens {
 #define MAKE_WORKER(name)                                                                        \
 template <typename Config, typename Globals>                                                     \
 __device__ __forceinline__ void name##_loop(const Globals &g, megakittens::state_t<Config> &s) { \
-    const unsigned int num_iters = g.instructions.depth();                                          \
+    const unsigned int num_iters = g.instructions.rows();                                          \
     for (s.iter = 0, s.stage = 0; s.iter < num_iters; ++s.iter) {                                \
         const int phasebit = (s.iter / Config::INSTRUCTION_PIPE_STAGES) & 0b1;                   \
         kittens::wait(s.instruction_arrived[s.stage], phasebit);                                 \
