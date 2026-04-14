@@ -1,7 +1,9 @@
 """Benchmark Llama 1B decode instructions."""
 
+import ctypes
 import math
 
+import cuda.bindings.driver as cuda_driver
 import torch
 import torch.nn.functional as F
 
@@ -754,6 +756,10 @@ def benchmark_tok_per_sec(prompt="Hello, my name is", max_new_tokens=200, num_sa
     attn_scale_tensor = torch.tensor([ATTN_SCALE], dtype=torch.float32, device=D)
     rms_norm_eps_tensor = torch.tensor([RMS_NORM_EPS], dtype=torch.float32, device=D)
 
+    # Pre-allocate CPU-side buffer and cache GPU address for fast pos_id updates
+    _pos_id_buf = (ctypes.c_int * 1)(0)
+    _pos_id_gpu_ptr = pos_id_tensor.data_ptr()
+
     # same order as examples.llama1b.scheduler.T
     mk_tensors = [
         weights["qkv_weights"],
@@ -789,7 +795,9 @@ def benchmark_tok_per_sec(prompt="Hello, my name is", max_new_tokens=200, num_sa
 
     def _decode_step(pos_id, input_token):
         hidden_states.copy_(embedding(input_token))
-        pos_id_tensor.fill_(pos_id)
+        _pos_id_buf[0] = pos_id
+        stream = torch.cuda.current_stream().cuda_stream
+        cuda_driver.cuMemcpyHtoDAsync(_pos_id_gpu_ptr, _pos_id_buf, 4, stream)
         dispatcher.relaunch()
         return torch.argmax(logits, dim=-1)
 
