@@ -43,8 +43,6 @@ class Noop(IType):
         src_ranges: Tuple[Optional[TensorRange], ...] | None = None,
         dst_ranges: Tuple[Optional[TensorRange], ...] | None = None,
     ) -> List[Tuple[int, ...]]:
-        if src_ranges is not None or dst_ranges is not None:
-            raise RuntimeError("[MegaKittens] Noop does not yet support tensor ranges")
         return [()]
 
     def access_regions(self, block_index, src_metas, dst_metas):
@@ -58,5 +56,3 @@ class Noop(IType):
         dst_ranges: Tuple[Optional[TensorRange], ...] | None = None,
     ) -> None:
         super().validate(src_metas, dst_metas, src_ranges, dst_ranges)
-        if src_ranges is not None or dst_ranges is not None:
-            raise RuntimeError("[MegaKittens] Noop does not yet support tensor ranges")
