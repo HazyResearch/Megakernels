@@ -1,11 +1,11 @@
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
 
 from ..schema.dtype import DType
 from ..schema.itype import IType
-from ..schema.tensor import TensorMeta, TensorSpec
+from ..schema.tensor import TensorMeta, TensorRange, TensorSpec
 from ..jit.pykittens import st
 
 
@@ -107,7 +107,15 @@ class Attention(IType):
     CLUSTER_SIZE = 2
     TILES_PER_CLUSTER = TILES_PER_CTA * CLUSTER_SIZE  # 4
 
-    def block_indices(self, src_metas: Tuple[TensorMeta, ...], dst_metas: Tuple[TensorMeta, ...]) -> List[Tuple[int, ...]]:
+    def block_indices(
+        self,
+        src_metas: Tuple[TensorMeta, ...],
+        dst_metas: Tuple[TensorMeta, ...],
+        src_ranges: Tuple[Optional[TensorRange], ...] | None = None,
+        dst_ranges: Tuple[Optional[TensorRange], ...] | None = None,
+    ) -> List[Tuple[int, ...]]:
+        if src_ranges is not None or dst_ranges is not None:
+            raise RuntimeError("[MegaKittens] Attention does not yet support tensor ranges")
         batch, seq_len, num_heads, _ = src_metas[0].shape
         num_block = seq_len // (self.Mb * self.TILES_PER_CLUSTER)
 
@@ -157,7 +165,15 @@ class Attention(IType):
 
             return indices
 
-    def num_instructions(self, src_metas: Tuple[TensorMeta, ...], dst_metas: Tuple[TensorMeta, ...]) -> int:
+    def num_instructions(
+        self,
+        src_metas: Tuple[TensorMeta, ...],
+        dst_metas: Tuple[TensorMeta, ...],
+        src_ranges: Tuple[Optional[TensorRange], ...] | None = None,
+        dst_ranges: Tuple[Optional[TensorRange], ...] | None = None,
+    ) -> int:
+        if src_ranges is not None or dst_ranges is not None:
+            raise RuntimeError("[MegaKittens] Attention does not yet support tensor ranges")
         batch, seq_len, num_heads, _ = src_metas[0].shape
         m_blocks = seq_len // (self.Mb * self.TILES_PER_CLUSTER)
         return batch * num_heads * m_blocks * self.CLUSTER_SIZE
@@ -173,8 +189,16 @@ class Attention(IType):
         o_region = ((b, b + 1), (seq_start, seq_end), (h, h + 1), (0, self.Db))
         return [q_region, k_region, v_region], [o_region]
 
-    def validate(self, src_metas: Tuple[TensorMeta, ...], dst_metas: Tuple[TensorMeta, ...]) -> None:
-        super().validate(src_metas, dst_metas)
+    def validate(
+        self,
+        src_metas: Tuple[TensorMeta, ...],
+        dst_metas: Tuple[TensorMeta, ...],
+        src_ranges: Tuple[Optional[TensorRange], ...] | None = None,
+        dst_ranges: Tuple[Optional[TensorRange], ...] | None = None,
+    ) -> None:
+        super().validate(src_metas, dst_metas, src_ranges, dst_ranges)
+        if src_ranges is not None or dst_ranges is not None:
+            raise RuntimeError("[MegaKittens] Attention does not yet support tensor ranges")
         q, k, v = src_metas
         o = dst_metas[0]
 

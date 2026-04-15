@@ -1,11 +1,11 @@
 import operator
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 
 from ..schema.dtype import DType
 from ..schema.itype import IType
-from ..schema.tensor import TensorMeta, TensorSpec
+from ..schema.tensor import TensorMeta, TensorRange, TensorSpec
 from ..jit.pykittens import st
 
 
@@ -92,7 +92,15 @@ class Gemm(IType):
             tiles.append((row_idx, col_idx))
         return tiles
 
-    def block_indices(self, src_metas: Tuple[TensorMeta, ...], dst_metas: Tuple[TensorMeta, ...]) -> List[Tuple[int, ...]]:
+    def block_indices(
+        self,
+        src_metas: Tuple[TensorMeta, ...],
+        dst_metas: Tuple[TensorMeta, ...],
+        src_ranges: Tuple[Optional[TensorRange], ...] | None = None,
+        dst_ranges: Tuple[Optional[TensorRange], ...] | None = None,
+    ) -> List[Tuple[int, ...]]:
+        if src_ranges is not None or dst_ranges is not None:
+            raise RuntimeError("[MegaKittens] Gemm does not yet support tensor ranges")
         B, D, _R, _K = (1,) * (4 - len(src_metas[0].shape)) + src_metas[0].shape
         R = _R // self.TILE_M
         C = src_metas[1].shape[-1] // self.TILE_N
@@ -104,7 +112,15 @@ class Gemm(IType):
                     indices.append((b, d, r, c))  # duplicate for CTA 1
         return indices
 
-    def num_instructions(self, src_metas: Tuple[TensorMeta, ...], dst_metas: Tuple[TensorMeta, ...]) -> int:
+    def num_instructions(
+        self,
+        src_metas: Tuple[TensorMeta, ...],
+        dst_metas: Tuple[TensorMeta, ...],
+        src_ranges: Tuple[Optional[TensorRange], ...] | None = None,
+        dst_ranges: Tuple[Optional[TensorRange], ...] | None = None,
+    ) -> int:
+        if src_ranges is not None or dst_ranges is not None:
+            raise RuntimeError("[MegaKittens] Gemm does not yet support tensor ranges")
         B, D, _R, _K = (1,) * (4 - len(src_metas[0].shape)) + src_metas[0].shape
         R = _R // self.TILE_M
         C = src_metas[1].shape[-1] // self.TILE_N
@@ -118,8 +134,16 @@ class Gemm(IType):
         d_region = ((b, b + 1), (d, d + 1), (r * self.TILE_M, (r + 1) * self.TILE_M), (c * self.TILE_N, (c + 1) * self.TILE_N))
         return [a_region, b_region], [d_region]
 
-    def validate(self, src_metas: Tuple[TensorMeta, ...], dst_metas: Tuple[TensorMeta, ...]) -> None:
-        super().validate(src_metas, dst_metas)
+    def validate(
+        self,
+        src_metas: Tuple[TensorMeta, ...],
+        dst_metas: Tuple[TensorMeta, ...],
+        src_ranges: Tuple[Optional[TensorRange], ...] | None = None,
+        dst_ranges: Tuple[Optional[TensorRange], ...] | None = None,
+    ) -> None:
+        super().validate(src_metas, dst_metas, src_ranges, dst_ranges)
+        if src_ranges is not None or dst_ranges is not None:
+            raise RuntimeError("[MegaKittens] Gemm does not yet support tensor ranges")
         A_shape = src_metas[0].shape
         B_shape = src_metas[1].shape
         C_shape = dst_metas[0].shape

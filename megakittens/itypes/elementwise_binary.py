@@ -1,12 +1,12 @@
 import operator
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 
 from ..dispatcher import Dispatcher
 from ..schema.dtype import DType
 from ..schema.itype import IType
-from ..schema.tensor import TensorMeta, TensorSpec
+from ..schema.tensor import TensorMeta, TensorRange, TensorSpec
 from ..jit.pykittens import st
 
 
@@ -155,7 +155,15 @@ class ElementwiseBinary(IType):
             TensorSpec(dtype=DType.bf16, granularity=(self.TILE_SIZE, self.TILE_SIZE), tma_types=[self.TMA]),
         ]
 
-    def block_indices(self, src_metas: Tuple[TensorMeta, ...], dst_metas: Tuple[TensorMeta, ...]) -> List[Tuple[int, ...]]:
+    def block_indices(
+        self,
+        src_metas: Tuple[TensorMeta, ...],
+        dst_metas: Tuple[TensorMeta, ...],
+        src_ranges: Tuple[Optional[TensorRange], ...] | None = None,
+        dst_ranges: Tuple[Optional[TensorRange], ...] | None = None,
+    ) -> List[Tuple[int, ...]]:
+        if src_ranges is not None or dst_ranges is not None:
+            raise RuntimeError("[MegaKittens] ElementwiseBinary does not yet support tensor ranges")
         B, D, _R, _C = (1,) * (4 - len(dst_metas[0].shape)) + dst_metas[0].shape
         R = _R // self.TILE_SIZE
         C = _C // self.TILE_SIZE
@@ -168,7 +176,15 @@ class ElementwiseBinary(IType):
                         indices.append((b, d, r, c, n))
         return indices
 
-    def num_instructions(self, src_metas: Tuple[TensorMeta, ...], dst_metas: Tuple[TensorMeta, ...]) -> int:
+    def num_instructions(
+        self,
+        src_metas: Tuple[TensorMeta, ...],
+        dst_metas: Tuple[TensorMeta, ...],
+        src_ranges: Tuple[Optional[TensorRange], ...] | None = None,
+        dst_ranges: Tuple[Optional[TensorRange], ...] | None = None,
+    ) -> int:
+        if src_ranges is not None or dst_ranges is not None:
+            raise RuntimeError("[MegaKittens] ElementwiseBinary does not yet support tensor ranges")
         B, D, _R, _C = (1,) * (4 - len(dst_metas[0].shape)) + dst_metas[0].shape
         R = _R // self.TILE_SIZE
         C = _C // self.TILE_SIZE
@@ -181,8 +197,16 @@ class ElementwiseBinary(IType):
                   (c * self.TILE_SIZE, (c + n) * self.TILE_SIZE))
         return [region] * self.num_inputs, [region]
 
-    def validate(self, src_metas: Tuple[TensorMeta, ...], dst_metas: Tuple[TensorMeta, ...]) -> None:
-        super().validate(src_metas, dst_metas)
+    def validate(
+        self,
+        src_metas: Tuple[TensorMeta, ...],
+        dst_metas: Tuple[TensorMeta, ...],
+        src_ranges: Tuple[Optional[TensorRange], ...] | None = None,
+        dst_ranges: Tuple[Optional[TensorRange], ...] | None = None,
+    ) -> None:
+        super().validate(src_metas, dst_metas, src_ranges, dst_ranges)
+        if src_ranges is not None or dst_ranges is not None:
+            raise RuntimeError("[MegaKittens] ElementwiseBinary does not yet support tensor ranges")
         for op in self.ops:
             if op not in self.BINARY_OPS:
                 raise RuntimeError(f"[MegaKittens] ElementwiseBinary: unknown op {op!r}")
