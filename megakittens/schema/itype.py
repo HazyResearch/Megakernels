@@ -1,11 +1,11 @@
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 import re
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 
-from .tensor import TensorMeta, TensorSpec
+from .tensor import TensorMeta, TensorRange, TensorSpec
 
 
 # Global dispatch maps: target -> IType | list[Callable]
@@ -95,15 +95,33 @@ class IType(ABC):
         ...
 
     @abstractmethod
-    def block_indices(self, src_metas: Tuple[TensorMeta, ...], dst_metas: Tuple[TensorMeta, ...]) -> List[Tuple[int, ...]]:
+    def block_indices(
+        self,
+        src_metas: Tuple[TensorMeta, ...],
+        dst_metas: Tuple[TensorMeta, ...],
+        src_ranges: Tuple[Optional[TensorRange], ...] | None = None,
+        dst_ranges: Tuple[Optional[TensorRange], ...] | None = None,
+    ) -> List[Tuple[int, ...]]:
         """Return instruction coordinate tuples for one node. Each becomes one instruction's indices."""
         ...
 
-    def num_instructions(self, src_metas: Tuple[TensorMeta, ...], dst_metas: Tuple[TensorMeta, ...]) -> int:
+    def num_instructions(
+        self,
+        src_metas: Tuple[TensorMeta, ...],
+        dst_metas: Tuple[TensorMeta, ...],
+        src_ranges: Tuple[Optional[TensorRange], ...] | None = None,
+        dst_ranges: Tuple[Optional[TensorRange], ...] | None = None,
+    ) -> int:
         """Number of instructions this node generates. Override if computable without building the full list."""
-        return len(self.block_indices(src_metas, dst_metas))
+        return len(self.block_indices(src_metas, dst_metas, src_ranges, dst_ranges))
 
-    def validate(self, src_metas: Tuple[TensorMeta, ...], dst_metas: Tuple[TensorMeta, ...]) -> None:
+    def validate(
+        self,
+        src_metas: Tuple[TensorMeta, ...],
+        dst_metas: Tuple[TensorMeta, ...],
+        src_ranges: Tuple[Optional[TensorRange], ...] | None = None,
+        dst_ranges: Tuple[Optional[TensorRange], ...] | None = None,
+    ) -> None:
         """Validate input/output TensorMeta against specs. Override for custom checks."""
         if len(src_metas) != len(self.inputs):
             raise RuntimeError(
@@ -112,6 +130,14 @@ class IType(ABC):
         if len(dst_metas) != len(self.outputs):
             raise RuntimeError(
                 f"[MegaKittens] {self.name} requires {len(self.outputs)} outputs, got {len(dst_metas)}"
+            )
+        if src_ranges is not None and len(src_ranges) != len(src_metas):
+            raise RuntimeError(
+                f"[MegaKittens] {self.name} src_ranges length {len(src_ranges)} != src_metas length {len(src_metas)}"
+            )
+        if dst_ranges is not None and len(dst_ranges) != len(dst_metas):
+            raise RuntimeError(
+                f"[MegaKittens] {self.name} dst_ranges length {len(dst_ranges)} != dst_metas length {len(dst_metas)}"
             )
         for label, metas, specs in [("input", src_metas, self.inputs), ("output", dst_metas, self.outputs)]:
             for i, (meta, spec) in enumerate(zip(metas, specs)):
@@ -133,6 +159,34 @@ class IType(ABC):
                         raise RuntimeError(
                             f"[MegaKittens] {self.name} {label} {i} dim {offset + g_dim}: "
                             f"{meta.shape[offset + g_dim]} not a multiple of {gran}"
+                        )
+        for label, ranges, specs in [("src", src_ranges, self.inputs), ("dst", dst_ranges, self.outputs)]:
+            if ranges is None:
+                continue
+            for i, range in enumerate(ranges):
+                if range is None:
+                    continue
+                if len(range) > 4:
+                    raise RuntimeError(
+                        f"[MegaKittens] {self.name} {label} {i}: range must be at most 4D, got {len(range)}D"
+                    )
+                if len(range) < len(specs[i].granularity):
+                    raise RuntimeError(
+                        f"[MegaKittens] {self.name} {label} {i}: range is {len(range)}D but granularity requires at least {len(specs[i].granularity)}D"
+                    )
+                for d, per_dim_range in enumerate(range):
+                    if per_dim_range.stride != 1:
+                        raise RuntimeError(
+                            f"[MegaKittens] {self.name} {label} {i} dim {d}: "
+                            f"stride {per_dim_range.stride} != 1 is currently not supported"
+                        )
+                effective_shape = range.effective_shape
+                offset = len(effective_shape) - len(specs[i].granularity)
+                for g_dim, gran in enumerate(specs[i].granularity):
+                    if effective_shape[offset + g_dim] % gran != 0:
+                        raise RuntimeError(
+                            f"[MegaKittens] {self.name} {label} {i} range dim {offset + g_dim}: "
+                            f"effective size {effective_shape[offset + g_dim]} not a multiple of {gran}"
                         )
 
     @abstractmethod
