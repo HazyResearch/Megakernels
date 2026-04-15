@@ -65,7 +65,7 @@ class RmsQkvRopeAppend(IType):
     test_cases = [
         ((2048, 64, 8), (0, 16)),  # (n, head_dim, num_kv_heads), (pos_id, max_seq_len)
     ]
-    test_atol = 2.0
+    test_atol = 1e-2
     test_rtol = 1e-2
     bench_cases = [
         ((2048, 64, 8), (0, 512)),
