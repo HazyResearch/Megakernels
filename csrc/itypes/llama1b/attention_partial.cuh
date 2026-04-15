@@ -12,11 +12,7 @@ template <typename Config, typename Globals,
           int DST, int DST_L = -1>
 struct AttentionPartial {
 
-    // When DST_L >= 0: multi-partition mode.
-    //   DST  = fp32 O intermediate [num_heads, num_partitions, HEAD_DIM]
-    //   DST_L = fp32 L intermediate [num_heads, num_partitions]
-    // When DST_L == -1: single-partition mode (current behavior).
-    //   DST  = bf16 attn_out [HIDDEN_DIM]
+    // DST_L >= 0: multi-partition (fp32 O + L intermediates). DST_L == -1: single-partition (bf16 attn_out).
     static constexpr bool MULTI_PARTITION = (DST_L >= 0);
 
     static_assert(GQA_RATIO == 4, "GQA_RATIO must be 4.");
@@ -62,14 +58,13 @@ struct AttentionPartial {
             : parsed_instruction(s.instruction()) {}
     };
 
-    static constexpr int SEM_COUNT = 3 + 4 * NUM_STAGES;
-    __device__ static inline kittens::semaphore &Q_arrived(state_t<Config> &s)          { return s.semaphores()[0]; }
-    __device__ static inline kittens::semaphore &O_arrived(state_t<Config> &s)          { return s.semaphores()[1]; }
-    __device__ static inline kittens::semaphore &L_arrived(state_t<Config> &s)          { return s.semaphores()[2]; }
-    __device__ static inline kittens::semaphore &K_arrived(state_t<Config> &s, int stage)  { return s.semaphores()[3 + stage * 2]; }
-    __device__ static inline kittens::semaphore &V_arrived(state_t<Config> &s, int stage)  { return s.semaphores()[3 + stage * 2 + 1]; }
-    __device__ static inline kittens::semaphore &K_finished(state_t<Config> &s, int stage) { return s.semaphores()[3 + NUM_STAGES * 2 + stage * 2]; }
-    __device__ static inline kittens::semaphore &V_finished(state_t<Config> &s, int stage) { return s.semaphores()[3 + NUM_STAGES * 2 + stage * 2 + 1]; }
+    static constexpr int SEM_COUNT = 2 + 4 * NUM_STAGES;
+    __device__ static inline kittens::semaphore &O_arrived(state_t<Config> &s)          { return s.semaphores()[0]; }
+    __device__ static inline kittens::semaphore &L_arrived(state_t<Config> &s)          { return s.semaphores()[1]; }
+    __device__ static inline kittens::semaphore &K_arrived(state_t<Config> &s, int stage)  { return s.semaphores()[2 + stage * 2]; }
+    __device__ static inline kittens::semaphore &V_arrived(state_t<Config> &s, int stage)  { return s.semaphores()[2 + stage * 2 + 1]; }
+    __device__ static inline kittens::semaphore &K_finished(state_t<Config> &s, int stage) { return s.semaphores()[2 + NUM_STAGES * 2 + stage * 2]; }
+    __device__ static inline kittens::semaphore &V_finished(state_t<Config> &s, int stage) { return s.semaphores()[2 + NUM_STAGES * 2 + stage * 2 + 1]; }
 
     __device__ static inline int qol_pid(state_t<Config> &s) { return s.lid_to_pid(QOL_PAGE); }
     __device__ static inline int kv_pid(state_t<Config> &s)  { return s.lid_to_pid(KV_PAGE); }
@@ -93,8 +88,8 @@ struct AttentionPartial {
     __device__ static inline void
     load_Q_async(q_st &dst, const Globals &g, int q_head_start_idx) {
         static_assert(HEAD_DIM == 64 && GQA_RATIO == 4, "Fix this function.");
-        constexpr int elem_per_memcpy = sizeof(float4) / sizeof(kittens::bf16); // 8
-        constexpr int memcpy_per_row = HEAD_DIM / elem_per_memcpy;              // 8
+        constexpr int elem_per_memcpy = sizeof(float4) / sizeof(kittens::bf16);
+        constexpr int memcpy_per_row = HEAD_DIM / elem_per_memcpy;
 
         const kittens::bf16 *src_ptr =
             reinterpret_cast<const kittens::bf16 *>(g.template gls<SRC_Q>().raw_ptr) + q_head_start_idx * HEAD_DIM;
@@ -188,10 +183,8 @@ struct AttentionPartial {
         __device__ __forceinline__ static int
         init_semaphores(const Globals &g, state_t<Config> &s) {
             if (kittens::laneid() == 0)
-                kittens::init_semaphore(Q_arrived(s), 1);
-            if (kittens::laneid() == 1)
                 kittens::init_semaphore(O_arrived(s), 1);
-            if (kittens::laneid() == 2)
+            if (kittens::laneid() == 1)
                 kittens::init_semaphore(L_arrived(s), 1);
             if (kittens::laneid() < NUM_STAGES)
                 kittens::init_semaphore(K_arrived(s, kittens::laneid()), 1);
@@ -212,7 +205,6 @@ struct AttentionPartial {
                 int seq_len = g.template gls<SCALAR_POS_ID>().raw_ptr[0] + 1;
                 int total_attn_blocks = (seq_len + KV_BLOCK_SIZE - 1) / KV_BLOCK_SIZE;
 
-                // Compute this partition's block range
                 int blocks_per_partial = (total_attn_blocks + inst.num_partials - 1) / inst.num_partials;
                 int start_block = inst.partial_idx * blocks_per_partial;
                 int end_block = min(start_block + blocks_per_partial, total_attn_blocks);
@@ -271,7 +263,6 @@ struct AttentionPartial {
             int total_attn_blocks = (seq_len + KV_BLOCK_SIZE - 1) / KV_BLOCK_SIZE;
             float softmax_temp = g.template gls<SCALAR_ATTN_SCALE>().raw_ptr[0] * 1.44269504089f;
 
-            // Compute this partition's block range
             int blocks_per_partial = (total_attn_blocks + inst.num_partials - 1) / inst.num_partials;
             int start_block = inst.partial_idx * blocks_per_partial;
             int end_block = min(start_block + blocks_per_partial, total_attn_blocks);
@@ -314,7 +305,7 @@ struct AttentionPartial {
                 kv_st &V_smem_tile = get_V_smem(s, stage);
 
                 kittens::warp::zero(attn_fl_reg);
-                kittens::warp::wait(K_arrived(s, stage), (local_i / NUM_STAGES) % 2);
+                kittens::wait(K_arrived(s, stage), (local_i / NUM_STAGES) % 2);
                 kittens::warp::load(K_reg, K_smem_tile);
                 kittens::warp::mma_ABt(attn_fl_reg, Q_reg, K_reg, attn_fl_reg);
                 kittens::warp::sync();
@@ -322,7 +313,8 @@ struct AttentionPartial {
 
                 if ((i + 1) * KV_BLOCK_SIZE > seq_len)
                     right_fill(attn_fl_reg, attn_fl_reg,
-                               seq_len % KV_BLOCK_SIZE, -999999999999.f);
+                               seq_len % KV_BLOCK_SIZE,
+                               kittens::base_types::constants<float>::neg_infty());
 
                 kittens::warp::row_max(max_vec_reg, attn_fl_reg, max_vec_reg);
                 kittens::warp::mul(attn_fl_reg, attn_fl_reg, softmax_temp);
@@ -333,7 +325,7 @@ struct AttentionPartial {
                 kittens::warp::exp2(diff_scaled_max_vec_reg, diff_scaled_max_vec_reg);
 
                 kittens::warp::mul_row(O_reg, O_reg, diff_scaled_max_vec_reg);
-                kittens::warp::wait(V_arrived(s, stage), (local_i / NUM_STAGES) % 2);
+                kittens::wait(V_arrived(s, stage), (local_i / NUM_STAGES) % 2);
                 kittens::warp::load(V_reg, V_smem_tile);
                 kittens::warp::copy(attn_bf_reg, attn_fl_reg);
                 kittens::warp::mma_AB(O_reg, attn_bf_reg, V_reg, O_reg);
@@ -378,7 +370,6 @@ struct AttentionPartial {
             kittens::warp::sync();
 
             if constexpr (MULTI_PARTITION) {
-                // Multi-partition: store fp32 O to intermediate via TMA
                 if (kittens::warp::elect_leader()) {
                     for (int head_offset = 0; head_offset < GQA_RATIO; head_offset++) {
                         kittens::tma::store_async<kittens::cache_policy::EVICT_LAST>(
@@ -389,13 +380,11 @@ struct AttentionPartial {
                 kittens::warp::sync();
                 kittens::tma::store_async_wait();
 
-                // Store fp32 L to intermediate via raw global store
                 if (kittens::warp::elect_leader())
                     kittens::wait(L_arrived(s), 0);
                 kittens::warp::sync();
 
                 float *l_global = reinterpret_cast<float *>(g.template gls<DST_L>().raw_ptr);
-                // Stride must match the padded column count used by tensor allocation
                 int l_cols = ((inst.num_partials + 15) / 16) * 16;
                 int q_head_local_start = q_head_start_idx % 16;
                 if (kittens::laneid() < GQA_RATIO) {
@@ -408,15 +397,12 @@ struct AttentionPartial {
                     l_global[q_head * l_cols + inst.partial_idx] = l_val;
                 }
                 kittens::warp::sync();
-                if (kittens::warp::elect_leader())
-                    s.page_finish(qol_pid(s));
-                // Fence + signal barrier for reduction to consume
                 if (kittens::warp::elect_leader()) {
+                    s.page_finish(qol_pid(s));
                     __threadfence();
                     barrier_arrive<Config>(&g.barriers.raw_ptr[inst.barrier_base], GQA_RATIO);
                 }
             } else {
-                // Single-partition: store bf16 O directly to attn_out
                 kittens::rv_bf<HEAD_DIM> O_bf;
                 for (int head_offset = 0; head_offset < GQA_RATIO; head_offset++) {
                     auto &smem_fl = O_smem[head_offset];
@@ -436,10 +422,8 @@ struct AttentionPartial {
                 }
                 kittens::warp::sync();
                 kittens::tma::store_async_wait();
-                if (kittens::warp::elect_leader())
-                    s.page_finish(qol_pid(s));
-                // Signal the attn_red barrier directly (no reduction step).
                 if (kittens::warp::elect_leader()) {
+                    s.page_finish(qol_pid(s));
                     barrier_arrive<Config>(&g.barriers.raw_ptr[inst.barrier_base], GQA_RATIO);
                 }
             }

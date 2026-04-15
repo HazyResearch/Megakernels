@@ -40,15 +40,14 @@ struct AttentionReduction {
             : parsed_instruction(s.instruction()) {}
     };
 
-    static constexpr int SEM_COUNT = Q_HEADS_PER_INSTRUCTION * ((NUM_STAGES * 2) + 3);
+    static constexpr int SEM_COUNT = Q_HEADS_PER_INSTRUCTION * (NUM_STAGES * 2 + 2);
     __device__ static constexpr int O_partial_sem_idx(int q_head, int stage, bool fin) { return q_head * NUM_STAGES * 2 + stage * 2 + fin; }
-    __device__ static constexpr int L_partial_sem_idx(int q_head, bool fin)            { return Q_HEADS_PER_INSTRUCTION * NUM_STAGES * 2 + q_head * 2 + fin; }
-    __device__ static constexpr int Final_O_ready_sem_idx(int q_head)                  { return Q_HEADS_PER_INSTRUCTION * (NUM_STAGES * 2 + 2) + q_head; }
+    __device__ static constexpr int L_partial_sem_idx(int q_head)                      { return Q_HEADS_PER_INSTRUCTION * NUM_STAGES * 2 + q_head; }
+    __device__ static constexpr int Final_O_ready_sem_idx(int q_head)                  { return Q_HEADS_PER_INSTRUCTION * (NUM_STAGES * 2 + 1) + q_head; }
 
     __device__ static inline kittens::semaphore &O_partial_arrived(state_t<Config> &s, int q_head, int stage)  { return s.semaphores()[O_partial_sem_idx(q_head, stage, false)]; }
     __device__ static inline kittens::semaphore &O_partial_finished(state_t<Config> &s, int q_head, int stage) { return s.semaphores()[O_partial_sem_idx(q_head, stage, true)]; }
-    __device__ static inline kittens::semaphore &L_partial_all_arrived(state_t<Config> &s, int q_head)  { return s.semaphores()[L_partial_sem_idx(q_head, false)]; }
-    __device__ static inline kittens::semaphore &L_partial_all_finished(state_t<Config> &s, int q_head) { return s.semaphores()[L_partial_sem_idx(q_head, true)]; }
+    __device__ static inline kittens::semaphore &L_partial_all_arrived(state_t<Config> &s, int q_head)  { return s.semaphores()[L_partial_sem_idx(q_head)]; }
     __device__ static inline kittens::semaphore &final_O_ready(state_t<Config> &s, int q_head) { return s.semaphores()[Final_O_ready_sem_idx(q_head)]; }
 
     __device__ static inline int data_pid(state_t<Config> &s) { return s.lid_to_pid(SHARED_DATA_PAGE); }
@@ -96,16 +95,11 @@ struct AttentionReduction {
                 s.page_finish(pid);
             }
             kittens::warp::sync();
-        }
-    };
 
-    struct launcher {
-        __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
-            s.tensor_wait();
-            if (kittens::warp::elect_leader()) s.tensor_finish();
             if (kittens::warp::elect_leader()) {
                 parsed_instruction inst{s};
                 all_input_barrier_wait<Config>(g, s.instruction());
+
                 for (int i = 0; i < Q_HEADS_PER_INSTRUCTION; i++) {
                     l_partial_sv &L_smem = get_L_partial_smem(s, i);
                     kittens::tma::expect(L_partial_all_arrived(s, i), L_smem);
@@ -134,6 +128,13 @@ struct AttentionReduction {
         }
     };
 
+    struct launcher {
+        __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
+            s.tensor_wait();
+            if (kittens::warp::elect_leader()) s.tensor_finish();
+        }
+    };
+
     struct consumer {
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
             if (kittens::warpid() >= Q_HEADS_PER_INSTRUCTION) return;
@@ -141,13 +142,13 @@ struct AttentionReduction {
             parsed_instruction inst{s};
             int q_head_local_idx = kittens::warpid();
             o_rv accumulated_out, current_out;
-            float accumulated_lse = -1e38f, current_lse;
+            float accumulated_lse = kittens::base_types::constants<float>::neg_infty(), current_lse;
             kittens::warp::zero(accumulated_out);
-            kittens::warp::wait(L_partial_all_arrived(s, q_head_local_idx), 0);
+            kittens::wait(L_partial_all_arrived(s, q_head_local_idx), 0);
             l_partial_sv &L_smem = get_L_partial_smem(s, q_head_local_idx);
             for (int i = 0; i < inst.num_partials; i++) {
                 int stage = i % NUM_STAGES;
-                kittens::warp::wait(O_partial_arrived(s, q_head_local_idx, stage),
+                kittens::wait(O_partial_arrived(s, q_head_local_idx, stage),
                                     (i / NUM_STAGES) % 2);
                 o_sv &O_smem = get_O_partial_smem(s, q_head_local_idx, stage);
                 uint32_t src_ptr_L = static_cast<uint32_t>(
@@ -169,8 +170,6 @@ struct AttentionReduction {
 
                 kittens::warp::arrive(O_partial_finished(s, q_head_local_idx, stage));
             }
-            kittens::warp::arrive(L_partial_all_finished(s, q_head_local_idx));
-
             o_final_sv &O_final_smem = get_O_final_smem(s, q_head_local_idx);
             kittens::warp::store(O_final_smem, accumulated_out);
             kittens::warp::sync();
@@ -191,10 +190,8 @@ struct AttentionReduction {
                 kittens::tma::store_async_wait();
             }
             kittens::warp::sync();
-            if (kittens::warp::elect_leader())
-                s.page_finish(data_pid(s));
             if (kittens::warp::elect_leader()) {
-                __threadfence();
+                s.page_finish(data_pid(s));
                 barrier_arrive<Config>(&g.barriers.raw_ptr[inst.barrier_base],
                                        Q_HEADS_PER_INSTRUCTION);
             }
