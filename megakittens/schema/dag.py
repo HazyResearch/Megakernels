@@ -18,9 +18,9 @@ class Node(BaseModel):
     is_output: bool = False  # There should be only 1 output node
     itype: IType | None = None  # None if input/output
     in_nodes: Tuple[Tuple[Node, NonNegativeInt], ...]
-    in_ranges: Tuple[Optional[TensorRange], ...] = ()  # parallel to in_nodes; None = full tensor
+    in_ranges: Tuple[Optional[TensorRange], ...] | None = None
     out_tensors: Tuple[TensorMeta, ...]
-    out_ranges: Tuple[Optional[TensorRange], ...] = ()  # parallel to out_tensors; None = full tensor
+    out_ranges: Tuple[Optional[TensorRange], ...] | None = None
     out_nodes: Tuple[List[Node], ...]
 
     # Op-specific fields
