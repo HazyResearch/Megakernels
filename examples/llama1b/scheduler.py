@@ -426,13 +426,17 @@ def schedule_decode(
     noop: bool = False,
     oproj_max_instructions: int | None = 64,
     num_partitions: int = 1,
+    max_partitions: int | None = None,
 ):
     if device is None:
         device = Device(type="cuda", index=0)
 
+    if max_partitions is None:
+        max_partitions = num_partitions
+
     use_multi_partition = num_partitions > 1
 
-    tensor_metas = _make_tensor_metas(device, num_partitions=num_partitions)
+    tensor_metas = _make_tensor_metas(device, num_partitions=max_partitions)
 
     # Icode mapping — noop mode sets everything to 0
     icode_qkv = 0 if noop else ICODE_QKV
@@ -450,7 +454,7 @@ def schedule_decode(
     _attention_partial_multi_itype = AttentionPartialMulti()
     _attention_reduction_itype = AttentionReduction(
         head_dim=HEAD_DIM, q_heads_per_instruction=GQA_RATIO,
-        max_partials=num_partitions,
+        max_partials=max_partitions,
     )
     _rms_qkv_itype = RmsQkvRopeAppend(n=HIDDEN_DIM, head_dim=HEAD_DIM, num_kv_heads=NUM_KV_HEADS)
     _rms_upgate_silu_itype = RmsUpgateSilu(n=HIDDEN_DIM)
@@ -480,8 +484,13 @@ def schedule_decode(
                         dst_tensors=(T.LOGITS,)),
     ]
 
-    if use_multi_partition:
+    if max_partitions > 1:
+        # Include all attention icodes so one compiled kernel supports both paths
         instruction_metas += [
+            InstructionMeta(icode=ICODE_ATTENTION, itype=_attention_partial_itype,
+                            src_tensors=(T.Q_POST_ROPE, T.K_CACHE, T.V_CACHE,
+                                         T.POS_ID, T.ATTN_SCALE),
+                            dst_tensors=(T.ATTN_OUT,)),
             InstructionMeta(icode=ICODE_ATTENTION_MULTI, itype=_attention_partial_multi_itype,
                             src_tensors=(T.Q_POST_ROPE, T.K_CACHE, T.V_CACHE,
                                          T.POS_ID, T.ATTN_SCALE),

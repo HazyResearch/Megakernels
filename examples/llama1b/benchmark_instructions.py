@@ -767,10 +767,16 @@ def _prefill_kv_cache(token_ids, weights, k_cache, v_cache, rope_cos, rope_sin):
     return x
 
 
-def benchmark_tok_per_sec(prompt="Hello, my name is", max_new_tokens=200, num_samples=5, warmup=5):
-    """tok/s with HF weights + greedy decode."""
+def benchmark_tok_per_sec(prompt="Hello, my name is", max_new_tokens=200, num_samples=5, warmup=5, chunk_size=None):
+    """tok/s with HF weights + greedy decode.
+
+    chunk_size: if set, enables attention reduction. At each decode step,
+    num_partitions = ceil(seq_len / chunk_size). When num_partitions > 1,
+    attention is split across multiple SMs with a reduction step.
+    """
     import time
     from transformers import AutoModelForCausalLM, AutoTokenizer
+    from megakittens.dispatcher import _pack_instructions_per_sm
 
     sm_count = get_sm_count()
     D = "cuda"
@@ -790,6 +796,13 @@ def benchmark_tok_per_sec(prompt="Hello, my name is", max_new_tokens=200, num_sa
 
     del hf_model
 
+    # Compute max num_partitions across all decode steps
+    max_seq_len_needed = prompt_len + max_new_tokens
+    if chunk_size is not None:
+        max_np = max(1, math.ceil(max_seq_len_needed / chunk_size))
+    else:
+        max_np = 1
+
     k_cache = torch.zeros(NUM_LAYERS, MAX_SEQ_LEN, NUM_KV_HEADS, HEAD_DIM, dtype=torch.bfloat16, device=D)
     v_cache = torch.zeros(NUM_LAYERS, MAX_SEQ_LEN, NUM_KV_HEADS, HEAD_DIM, dtype=torch.bfloat16, device=D)
     print("Prefilling KV cache...")
@@ -800,7 +813,9 @@ def benchmark_tok_per_sec(prompt="Hello, my name is", max_new_tokens=200, num_sa
     k_cache_snapshot = k_cache.clone()
     v_cache_snapshot = v_cache.clone()
 
-    schedule = schedule_decode(sm_count=sm_count)
+    # Compile one kernel — includes all attention icodes when using reduction
+    schedule = schedule_decode(sm_count=sm_count, num_partitions=1,
+                               max_partitions=max_np if max_np > 1 else None)
     instruction_metas, tensor_metas, instructions, num_barriers, input_indices, output_indices = schedule
 
     dispatcher = Dispatcher(
@@ -808,6 +823,19 @@ def benchmark_tok_per_sec(prompt="Hello, my name is", max_new_tokens=200, num_sa
         input_indices, output_indices,
         use_jit_cache=False,
     )
+
+    # Pre-generate instruction tensors for each unique num_partitions
+    instruction_tensors = None
+    if chunk_size is not None and max_np > 1:
+        instruction_tensors = {}
+        for np_val in range(1, max_np + 1):
+            _, _, insts, _, _, _ = schedule_decode(
+                sm_count=sm_count, num_partitions=np_val, max_partitions=max_np)
+            instruction_tensors[np_val] = _pack_instructions_per_sm(insts, sm_count, device=D)
+        label = f"chunk_size={chunk_size}, max_partitions={max_np}"
+    else:
+        label = "no reduction"
+    print(f"Attention mode: {label}")
 
     hidden_states = embed_weight[first_token].clone()
     logits = torch.zeros(VOCAB_SIZE, dtype=torch.bfloat16, device=D)
@@ -842,8 +870,8 @@ def benchmark_tok_per_sec(prompt="Hello, my name is", max_new_tokens=200, num_sa
         pos_id_tensor,
         attn_scale_tensor,
         rms_norm_eps_tensor,
-        torch.zeros(NUM_ATTENTION_HEADS, 1, HEAD_DIM, dtype=torch.float32, device=D),
-        torch.zeros(NUM_ATTENTION_HEADS, 16, dtype=torch.float32, device=D),
+        torch.zeros(NUM_ATTENTION_HEADS, max_np, HEAD_DIM, dtype=torch.float32, device=D),
+        torch.zeros(NUM_ATTENTION_HEADS, ((max_np + 15) // 16) * 16, dtype=torch.float32, device=D),
     ]
 
     model_size = sum(t.nelement() * t.element_size() for t in mk_tensors[:9])
@@ -859,6 +887,10 @@ def benchmark_tok_per_sec(prompt="Hello, my name is", max_new_tokens=200, num_sa
         _pos_id_buf[0] = pos_id
         stream = torch.cuda.current_stream().cuda_stream
         cuda_driver.cuMemcpyHtoDAsync(_pos_id_gpu_ptr, _pos_id_buf, 4, stream)
+        if instruction_tensors is not None:
+            seq_len = pos_id + 1
+            np_val = max(1, math.ceil(seq_len / chunk_size))
+            dispatcher.all_tensors[0] = instruction_tensors[np_val]
         dispatcher(*mk_tensors)
         return torch.argmax(logits, dim=-1)
 
@@ -905,13 +937,24 @@ def benchmark_tok_per_sec(prompt="Hello, my name is", max_new_tokens=200, num_sa
     print("==========")
     print(f"Prompt Length: {prompt_len}")
     print(f"Generated tokens: {max_new_tokens}")
+    print(f"Attention mode: {label}")
     print(f"Average tokens/sec (decode only): {torch.mean(torch.tensor(decode_tokens_per_sec_list)).item():.2f}")
     print(f"Memory used: {torch.cuda.max_memory_reserved() / 1e9:.02f} GB")
 
 
 if __name__ == "__main__":
-    benchmark_tok_per_sec()
-    benchmark_instructions()
-    check_reduction_correctness(num_partitions=16)
-    benchmark_decode_e2e(num_partitions=1)
-    benchmark_decode_e2e(num_partitions=16)
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--prompt", default="Hello, my name is")
+    parser.add_argument("--max-new-tokens", type=int, default=200)
+    parser.add_argument("--chunk-size", type=int, default=None)
+    parser.add_argument("--num-samples", type=int, default=5)
+    parser.add_argument("--warmup", type=int, default=5)
+    args = parser.parse_args()
+    benchmark_tok_per_sec(
+        prompt=args.prompt,
+        max_new_tokens=args.max_new_tokens,
+        chunk_size=args.chunk_size,
+        num_samples=args.num_samples,
+        warmup=args.warmup,
+    )
