@@ -52,7 +52,7 @@ def _get_instruction_count_and_offset(
                 f"[MegaKittens] Node has {len(node.out_tensors)} dst tensors (max {Instruction.MAX_DST_TENSORS})"
             )
         src_metas = tuple(in_node.out_tensors[slot_idx] for in_node, slot_idx in node.in_nodes)
-        count = node.itype.num_instructions(src_metas, node.out_tensors)
+        count = node.itype.num_instructions(src_metas, node.out_tensors, src_ranges=node.in_ranges, dst_ranges=node.out_ranges)
         node_inst_count[node.id] = count
         node_inst_offset[node.id] = cumulative_offset
         cumulative_offset += count + (-count) % Dispatcher.CLUSTER_SIZE  # CTA pairs must get same instruction type
@@ -171,7 +171,7 @@ def _assign_barriers(
         if node.is_input or node.is_output:
             continue
         src_metas = tuple(in_node.out_tensors[slot_idx] for in_node, slot_idx in node.in_nodes)
-        block_indices = node.itype.block_indices(src_metas, node.out_tensors)
+        block_indices = node.itype.block_indices(src_metas, node.out_tensors, src_ranges=node.in_ranges, dst_ranges=node.out_ranges)
         node_block_indices[node.id] = block_indices
         node_regions[node.id] = [
             node.itype.access_regions(block_index, src_metas, node.out_tensors)
@@ -310,7 +310,7 @@ def _generate_instructions(
 
         src_metas = tuple(in_node.out_tensors[slot_idx] for in_node, slot_idx in node.in_nodes)
         dst_metas = node.out_tensors
-        node.itype.validate(src_metas, dst_metas)
+        node.itype.validate(src_metas, dst_metas, src_ranges=node.in_ranges, dst_ranges=node.out_ranges)
 
         key = (node.itype, src_tensors, dst_tensors)
         if key not in icode_map:
