@@ -49,7 +49,7 @@ struct RmsUpgateSilu {
 
         __device__ static inline void store(state_t<Config> &s, const Globals &g, parsed_instruction &inst,
               int output_idx, int output_stage) {
-            // unused — storer inlines the loop to cache up_out across iterations
+            // unused, storer inlines to cache up_out
         }
     };
 

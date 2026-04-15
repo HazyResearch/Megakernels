@@ -169,8 +169,7 @@ struct RmsQkvRopeAppend {
 
     struct storer {
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
-            // Per-block barrier signaling happens inside store().
-            // num_dst_barriers=0 so all_barrier_arrive is not needed.
+            // per-block barriers signaled in store(), no all_barrier_arrive needed
             pipeline::storer_loop(s, g);
         }
     };

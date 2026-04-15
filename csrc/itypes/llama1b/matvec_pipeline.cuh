@@ -49,7 +49,7 @@ struct matvec_pipeline {
     }
 
     __device__ static inline int lid_release_order(const Globals &g, state_t<Config> &s, int query) {
-        // last query is always activation page because our scratch is inside it
+        // activation page last (contains scratch)
         if (query == Config::NUM_PAGES - 1) return ACTIVATION_PAGE;
 
         parsed_instruction inst{s.instruction()};
@@ -190,7 +190,7 @@ struct matvec_pipeline {
             output_stage = (output_stage + 1) % OUTPUT_PIPELINE_STAGES;
         }
 
-        // storer is the last to read activation page. so it releases
+        // storer releases activation page
         kittens::warp::sync();
         if (kittens::warp::elect_leader()) {
             kittens::tma::store_async_wait();
