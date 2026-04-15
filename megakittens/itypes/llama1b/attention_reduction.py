@@ -14,8 +14,9 @@ def attention_reduction_op(
     # o_intermediates: [num_heads, num_partials, head_dim] fp32
     # returns: [num_heads * head_dim] bf16
     num_heads, num_partials, head_dim = o_intermediates.shape
-    max_lse = lse_intermediates.max(dim=-1, keepdim=True).values
-    weights = torch.exp2(lse_intermediates - max_lse)
+    lse = lse_intermediates[:, :num_partials]
+    max_lse = lse.max(dim=-1, keepdim=True).values
+    weights = torch.exp2(lse - max_lse)
     denom = weights.sum(dim=-1, keepdim=True)
     reduced = (o_intermediates * weights.unsqueeze(-1)).sum(dim=1) / denom
     return reduced.reshape(-1).to(torch.bfloat16)
@@ -31,7 +32,7 @@ def _attention_reduction_fake(lse_intermediates, o_intermediates):
 class AttentionReduction(IType):
 
     test_cases = [
-        ((), (4, 4, 64)),  # (num_heads, num_partials, head_dim)
+        ((), (32, 4, 64)),  # (num_heads, num_partials, head_dim)
     ]
     test_atol = 1e-2
     test_rtol = 1e-2
@@ -78,21 +79,24 @@ class AttentionReduction(IType):
 
     def block_indices(self, src_metas, dst_metas):
         num_heads = src_metas[0].shape[0]
-        return [(0, q_start) for q_start in
+        num_partials = src_metas[1].shape[1]
+        return [(0, q_start, num_partials) for q_start in
                 range(0, num_heads, self._q_heads_per_instruction)]
 
     def test_args(self, case):
         num_heads, num_partials, head_dim = case
-        lse = torch.randn(num_heads, num_partials, dtype=torch.float32, device="cuda")
+        lse_cols = ((num_partials + 15) // 16) * 16
+        lse = torch.zeros(num_heads, lse_cols, dtype=torch.float32, device="cuda")
+        lse[:, :num_partials] = torch.randn(num_heads, num_partials, dtype=torch.float32, device="cuda")
         o_partial = torch.randn(num_heads, num_partials, head_dim, dtype=torch.float32, device="cuda")
         return (lse, o_partial)
 
     def access_regions(self, block_index, src_metas, dst_metas):
-        _, q_start = block_index
+        _, q_start, num_partials = block_index
         q_end = q_start + self._q_heads_per_instruction
         head_dim = self._head_dim
-        num_partials = src_metas[0].shape[1]
-        lse_region = ((q_start, q_end), (0, num_partials))
+        lse_cols = src_metas[0].shape[1]
+        lse_region = ((q_start, q_end), (0, lse_cols))
         o_region = ((q_start, q_end), (0, num_partials), (0, head_dim))
         out_region = ((q_start * head_dim, q_end * head_dim),)
         return [lse_region, o_region], [out_region]
