@@ -44,6 +44,7 @@ Two files:
 - Tensor indices on instruction types are compile-time template params (e.g. `ElementwiseBinary<MKConfig, MKGlobals, BinaryOps<BinaryOp::ADD>, 0, 1, 2>`), not read from the instruction at runtime.
 - `gls<I>()` on `MKGlobals` is a JIT-generated `if constexpr` chain returning the actual typed gl member. Each tensor keeps its original gl type (dtype, shape, TMA descriptors).
 - `tensor_to_gl` left-pads tensor shapes to 4D: `(M, N)` → `(1, 1, M, N)`, `(B, M, N)` → `(1, B, M, N)`. The gl is always `gl<dtype, -1, -1, -1, -1>` for data tensors.
+- Tensor ranges are absolute half-open slices of the backing tensor; `None` means full tensor. `block_indices` should schedule over the the effective range, while `access_regions` must return absolute backing-tensor regions for dependency barriers.
 - `aot_autograd` flattens user inputs (including `list[Tensor]`) into individual tensors via pytree. String/scalar args (except for ints and floats, which become tensors) become graph constants. The dispatcher only sees flat tensors at runtime.
 - Cross-SM barriers use global memory atomics. Source barriers check `target > 0` (unused targets are 0). Destination barriers use `0xFF` padding for unused slots.
 - `compile_source_to_cubin` has both an in-memory `@functools.cache` and a file-backed cache (`~/.cache/megakittens/cubin/`). Pass `use_jit_cache=False` to skip file cache; in-memory cache still applies per-process.
