@@ -92,15 +92,12 @@ class RmsLmHead(IType):
 
     def num_instructions(self, src_metas, dst_metas):
         vocab_size = dst_metas[0].shape[0]
-        num_blocks = vocab_size // 16
-        return 1 if num_blocks > 0 else 0
+        return vocab_size // 16
 
     def block_indices(self, src_metas, dst_metas):
         vocab_size = dst_metas[0].shape[0]
         num_blocks = vocab_size // 16
-        if num_blocks == 0:
-            return []
-        return [(0, num_blocks)]
+        return [(b, b + 1) for b in range(num_blocks)]
 
     def test_args(self, case):
         vocab_size, = case

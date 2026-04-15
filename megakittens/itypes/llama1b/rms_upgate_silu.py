@@ -94,15 +94,12 @@ class RmsUpgateSilu(IType):
 
     def num_instructions(self, src_metas, dst_metas):
         intermediate_dim = dst_metas[0].shape[0]
-        num_blocks = intermediate_dim // 16
-        return 1 if num_blocks > 0 else 0
+        return intermediate_dim // 16
 
     def block_indices(self, src_metas, dst_metas):
         intermediate_dim = dst_metas[0].shape[0]
         num_blocks = intermediate_dim // 16
-        if num_blocks == 0:
-            return []
-        return [(0, 0, 1, num_blocks)]
+        return [(0, b, num_blocks, num_blocks) for b in range(num_blocks)]
 
     def test_args(self, case):
         intermediate_dim, = case

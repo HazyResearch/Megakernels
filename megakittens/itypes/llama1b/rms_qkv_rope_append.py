@@ -135,14 +135,12 @@ class RmsQkvRopeAppend(IType):
 
     def num_instructions(self, src_metas, dst_metas):
         qkv_dim = src_metas[2].shape[1]
-        return 1 if qkv_dim >= 16 else 0
+        return qkv_dim // 16
 
     def block_indices(self, src_metas, dst_metas):
         qkv_dim = src_metas[2].shape[1]
         num_blocks = qkv_dim // 16
-        if num_blocks == 0:
-            return []
-        return [(0, 0, num_blocks)]
+        return [(0, b, b + 1) for b in range(num_blocks)]
 
     def test_args(self, case):
         pos_id_val, max_seq_len = case

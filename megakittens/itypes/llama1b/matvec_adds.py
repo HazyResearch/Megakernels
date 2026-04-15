@@ -80,15 +80,12 @@ class MatVecAdds(IType):
 
     def num_instructions(self, src_metas, dst_metas):
         out_dim = dst_metas[0].shape[0]
-        num_blocks = out_dim // BLOCK_SIZE
-        return 1 if num_blocks > 0 else 0
+        return out_dim // BLOCK_SIZE
 
     def block_indices(self, src_metas, dst_metas):
         out_dim = dst_metas[0].shape[0]
         num_blocks = out_dim // BLOCK_SIZE
-        if num_blocks == 0:
-            return []
-        return [(0, 0, num_blocks, 0)]
+        return [(0, b, b + 1, 0) for b in range(num_blocks)]
 
     def test_args(self, case):
         out_dim, = case
