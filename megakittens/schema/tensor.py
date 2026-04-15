@@ -94,6 +94,9 @@ class TensorRange(BaseModel, frozen=True):
     def __len__(self) -> int:
         return len(self.ranges)
 
+    def __iter__(self):
+        return iter(self.ranges)
+
     @property
     def effective_shape(self) -> Tuple[int, ...]:
         return tuple(d.size for d in self.ranges)
