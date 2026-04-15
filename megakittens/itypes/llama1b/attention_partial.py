@@ -70,8 +70,8 @@ class AttentionPartial(IType):
         ]
         return [
             TensorSpec(dtype=DType.bf16, granularity=(1,)),                              # q_post_rope
-            TensorSpec(dtype=DType.bf16, granularity=(1, 1, 1, 1), tma_types=kv_tma),    # k_cache
-            TensorSpec(dtype=DType.bf16, granularity=(1, 1, 1, 1), tma_types=kv_tma),    # v_cache
+            TensorSpec(dtype=DType.bf16, granularity=(1, 1, 1, self._head_dim), tma_types=kv_tma),  # k_cache
+            TensorSpec(dtype=DType.bf16, granularity=(1, 1, 1, self._head_dim), tma_types=kv_tma),  # v_cache
             TensorSpec(dtype=DType.int32, granularity=(1,)),                             # pos_id
             TensorSpec(dtype=DType.fp32, granularity=(1,)),                              # attn_scale
         ]
@@ -79,7 +79,7 @@ class AttentionPartial(IType):
     @property
     def outputs(self) -> list[TensorSpec]:
         return [
-            TensorSpec(dtype=DType.bf16, granularity=(1,),                               # attn_out
+            TensorSpec(dtype=DType.bf16, granularity=(self._head_dim,),                    # attn_out
                        tma_types=[sv(dtype=DType.bf16, length=self._head_dim)]),
         ]
 
@@ -190,8 +190,8 @@ class AttentionPartialMulti(IType):
         ]
         return [
             TensorSpec(dtype=DType.bf16, granularity=(1,)),                              # q_post_rope
-            TensorSpec(dtype=DType.bf16, granularity=(1, 1, 1, 1), tma_types=kv_tma),    # k_cache
-            TensorSpec(dtype=DType.bf16, granularity=(1, 1, 1, 1), tma_types=kv_tma),    # v_cache
+            TensorSpec(dtype=DType.bf16, granularity=(1, 1, 1, self._head_dim), tma_types=kv_tma),  # k_cache
+            TensorSpec(dtype=DType.bf16, granularity=(1, 1, 1, self._head_dim), tma_types=kv_tma),  # v_cache
             TensorSpec(dtype=DType.int32, granularity=(1,)),                             # pos_id
             TensorSpec(dtype=DType.fp32, granularity=(1,)),                              # attn_scale
         ]

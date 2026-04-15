@@ -101,15 +101,15 @@ class RmsQkvRopeAppend(IType):
                            tma_types=[sv(dtype=DType.bf16, length=self._n)]),
                 TensorSpec(dtype=DType.bf16, granularity=(1, 1),                         # attn_norm_weights
                            tma_types=[sv(dtype=DType.bf16, length=self._n)]),
-                TensorSpec(dtype=DType.bf16, granularity=(1, 1, 1),                      # qkv_weights
+                TensorSpec(dtype=DType.bf16, granularity=(1, 16, 512),                    # qkv_weights
                            tma_types=[st(dtype=DType.bf16, rows=16, cols=512)]),
-                TensorSpec(dtype=DType.fp32, granularity=(1, 1),                         # rope_cos
+                TensorSpec(dtype=DType.fp32, granularity=(1, self._head_dim),            # rope_cos
                            tma_types=[sv(dtype=DType.fp32, length=self._head_dim)]),
-                TensorSpec(dtype=DType.fp32, granularity=(1, 1),                         # rope_sin
+                TensorSpec(dtype=DType.fp32, granularity=(1, self._head_dim),            # rope_sin
                            tma_types=[sv(dtype=DType.fp32, length=self._head_dim)]),
-                TensorSpec(dtype=DType.bf16, granularity=(1, 1, 1, 1),                   # k_cache
+                TensorSpec(dtype=DType.bf16, granularity=(1, 1, 1, 16),                  # k_cache
                            tma_types=[sv(dtype=DType.bf16, length=16)]),
-                TensorSpec(dtype=DType.bf16, granularity=(1, 1, 1, 1),                   # v_cache
+                TensorSpec(dtype=DType.bf16, granularity=(1, 1, 1, 16),                  # v_cache
                            tma_types=[sv(dtype=DType.bf16, length=16)]),
                 TensorSpec(dtype=DType.int32, granularity=(1,)),                         # pos_id
                 TensorSpec(dtype=DType.fp32, granularity=(1,)),                          # rms_norm_eps
@@ -129,7 +129,7 @@ class RmsQkvRopeAppend(IType):
     @property
     def outputs(self) -> list[TensorSpec]:
         return [
-            TensorSpec(dtype=DType.bf16, granularity=(1,),                               # q_post_rope
+            TensorSpec(dtype=DType.bf16, granularity=(16,),                               # q_post_rope
                        tma_types=[sv(dtype=DType.bf16, length=16)]),
         ]
 

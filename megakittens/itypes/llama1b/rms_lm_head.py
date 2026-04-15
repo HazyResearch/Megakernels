@@ -72,7 +72,7 @@ class RmsLmHead(IType):
                            tma_types=[sv(dtype=DType.bf16, length=self._n)]),
                 TensorSpec(dtype=DType.bf16, granularity=(1,),                           # norm_weight
                            tma_types=[sv(dtype=DType.bf16, length=self._n)]),
-                TensorSpec(dtype=DType.bf16, granularity=(1, 1),                         # lm_head_weights
+                TensorSpec(dtype=DType.bf16, granularity=(16, 512),                       # lm_head_weights
                            tma_types=[st(dtype=DType.bf16, rows=16, cols=512)]),
                 TensorSpec(dtype=DType.fp32, granularity=(1,)),                         # rms_norm_eps
             ]
@@ -86,7 +86,7 @@ class RmsLmHead(IType):
     @property
     def outputs(self) -> list[TensorSpec]:
         return [
-            TensorSpec(dtype=DType.bf16, granularity=(1,),                               # logits
+            TensorSpec(dtype=DType.bf16, granularity=(16,),                               # logits
                        tma_types=[sv(dtype=DType.bf16, length=16)]),
         ]
 

@@ -67,14 +67,14 @@ class MatVecAdds(IType):
     def inputs(self) -> list[TensorSpec]:
         return [
             TensorSpec(dtype=DType.bf16, granularity=(1,)),                          # activations
-            TensorSpec(dtype=DType.bf16, granularity=(1, 1, 1),                      # weights
+            TensorSpec(dtype=DType.bf16, granularity=(1, 16, 512),                    # weights
                        tma_types=[st(dtype=DType.bf16, rows=16, cols=512)]),
         ]
 
     @property
     def outputs(self) -> list[TensorSpec]:
         return [
-            TensorSpec(dtype=DType.bf16, granularity=(1,),                           # output (store_add)
+            TensorSpec(dtype=DType.bf16, granularity=(16,),                            # output (store_add)
                        tma_types=[sv(dtype=DType.bf16, length=16)]),
         ]
 

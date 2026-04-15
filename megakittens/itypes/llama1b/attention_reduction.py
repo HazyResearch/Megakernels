@@ -59,16 +59,16 @@ class AttentionReduction(IType):
     def inputs(self) -> list[TensorSpec]:
         lse_padded = ((self._max_partials + 15) // 16) * 16
         return [
-            TensorSpec(dtype=DType.fp32, granularity=(1, 1),
+            TensorSpec(dtype=DType.fp32, granularity=(self._q_heads_per_instruction, lse_padded),
                        tma_types=[sv(dtype=DType.fp32, length=lse_padded)]),  # lse_intermediates
-            TensorSpec(dtype=DType.fp32, granularity=(1, 1, 1),
+            TensorSpec(dtype=DType.fp32, granularity=(self._q_heads_per_instruction, 1, self._head_dim),
                        tma_types=[sv(dtype=DType.fp32, length=self._head_dim)]),  # o_intermediates
         ]
 
     @property
     def outputs(self) -> list[TensorSpec]:
         return [
-            TensorSpec(dtype=DType.bf16, granularity=(1,),
+            TensorSpec(dtype=DType.bf16, granularity=(self._head_dim,),
                        tma_types=[sv(dtype=DType.bf16, length=self._head_dim)]),  # attn_out
         ]
 
