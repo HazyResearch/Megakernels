@@ -16,11 +16,10 @@ def attention_partial_op(
     head_dim = k_cache.shape[3]
     gqa_ratio = q.shape[0] // (num_kv_heads * head_dim)
     seq_len = pos_id.item() + 1
-    scale = attn_scale.item()
     qh = q.view(num_kv_heads, gqa_ratio, head_dim)
     k = k_cache[0, :seq_len].permute(1, 2, 0)
     v = v_cache[0, :seq_len].permute(1, 0, 2)
-    scores = torch.bmm(qh, k) * scale
+    scores = torch.bmm(qh, k) * attn_scale
     w = F.softmax(scores.float(), dim=-1).to(q.dtype)
     return torch.bmm(w, v).reshape(-1)
 
@@ -131,11 +130,10 @@ def attention_partial_multi_op(
     gqa_ratio = q.shape[0] // (num_kv_heads * head_dim)
     num_heads = num_kv_heads * gqa_ratio
     seq_len = pos_id.item() + 1
-    scale = attn_scale.item()
     qh = q.view(num_kv_heads, gqa_ratio, head_dim)
     k = k_cache[0, :seq_len].permute(1, 2, 0)
     v = k_cache[0, :seq_len].permute(1, 0, 2)  # dummy, not used for multi
-    scores = torch.bmm(qh, k) * scale
+    scores = torch.bmm(qh, k) * attn_scale
     lse = torch.log2(torch.sum(torch.exp(scores.float()), dim=-1))
     w = F.softmax(scores.float(), dim=-1).to(q.dtype)
     v = v_cache[0, :seq_len].permute(1, 0, 2)
