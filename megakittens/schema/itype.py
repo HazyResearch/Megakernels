@@ -183,10 +183,16 @@ class IType(ABC):
                 effective_shape = range.effective_shape
                 offset = len(effective_shape) - len(specs[i].granularity)
                 for g_dim, gran in enumerate(specs[i].granularity):
-                    if effective_shape[offset + g_dim] % gran != 0:
+                    d = offset + g_dim
+                    if range[d].start % gran != 0:
                         raise RuntimeError(
-                            f"[MegaKittens] {self.name} {label} {i} range dim {offset + g_dim}: "
-                            f"effective size {effective_shape[offset + g_dim]} not a multiple of {gran}"
+                            f"[MegaKittens] {self.name} {label} {i} range dim {d}: "
+                            f"start {range[d].start} not a multiple of {gran}"
+                        )
+                    if effective_shape[d] % gran != 0:
+                        raise RuntimeError(
+                            f"[MegaKittens] {self.name} {label} {i} range dim {d}: "
+                            f"effective size {effective_shape[d]} not a multiple of {gran}"
                         )
 
     @abstractmethod
