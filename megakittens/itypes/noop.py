@@ -1,4 +1,4 @@
-from typing import List, Optional, Tuple
+from typing import List, Tuple
 
 import torch
 
@@ -40,8 +40,8 @@ class Noop(IType):
         self,
         src_metas: Tuple[TensorMeta, ...],
         dst_metas: Tuple[TensorMeta, ...],
-        src_ranges: Tuple[Optional[TensorRange], ...] | None = None,
-        dst_ranges: Tuple[Optional[TensorRange], ...] | None = None,
+        src_ranges: Tuple[TensorRange, ...],
+        dst_ranges: Tuple[TensorRange, ...],
     ) -> List[Tuple[int, ...]]:
         return [()]
 
@@ -52,7 +52,7 @@ class Noop(IType):
         self,
         src_metas: Tuple[TensorMeta, ...],
         dst_metas: Tuple[TensorMeta, ...],
-        src_ranges: Tuple[Optional[TensorRange], ...] | None = None,
-        dst_ranges: Tuple[Optional[TensorRange], ...] | None = None,
+        src_ranges: Tuple[TensorRange, ...],
+        dst_ranges: Tuple[TensorRange, ...],
     ) -> None:
         super().validate(src_metas, dst_metas, src_ranges, dst_ranges)

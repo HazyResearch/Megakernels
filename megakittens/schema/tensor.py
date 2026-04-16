@@ -1,7 +1,7 @@
-from typing import Tuple
+from typing import ClassVar, Tuple
 
 import torch
-from pydantic import BaseModel, Field, NonNegativeInt, conint, model_validator
+from pydantic import BaseModel, Field, NonNegativeInt, conint, field_validator, model_validator
 
 from .device import Device
 from .dtype import DType
@@ -89,8 +89,20 @@ class DimRange(BaseModel, frozen=True):
         return -(-( self.stop - self.start) // self.stride)  # ceiling division
 
 
-class TensorRange(BaseModel, frozen=True):
-    ranges: Tuple[DimRange, ...]
+class TensorRange(BaseModel):
+    NUM_DIMS: ClassVar[int] = 4  # ThunderKittens uses 4-dim tensors
+
+    ranges: Tuple[DimRange, ...] = Field(min_length=NUM_DIMS, max_length=NUM_DIMS)
+
+    @field_validator('ranges', mode='before')
+    @classmethod
+    def _pad_ranges(cls, v):
+        v = tuple(v)
+        if not 1 <= len(v) <= cls.NUM_DIMS:
+            raise ValueError(f"[MegaKittens] TensorRange requires 1 to {cls.NUM_DIMS} DimRanges, got {len(v)}")
+        if len(v) < cls.NUM_DIMS:
+            v = (DimRange(start=0, stop=1, stride=1),) * (cls.NUM_DIMS - len(v)) + v
+        return v
 
     def __getitem__(self, idx: int) -> DimRange:
         return self.ranges[idx]
@@ -125,11 +137,15 @@ class TensorRange(BaseModel, frozen=True):
             new_ranges.append(DimRange(start=new_start, stop=new_stop))
         return TensorRange(ranges=tuple(new_ranges))
 
-    def is_full(self, shape: Tuple[int, ...]) -> bool:
-        """Return True if this range covers the entire tensor."""
-        if len(self) != len(shape):
+    def is_full(self, shape: "TensorMeta | Tuple[int, ...]") -> bool:
+        """Return True if this range covers the entire tensor. `shape` may be a `TensorMeta` or a raw shape tuple."""
+        if isinstance(shape, TensorMeta):
+            shape = shape.shape
+        if len(shape) > len(self):
+            return False
+        if any(d.start != 0 or d.stop != 1 or d.stride != 1 for d in self.ranges[:len(self) - len(shape)]):
             return False
         return all(
             d.start == 0 and d.stop == s and d.stride == 1
-            for d, s in zip(self.ranges, shape)
+            for d, s in zip(self.ranges[-len(shape):], shape)
         )

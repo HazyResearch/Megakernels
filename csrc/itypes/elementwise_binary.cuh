@@ -70,6 +70,9 @@ struct ElementwiseBinary {
     static constexpr int MAX_TILES_PER_INST = 2;
     static constexpr int TILES_PER_INST = (Config::NUM_PAGES / NUM_INPUTS < MAX_TILES_PER_INST) ? Config::NUM_PAGES / NUM_INPUTS : MAX_TILES_PER_INST;
     static_assert(TILES_PER_INST >= 1, "Not enough pages for this many inputs");
+    static constexpr int DST_COORD_BASE_IDX = NUM_INPUTS * 4;
+    static constexpr int NUM_TILES_IDX = (NUM_INPUTS + 1) * 4;
+    static_assert(NUM_TILES_IDX < 16, "Instruction indices slot overflow for this NUM_INPUTS");
 
     using tile_t = kittens::st<kittens::bf16, 128, 128>;
 
@@ -77,7 +80,7 @@ struct ElementwiseBinary {
 
     struct controller {
         __device__ __forceinline__ static int lid_release_order(const Globals &g, state_t<Config> &s, int query) {
-            const int num_tiles = s.instruction().indices[4];
+            const int num_tiles = s.instruction().indices[NUM_TILES_IDX];
             const int num_unused = Config::NUM_PAGES - num_tiles*NUM_INPUTS;
             if (query < num_unused)
                 return num_tiles * NUM_INPUTS + query;
@@ -93,7 +96,7 @@ struct ElementwiseBinary {
             }
         }
         __device__ __forceinline__ static int init_semaphores(const Globals &g, state_t<Config> &s) {
-            const int num_tiles = s.instruction().indices[4];
+            const int num_tiles = s.instruction().indices[NUM_TILES_IDX];
             if (kittens::laneid() < num_tiles)
                 kittens::init_semaphore(inputs_arrived(s, kittens::laneid()), 1);
             return num_tiles;
@@ -102,31 +105,32 @@ struct ElementwiseBinary {
 
     struct loader {
         template <int I>
-        __device__ __forceinline__ static void load_tile(const Globals &g, state_t<Config> &s, int tile_idx, int batch, int depth, int tile_row, int tile_col) {
+        __device__ __forceinline__ static void load_tile(const Globals &g, state_t<Config> &s, int tile_idx) {
+            const auto &instruction = s.instruction();
+            const int batch = instruction.indices[I*4 + 0];
+            const int depth = instruction.indices[I*4 + 1];
+            const int tile_row = instruction.indices[I*4 + 2];
+            const int tile_col_start = instruction.indices[I*4 + 3];
             const int pid = s.lid_to_pid(tile_idx*NUM_INPUTS + I);
             s.page_wait(pid);
             tile_t &tile = s.pages[pid].template as<tile_t>();
-            kittens::tma::load_async(tile, g.template gls<nth_int<I, TensorIndices...>::value>(), {batch, depth, tile_row, tile_col}, inputs_arrived(s, tile_idx));
+            kittens::tma::load_async(tile, g.template gls<nth_int<I, TensorIndices...>::value>(), {batch, depth, tile_row, tile_col_start + tile_idx}, inputs_arrived(s, tile_idx));
         }
 
         template <int... Is>
-        __device__ __forceinline__ static void load_all_tiles(const Globals &g, state_t<Config> &s, int tile_idx, int batch, int depth, int tile_row, int tile_col, std::integer_sequence<int, Is...>) {
-            (load_tile<Is>(g, s, tile_idx, batch, depth, tile_row, tile_col), ...);
+        __device__ __forceinline__ static void load_all_tiles(const Globals &g, state_t<Config> &s, int tile_idx, std::integer_sequence<int, Is...>) {
+            (load_tile<Is>(g, s, tile_idx), ...);
         }
 
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
             const auto &instruction = s.instruction();
-            const int batch = instruction.indices[0];
-            const int depth = instruction.indices[1];
-            const int tile_row = instruction.indices[2];
-            const int tile_col_start = instruction.indices[3];
-            const int num_tiles = instruction.indices[4];
+            const int num_tiles = instruction.indices[NUM_TILES_IDX];
 
             if (kittens::warp::elect_leader()) {
                 all_input_barrier_wait<Config>(g, instruction);
                 for (int tile_idx = 0; tile_idx < num_tiles; tile_idx++) {
                     kittens::tma::expect_bytes(inputs_arrived(s, tile_idx), NUM_INPUTS*sizeof(tile_t)); // TODO: try optimizing with more fine-grained mbarrier arrivals
-                    load_all_tiles(g, s, tile_idx, batch, depth, tile_row, tile_col_start + tile_idx, std::make_integer_sequence<int, NUM_INPUTS>{});
+                    load_all_tiles(g, s, tile_idx, std::make_integer_sequence<int, NUM_INPUTS>{});
                 }
             } else if (kittens::warp::elect_leader_from_active()) {
                 for (int i = num_tiles*NUM_INPUTS; i < Config::NUM_PAGES; i++) {
@@ -156,11 +160,11 @@ struct ElementwiseBinary {
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
             const auto &instruction = s.instruction();
             auto &dst_gl = g.template gls<DST>();
-            const int batch = instruction.indices[0];
-            const int depth = instruction.indices[1];
-            const int tile_row = instruction.indices[2];
-            const int tile_col_start = instruction.indices[3];
-            const int num_tiles = instruction.indices[4];
+            const int dst_batch = instruction.indices[DST_COORD_BASE_IDX + 0];
+            const int dst_depth = instruction.indices[DST_COORD_BASE_IDX + 1];
+            const int dst_tile_row = instruction.indices[DST_COORD_BASE_IDX + 2];
+            const int dst_tile_col_start = instruction.indices[DST_COORD_BASE_IDX + 3];
+            const int num_tiles = instruction.indices[NUM_TILES_IDX];
 
             for (int tile_idx = 0; tile_idx < num_tiles; tile_idx++) {
                 kittens::wait(inputs_arrived(s, tile_idx), 0);
@@ -183,7 +187,7 @@ struct ElementwiseBinary {
                     for (int i = 1; i < NUM_INPUTS; i++)
                         s.page_finish(s.lid_to_pid(tile_idx*NUM_INPUTS + i));
                     if (tile_idx == 0) all_reuse_barrier_wait<Config>(g, instruction);
-                    kittens::tma::store_async(dst_gl, dst_tile, {batch, depth, tile_row, tile_col_start + tile_idx});
+                    kittens::tma::store_async(dst_gl, dst_tile, {dst_batch, dst_depth, dst_tile_row, dst_tile_col_start + tile_idx});
                 }
             }
 

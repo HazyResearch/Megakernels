@@ -101,31 +101,22 @@ class DAG:
                 raise RuntimeError(
                     f"[MegaKittens] Node arity mismatch: out_ranges={len(node.out_ranges)} out_tensors={len(node.out_tensors)}"
                 )
-            for i, ((in_node, slot_idx), range) in enumerate(zip(node.in_nodes, node.in_ranges)):
-                src_shape = in_node.out_tensors[slot_idx].shape
-                if len(range) != len(src_shape):
-                    raise RuntimeError(
-                        f"[MegaKittens] Range ndim ({len(range)}) != tensor ndim ({len(src_shape)}) "
-                        f"for in_node edge {i}"
-                    )
-                for d, (dim_range, dim_size) in enumerate(zip(range, src_shape)):
-                    if dim_range.stop > dim_size:
-                        raise RuntimeError(
-                            f"[MegaKittens] Range dim {d} stop ({dim_range.stop}) > tensor dim ({dim_size}) "
-                            f"for in_node edge {i}"
-                        )
-            for i, (out_meta, range) in enumerate(zip(node.out_tensors, node.out_ranges)):
-                if len(range) != len(out_meta.shape):
-                    raise RuntimeError(
-                        f"[MegaKittens] Range ndim ({len(range)}) != tensor ndim ({len(out_meta.shape)}) "
-                        f"for out_tensor {i}"
-                    )
-                for d, (dim_range, dim_size) in enumerate(zip(range, out_meta.shape)):
-                    if dim_range.stop > dim_size:
-                        raise RuntimeError(
-                            f"[MegaKittens] Range dim {d} stop ({dim_range.stop}) > tensor dim ({dim_size}) "
-                            f"for out_tensor {i}"
-                        )
+            for label, edges in [("in_node", list(zip(node.in_nodes, node.in_ranges))), ("out_tensor", list(zip(node.out_tensors, node.out_ranges)))]:
+                for i, (src, range) in enumerate(edges):
+                    src_shape = src[0].out_tensors[src[1]].shape if label == "in_node" else src.shape
+                    pad = len(range) - len(src_shape)
+                    for d, dim_range in enumerate(range.ranges[:pad]):
+                        if dim_range.start != 0 or dim_range.stop != 1 or dim_range.stride != 1:
+                            raise RuntimeError(
+                                f"[MegaKittens] Range dim {d} ({dim_range.start}, {dim_range.stop}, {dim_range.stride}) "
+                                f"is outside tensor shape {src_shape} and must be (0, 1, 1) for {label} {i}"
+                            )
+                    for d, (dim_range, dim_size) in enumerate(zip(range.ranges[pad:], src_shape)):
+                        if dim_range.stop > dim_size:
+                            raise RuntimeError(
+                                f"[MegaKittens] Range dim {pad + d} stop ({dim_range.stop}) > tensor dim ({dim_size}) "
+                                f"for {label} {i}"
+                            )
 
         input_nodes = [node for node in self.nodes if node.is_input]
         output_nodes = [node for node in self.nodes if node.is_output]

@@ -10,13 +10,9 @@ namespace megakittens {
 // Template parameter N is the column width (compile-time).
 // One instruction processes multiple rows within a single page.
 //
-// instruction.indices layout:
-//   [0] = starting row index
-//   [1] = rows_this_instruction
-//
-// SRC0 = x      (M, N) bf16
-// SRC1 = weight (N,)   bf16
-// DST  = output (M, N) bf16
+// SRC0 = x      (B, D, R, N) bf16
+// SRC1 = weight (N,)         bf16
+// DST  = output (B, D, R, N) bf16
 
 template <typename Config, typename Globals, int N, int SRC0, int SRC1, int DST>
 struct RMSNorm {
@@ -73,10 +69,10 @@ struct RMSNorm {
     struct loader {
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
             const auto &instruction = s.instruction();
-            const int batch     = instruction.indices[0];
-            const int depth     = instruction.indices[1];
-            const int row_start = instruction.indices[2];
-            const int num_rows  = instruction.indices[3];
+            const int x_batch     = instruction.indices[0];
+            const int x_depth     = instruction.indices[1];
+            const int x_row_start = instruction.indices[2];
+            const int num_rows    = instruction.indices[6];
 
             if (kittens::warp::elect_leader()) {
                 all_input_barrier_wait<Config>(g, instruction);
@@ -88,7 +84,7 @@ struct RMSNorm {
 
                 kittens::tma::expect_bytes(inputs_arrived(s), num_rows * sizeof(row_vec));
                 for (int i = 0; i < num_rows; i++) {
-                    kittens::tma::load_async(rows[i], x_gl, {batch, depth, row_start + i, 0}, inputs_arrived(s));
+                    kittens::tma::load_async(rows[i], x_gl, {x_batch, x_depth, x_row_start + i, 0}, inputs_arrived(s));
                 }
             } else if (kittens::warp::elect_leader_from_active()) {
                 // Release unused pages immediately
@@ -119,12 +115,12 @@ struct RMSNorm {
             kittens::wait(inputs_arrived(s), 0);
 
             const auto &instruction = s.instruction();
-            const int batch     = instruction.indices[0];
-            const int depth     = instruction.indices[1];
-            const int row_start = instruction.indices[2];
-            const int num_rows  = instruction.indices[3];
-            const int lane      = kittens::laneid();
-            const int warp_id   = kittens::warpid();
+            const int y_batch     = instruction.indices[3];
+            const int y_depth     = instruction.indices[4];
+            const int y_row_start = instruction.indices[5];
+            const int num_rows    = instruction.indices[6];
+            const int lane        = kittens::laneid();
+            const int warp_id     = kittens::warpid();
 
             const int pid = s.lid_to_pid(0);
             row_vec *rows = reinterpret_cast<row_vec*>(s.pages[pid].data);
@@ -186,7 +182,7 @@ struct RMSNorm {
                 auto &y_gl = g.template gls<DST>();
                 all_reuse_barrier_wait<Config>(g, instruction);
                 for (int i = 0; i < num_rows; i++) {
-                    kittens::tma::store_async(y_gl, rows[i], {batch, depth, row_start + i, 0});
+                    kittens::tma::store_async(y_gl, rows[i], {y_batch, y_depth, y_row_start + i, 0});
                 }
                 kittens::tma::store_async_wait();
                 s.page_finish(pid);

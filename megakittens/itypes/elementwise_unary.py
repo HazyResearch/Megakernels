@@ -1,4 +1,4 @@
-from typing import List, Optional, Tuple
+from typing import List, Tuple
 
 import torch
 
@@ -147,58 +147,57 @@ class ElementwiseUnary(IType):
         self,
         src_metas: Tuple[TensorMeta, ...],
         dst_metas: Tuple[TensorMeta, ...],
-        src_ranges: Tuple[Optional[TensorRange], ...] | None = None,
-        dst_ranges: Tuple[Optional[TensorRange], ...] | None = None,
+        src_ranges: Tuple[TensorRange, ...],
+        dst_ranges: Tuple[TensorRange, ...],
     ) -> List[Tuple[int, ...]]:
-        if src_ranges is not None or dst_ranges is not None:
-            raise RuntimeError("[MegaKittens] ElementwiseUnary does not yet support tensor ranges")
-        B, D, _R, _C = (1,) * (4 - len(dst_metas[0].shape)) + dst_metas[0].shape
-        R = _R // self.TILE_SIZE
-        C = _C // self.TILE_SIZE
+        src_range = src_ranges[0]
+        dst_range = dst_ranges[0]
         indices = []
-        for b in range(B):
-            for d in range(D):
-                for r in range(R):
-                    for c in range(0, C, self.MAX_TILES_PER_INST):
-                        n = min(self.MAX_TILES_PER_INST, C - c)
-                        indices.append((b, d, r, c, n))
+        for b in range(dst_range[0].size):
+            for d in range(dst_range[1].size):
+                for r in range(dst_range[2].size // self.TILE_SIZE):
+                    for c in range(0, dst_range[3].size // self.TILE_SIZE, self.MAX_TILES_PER_INST):
+                        n = min(self.MAX_TILES_PER_INST, dst_range[3].size // self.TILE_SIZE - c)
+                        indices.append((
+                            src_range[0].start + b, src_range[1].start + d, src_range[2].start // self.TILE_SIZE + r, src_range[3].start // self.TILE_SIZE + c,
+                            dst_range[0].start + b, dst_range[1].start + d, dst_range[2].start // self.TILE_SIZE + r, dst_range[3].start // self.TILE_SIZE + c,
+                            n,
+                        ))
         return indices
 
     def num_instructions(
         self,
         src_metas: Tuple[TensorMeta, ...],
         dst_metas: Tuple[TensorMeta, ...],
-        src_ranges: Tuple[Optional[TensorRange], ...] | None = None,
-        dst_ranges: Tuple[Optional[TensorRange], ...] | None = None,
+        src_ranges: Tuple[TensorRange, ...],
+        dst_ranges: Tuple[TensorRange, ...],
     ) -> int:
-        if src_ranges is not None or dst_ranges is not None:
-            raise RuntimeError("[MegaKittens] ElementwiseUnary does not yet support tensor ranges")
-        B, D, _R, _C = (1,) * (4 - len(dst_metas[0].shape)) + dst_metas[0].shape
-        R = _R // self.TILE_SIZE
-        C = _C // self.TILE_SIZE
-        return B * D * R * ((C + self.MAX_TILES_PER_INST - 1) // self.MAX_TILES_PER_INST)
+        dst_range = dst_ranges[0]
+        return dst_range[0].size * dst_range[1].size * (dst_range[2].size // self.TILE_SIZE) * ((dst_range[3].size // self.TILE_SIZE + self.MAX_TILES_PER_INST - 1) // self.MAX_TILES_PER_INST)
 
     def access_regions(self, block_index, src_metas, dst_metas):
-        b, d, r, c, n = block_index
-        region = ((b, b + 1), (d, d + 1),
-                  (r * self.TILE_SIZE, (r + 1) * self.TILE_SIZE),
-                  (c * self.TILE_SIZE, (c + n) * self.TILE_SIZE))
-        return [region], [region]
+        b_src, d_src, r_src, c_src, b_dst, d_dst, r_dst, c_dst, n = block_index
+        src_region = ((b_src, b_src + 1), (d_src, d_src + 1),
+                      (r_src * self.TILE_SIZE, (r_src + 1) * self.TILE_SIZE),
+                      (c_src * self.TILE_SIZE, (c_src + n) * self.TILE_SIZE))
+        dst_region = ((b_dst, b_dst + 1), (d_dst, d_dst + 1),
+                      (r_dst * self.TILE_SIZE, (r_dst + 1) * self.TILE_SIZE),
+                      (c_dst * self.TILE_SIZE, (c_dst + n) * self.TILE_SIZE))
+        return [src_region], [dst_region]
 
     def validate(
         self,
         src_metas: Tuple[TensorMeta, ...],
         dst_metas: Tuple[TensorMeta, ...],
-        src_ranges: Tuple[Optional[TensorRange], ...] | None = None,
-        dst_ranges: Tuple[Optional[TensorRange], ...] | None = None,
+        src_ranges: Tuple[TensorRange, ...],
+        dst_ranges: Tuple[TensorRange, ...],
     ) -> None:
         super().validate(src_metas, dst_metas, src_ranges, dst_ranges)
-        if src_ranges is not None or dst_ranges is not None:
-            raise RuntimeError("[MegaKittens] ElementwiseUnary does not yet support tensor ranges")
         for op in self.ops:
             if op not in self.UNARY_OPS:
                 raise RuntimeError(f"[MegaKittens] ElementwiseUnary: unknown op {op!r}")
-        if src_metas[0].shape != dst_metas[0].shape:
+        if src_ranges[0].effective_shape != dst_ranges[0].effective_shape:
             raise RuntimeError(
-                f"[MegaKittens] ElementwiseUnary output shape {dst_metas[0].shape} doesn't match input shape {src_metas[0].shape}"
+                f"[MegaKittens] ElementwiseUnary effective shape mismatch: "
+                f"src={src_ranges[0].effective_shape} dst={dst_ranges[0].effective_shape}"
             )
