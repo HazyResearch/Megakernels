@@ -10,6 +10,8 @@ pytest
 
 Tests disable JIT file cache (`use_jit_cache=False`) so they always recompile.
 
+Test files must not depend on `pytest` at import time, but must still be runnable under `pytest`. Guard any `pytest`-only decorators (e.g. `pytest.mark.parametrize`) behind `try: import pytest / except ImportError: pass`, and include an `if __name__ == "__main__":` block so the file is runnable as a plain Python script.
+
 ## Adding a new instruction type
 
 Two files:
