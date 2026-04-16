@@ -13,19 +13,20 @@ class Node(BaseModel):
     """
     Graph vertex for the DAG. This schema is node-centric (no separate Edge objects).
     """
-    model_config = {"arbitrary_types_allowed": True}
     is_input: bool = False
     is_output: bool = False  # There should be only 1 output node
+
     itype: IType | None = None  # None if input/output
-    in_nodes: Tuple[Tuple[Node, NonNegativeInt], ...]
+
+    in_nodes: Tuple[Tuple[Node, NonNegativeInt], ...]  # [[source_node, output_slot_idx], ...]
     in_ranges: Tuple[TensorRange, ...]
     out_tensors: Tuple[TensorMeta, ...]
     out_ranges: Tuple[TensorRange, ...]
-    out_nodes: Tuple[List[Node], ...]
+    out_nodes: Tuple[List[Node], ...]  # [[destination_node, ...], ...]
 
     # Op-specific fields
-    input_index: int | None = None  # None if not an input
     # TODO: support default values
+    input_index: int | None = None  # None if not an input
 
     # Unique identifier for this node
     id: int = 0

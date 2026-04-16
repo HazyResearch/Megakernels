@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import operator
+from collections.abc import Iterable
 from typing import Any, Dict, List
 
 import torch
@@ -186,6 +187,30 @@ def _flatten_output_nodes(
         raise RuntimeError(f"[MegaKittens] Unsupported output value type '{type(value).__name__}'")
 
 
+def prune_fx_graph(fx_nodes: Iterable[torch.fx.Node]) -> list[torch.fx.Node]:
+    """Given an iterable of Torch FX graph nodes, preserve only the nodes that feed to the output."""
+    fx_nodes = list(fx_nodes)  # materialize so we can iterate twice
+    output_nodes = [node for node in fx_nodes if node.op == "output"]
+    if len(output_nodes) != 1:  # FX graph always produces 1 output node
+        raise RuntimeError(f"[MegaKittens] Number of output nodes is {len(output_nodes)}")
+    output_node = output_nodes[0]
+    # TODO: support void functions
+    if not output_node.args or len(output_node.args) != 1 or output_node.args[0] is None:
+        raise RuntimeError("[MegaKittens] Void output graphs are not supported. Please return at least one tensor.")
+    valid_names: set[str] = set()
+    node_stack: List[torch.fx.Node] = [output_node]
+    while node_stack:
+        current = node_stack.pop()
+        if current.name in valid_names:  # already visited
+            continue
+        valid_names.add(current.name)
+        node_stack.extend(current.all_input_nodes)
+    return [
+        node for node in fx_nodes
+        if node.name in valid_names
+        and not (node.op == "call_function" and node.target == operator.getitem)
+    ]
+
 def trace(gm: torch.fx.GraphModule, example_inputs: List[Any]) -> DAG:
     """
     Convert an FX GraphModule plus example inputs into a MegaKittens node-centric DAG.
@@ -195,33 +220,9 @@ def trace(gm: torch.fx.GraphModule, example_inputs: List[Any]) -> DAG:
 
     Dead nodes (not reachable from the output) are pruned.
     """
-    all_graph_nodes = list(gm.graph.nodes)
 
     # Prune to only nodes that feed into the output.
-    output_nodes = [n for n in all_graph_nodes if n.op == "output"]
-    if len(output_nodes) != 1:
-        raise RuntimeError(f"[MegaKittens] Number of output nodes is {len(output_nodes)}")
-    output_node = output_nodes[0] # FX graph always produces 1 output node
-    # TODO: support void functions
-    if not output_node.args or output_node.args[0] is None:
-        raise RuntimeError(
-            "[MegaKittens] Void output graphs are not supported. "
-            "Please return at least one tensor."
-        )
-    valid_names: set[str] = set()
-    stack: List[torch.fx.Node] = [output_node]
-    while stack:
-        current = stack.pop()
-        if current.name in valid_names:
-            continue
-        valid_names.add(current.name)
-        stack.extend(current.all_input_nodes)
-    graph_nodes = [
-        n
-        for n in all_graph_nodes
-        if n.name in valid_names
-        and not (n.op == "call_function" and n.target == operator.getitem)
-    ]
+    fx_nodes = prune_fx_graph(gm.graph.nodes)
 
     # Maps FX node name -> {aten_output_idx: itype_output_idx} for multi-output ops
     output_idx_remap: Dict[str, Dict[int, int]] = {}
@@ -231,7 +232,7 @@ def trace(gm: torch.fx.GraphModule, example_inputs: List[Any]) -> DAG:
     node_by_name: Dict[str, Node] = {}
     dag_nodes: List[Node] = []
 
-    for node in graph_nodes:
+    for node in fx_nodes:
         is_input = False
         is_output = False
         itype: IType | None = None
@@ -285,11 +286,6 @@ def trace(gm: torch.fx.GraphModule, example_inputs: List[Any]) -> DAG:
 
         in_nodes_list = []
         for input_node in input_nodes:
-            if input_node.name not in valid_names:
-                raise RuntimeError(
-                    f"[MegaKittens] Invalid input '{input_node.name}' for node '{node.name}':"
-                    " not reachable from graph output"
-                )
             if input_node.op == "output":
                 raise RuntimeError(
                     f"[MegaKittens] Invalid input graph edge: node '{node.name}' consumes output node '{input_node.name}'"
