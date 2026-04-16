@@ -85,14 +85,18 @@ struct Attention {
     struct loader {
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
             const auto &instruction = s.instruction();
-            const int batch    = instruction.indices[0];
-            const int m_block  = instruction.indices[1];
-            const int head     = instruction.indices[2];
+            const int q_batch   = instruction.indices[0];
+            const int q_m_block = instruction.indices[1];
+            const int q_head    = instruction.indices[2];
+            const int k_batch   = instruction.indices[3];
+            const int k_head    = instruction.indices[4];
+            const int v_batch   = instruction.indices[5];
+            const int v_head    = instruction.indices[6];
             const int cta_rank = kittens::cluster_ctarank();
             auto &q_gl = g.template gls<SRC_Q>();
             auto &k_gl = g.template gls<SRC_K>();
             auto &v_gl = g.template gls<SRC_V>();
-            const int m_tile_base = m_block * NUM_SOFTMAXXERS * Config::CLUSTER_SIZE;
+            const int m_tile_base = q_m_block * NUM_SOFTMAXXERS * Config::CLUSTER_SIZE;
             int iters_per_task;
             if constexpr (CAUSAL) iters_per_task = m_tile_base + NUM_SOFTMAXXERS * Config::CLUSTER_SIZE;
             else                  iters_per_task = k_gl.depth() / Nb;
@@ -107,7 +111,7 @@ struct Attention {
                 for (int i = 0; i < NUM_SOFTMAXXERS; i++) {
                     kittens::tma::cluster::load_async<kittens::dim::DEPTH, kittens::cache_policy::NORMAL>(
                         q_st(s, i), q_gl,
-                        {batch, (m_tile_base + cta_rank * NUM_SOFTMAXXERS) + i, head, 0},
+                        {q_batch, (m_tile_base + cta_rank * NUM_SOFTMAXXERS) + i, q_head, 0},
                         q_arrived(s, i), (uint16_t)(1 << cta_rank), 0);
                 }
 
@@ -120,14 +124,14 @@ struct Attention {
                     kittens::tma::cluster::wait(kv_finished(s, kv_idx), kv_phase);
                     kittens::tma::cluster::load_async<kittens::dim::DEPTH, kittens::cache_policy::NORMAL>(
                         kv_st(s, kv_idx), k_gl,
-                        {batch, idx * Config::CLUSTER_SIZE + cta_rank, head, 0},
+                        {k_batch, idx * Config::CLUSTER_SIZE + cta_rank, k_head, 0},
                         kv_arrived(s, kv_idx), (uint16_t)(1 << cta_rank), 0);
                     kv_idx++; if (kv_idx == LOAD_STAGES) { kv_idx = 0; kv_phase ^= 1; }
 
                     kittens::tma::cluster::wait(kv_finished(s, kv_idx), kv_phase);
                     kittens::tma::cluster::load_async<kittens::dim::DEPTH, kittens::cache_policy::NORMAL>(
                         reinterpret_cast<v_tile&>(kv_st(s, kv_idx)), v_gl,
-                        {batch, idx, head, cta_rank},
+                        {v_batch, idx, v_head, cta_rank},
                         kv_arrived(s, kv_idx), (uint16_t)(1 << cta_rank), 0);
                     kv_idx++; if (kv_idx == LOAD_STAGES) { kv_idx = 0; kv_phase ^= 1; }
                 }
@@ -148,8 +152,8 @@ struct Attention {
             auto &k_gl = g.template gls<SRC_K>();
             int iters_per_task;
             if constexpr (CAUSAL) {
-                const int m_block = s.instruction().indices[1];
-                iters_per_task = m_block * NUM_SOFTMAXXERS * Config::CLUSTER_SIZE + NUM_SOFTMAXXERS * Config::CLUSTER_SIZE;
+                const int q_m_block = s.instruction().indices[1];
+                iters_per_task = q_m_block * NUM_SOFTMAXXERS * Config::CLUSTER_SIZE + NUM_SOFTMAXXERS * Config::CLUSTER_SIZE;
             } else {
                 iters_per_task = k_gl.depth() / Nb;
             }
@@ -262,13 +266,15 @@ struct Attention {
 
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
             const auto &instruction = s.instruction();
-            const int batch    = instruction.indices[0];
-            const int m_block  = instruction.indices[1];
-            const int head     = instruction.indices[2];
+            const int q_m_block = instruction.indices[1];
+            const int o_batch   = instruction.indices[7];
+            const int o_m_block = instruction.indices[8];
+            const int o_head    = instruction.indices[9];
             const int cta_rank = kittens::cluster_ctarank();
             auto &o_gl = g.template gls<DST_O>();
             auto &k_gl = g.template gls<SRC_K>();
-            const int m_tile_base = m_block * NUM_SOFTMAXXERS * Config::CLUSTER_SIZE;
+            const int m_tile_base = q_m_block * NUM_SOFTMAXXERS * Config::CLUSTER_SIZE;
+            const int o_m_tile_base = o_m_block * NUM_SOFTMAXXERS * Config::CLUSTER_SIZE;
             int iters_per_task;
             if constexpr (CAUSAL) iters_per_task = m_tile_base + NUM_SOFTMAXXERS * Config::CLUSTER_SIZE;
             else                  iters_per_task = k_gl.depth() / Nb;
@@ -688,7 +694,7 @@ struct Attention {
             kittens::warpgroup::sync(qid + 1);
             kittens::warpgroup::tma::store_async<kittens::dim::DEPTH, kittens::cache_policy::EVICT_FIRST>(
                 o_gl, o_st(s, qid),
-                {batch, (m_tile_base + cta_rank * NUM_SOFTMAXXERS) + qid, head, 0});
+                {o_batch, (o_m_tile_base + cta_rank * NUM_SOFTMAXXERS) + qid, o_head, 0});
             kittens::warpgroup::tma::store_async_wait();
 
             consumer_group::sync(4);
