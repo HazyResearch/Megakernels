@@ -9,7 +9,7 @@ from torch.fx.passes.shape_prop import TensorMetadata
 
 from .schema.dag import DAG, Node
 from .schema.itype import IType
-from .schema.tensor import TensorMeta
+from .schema.tensor import TensorMeta, TensorRange, TensorSlice
 
 
 def prune_fx_graph(fx_nodes: Iterable[torch.fx.Node]) -> list[torch.fx.Node]:
@@ -33,7 +33,7 @@ def prune_fx_graph(fx_nodes: Iterable[torch.fx.Node]) -> list[torch.fx.Node]:
     return [
         node for node in fx_nodes
         if node.name in valid_names
-        and not (node.op == "call_function" and node.target == operator.getitem)
+        and not (node.op == "call_function" and node.target in {operator.getitem, torch.ops.aten.select.int, torch.ops.aten.slice.Tensor})
     ]
 
 
@@ -191,29 +191,84 @@ def flatten_fx_nodes(
         raise RuntimeError(f"[MegaKittens] Unsupported node type '{type(val).__name__}'")
 
 
-def resolve_input_node_and_output_idx(input_node: torch.fx.Node) -> tuple[torch.fx.Node, int]:
+def resolve_input_node(input_node: torch.fx.Node) -> tuple[torch.fx.Node, int, list[TensorSlice]]:
+    """Walk back through getitem, indexing, and slicing ops to find the real source FX node.
+
+    Returns (source_fx_node, output_idx, slice_chain) where:
+      - source_fx_node: first non-view, non-getitem FX node.
+      - output_idx: output slot of that source (for multi-output ops).
+      - slice_chain: slicing ops in parent-to-leaf order
+    """
     output_idx = 0
+    slice_chain: list[TensorSlice] = []
     current_node = input_node
-    while current_node.op == "call_function" and current_node.target == operator.getitem:
-        args = current_node.args
-        if len(args) < 2:
-            raise RuntimeError(
-                f"[MegaKittens] Unsupported getitem usage for node '{current_node.name}'"
-                f" (op={current_node.op}, target={current_node.target!r}, args={args!r})"
-            )
-        if not isinstance(args[0], torch.fx.Node):
-            raise RuntimeError(
-                f"[MegaKittens] Cannot resolve FX getitem input for node '{current_node.name}'"
-                f" because source is not an FX node (type={type(source_node).__name__})"
-            )
-        if not isinstance(args[1], int):
-            raise RuntimeError(f"[MegaKittens] Unsupported getitem index type for node '{current_node.name}'")
-        source_node = args[0]
-        output_idx = args[1]
-        current_node = source_node
+    while True:
+        if current_node.op == "call_function" and current_node.target == operator.getitem:
+            args = current_node.args
+            if len(args) < 2:
+                raise RuntimeError(
+                    f"[MegaKittens] Unsupported getitem usage for node '{current_node.name}'"
+                    f" (op={current_node.op}, target={current_node.target!r}, args={args!r})"
+                )
+            if not isinstance(args[0], torch.fx.Node): # TODO?
+                raise RuntimeError(
+                    f"[MegaKittens] Cannot resolve FX getitem input for node '{current_node.name}'"
+                    f" because source is not an FX node (type={type(args[0]).__name__})"
+                )
+            if not isinstance(args[1], int):
+                raise RuntimeError(f"[MegaKittens] Unsupported getitem index type for node '{current_node.name}'")
+            output_idx = args[1]
+            current_node = args[0]
+        elif current_node.op == "call_function" and current_node.target == torch.ops.aten.select.int:
+            args = current_node.args
+            if len(args) != 3:
+                raise RuntimeError(f"[MegaKittens] aten.select.int expects 3 args for node '{current_node.name}', got {len(args)}")
+            if not isinstance(args[0], torch.fx.Node):
+                raise RuntimeError(f"[MegaKittens] aten.select.int args[0] is not an FX node for '{current_node.name}'")
+            if not isinstance(args[1], int) or not isinstance(args[2], int):
+                raise RuntimeError(
+                    f"[MegaKittens] aten.select.int requires int dim/idx for node '{current_node.name}',"
+                    f" got dim={args[1]!r} idx={args[2]!r}"
+                )
+            slice_chain.append(TensorSlice(op="select", dim=args[1], start=args[2], end=args[2] + 1))
+            current_node = args[0]
+        elif current_node.op == "call_function" and current_node.target == torch.ops.aten.slice.Tensor:
+            args = current_node.args
+            if not (2 <= len(args) <= 5):
+                raise RuntimeError(f"[MegaKittens] aten.slice.Tensor expects 2-5 args for node '{current_node.name}', got {len(args)}")
+            if not isinstance(args[0], torch.fx.Node):
+                raise RuntimeError(f"[MegaKittens] aten.slice.Tensor parent is not an FX node for '{current_node.name}'")
+            dim = args[1]
+            start = args[2] if len(args) > 2 else None
+            end = args[3] if len(args) > 3 else None
+            step = args[4] if len(args) > 4 and args[4] is not None else 1
+            if not isinstance(dim, int):
+                raise RuntimeError(
+                    f"[MegaKittens] aten.slice.Tensor requires int dim for node '{current_node.name}',"
+                    f" got dim={dim!r}"
+                )
+            if start is not None and not isinstance(start, int):
+                raise RuntimeError(
+                    f"[MegaKittens] aten.slice.Tensor start must be int or None for node '{current_node.name}',"
+                    f" got start={start!r}"
+                )
+            if end is not None and not isinstance(end, int):
+                raise RuntimeError(
+                    f"[MegaKittens] aten.slice.Tensor end must be int or None for node '{current_node.name}',"
+                    f" got end={end!r}"
+                )
+            if step != 1:
+                raise RuntimeError(
+                    f"[MegaKittens] aten.slice.Tensor step != 1 is not supported for node '{current_node.name}'"
+                )
+            slice_chain.append(TensorSlice(op="slice", dim=dim, start=start, end=end))
+            current_node = args[0]
+        else:
+            break
+
     if not isinstance(current_node, torch.fx.Node):
         raise RuntimeError(f"[MegaKittens] Failed to resolve input node for '{input_node.name}'")
-    return current_node, output_idx
+    return current_node, output_idx, slice_chain.reverse()  # source-to-destination order
 
 
 def trace(gm: torch.fx.GraphModule, example_inputs: List[Any]) -> DAG:
@@ -240,7 +295,7 @@ def trace(gm: torch.fx.GraphModule, example_inputs: List[Any]) -> DAG:
         is_output = False
         itype: IType | None = None
         input_index: int | None = None
-        input_fx_nodes = Iterable[torch.fx.Node] | None = None
+        input_fx_nodes: Iterable[torch.fx.Node] | None = None
         out_tensors: tuple[TensorMeta, ...] | None = None
 
         if fx_node.op == "placeholder":
@@ -286,11 +341,12 @@ def trace(gm: torch.fx.GraphModule, example_inputs: List[Any]) -> DAG:
         else:
             raise RuntimeError(f"[MegaKittens] Invalid fx_node op {fx_node.op}")
 
-        in_nodes = []
+        in_nodes: list[tuple[Node, int]] = []
+        in_ranges: list[TensorRange] = []
         for input_fx_node in input_fx_nodes:
             if input_fx_node.op == "output":
                 raise RuntimeError(f"[MegaKittens] Invalid input graph edge: fx_node '{fx_node.name}' consumes output fx_node '{input_fx_node.name}'")
-            resolved_input_fx_node, output_idx = resolve_input_node_and_output_idx(input_fx_node)
+            resolved_input_fx_node, output_idx, slice_chain = resolve_input_node(input_fx_node)
             if resolved_input_fx_node.name in output_idx_map:
                 output_idx = output_idx_map[resolved_input_fx_node.name][output_idx]
             if resolved_input_fx_node.name not in node_by_name:  # because FX nodes are given in topological order
@@ -301,14 +357,20 @@ def trace(gm: torch.fx.GraphModule, example_inputs: List[Any]) -> DAG:
                     f"[MegaKittens] Node '{fx_node.name}' reads output slot {output_idx} of '{resolved_input_fx_node.name}',"
                     f" but source fx_node has {len(resolved_input_node.out_tensors)} outputs"
                 )
+            if is_output and slice_chain:  # potentially we *can* enable this; I just don't see a use case
+                raise RuntimeError(
+                    f"[MegaKittens] Output fx_node '{fx_node.name}' directly consumes a sliced view of"
+                    f" '{resolved_input_fx_node.name}'; returning sliced views is not supported"
+                )
             in_nodes.append((resolved_input_node, output_idx))
+            in_ranges.append(TensorRange.from_slice_chain(resolved_input_node.out_tensors[output_idx].shape, slice_chain))
 
         node = Node(
             is_input=is_input,
             is_output=is_output,
             itype=itype,
             in_nodes=in_nodes,
-            in_ranges=tuple(in_node.out_tensors[slot_idx].full_range for in_node, slot_idx in in_nodes),
+            in_ranges=in_ranges,
             out_tensors=out_tensors,
             out_ranges=tuple(tensor_meta.full_range for tensor_meta in out_tensors),
             out_nodes=tuple([] for _ in out_tensors),  # empty lists, filled below
