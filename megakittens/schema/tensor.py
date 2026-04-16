@@ -13,6 +13,10 @@ class TensorMeta(BaseModel, frozen=True):  # frozen=True needed to be hashable
     shape: Tuple[NonNegativeInt, ...] = Field(max_length=4)  # TODO: support dynamic shapes
     device: Device
 
+    @property
+    def full_range(self) -> "TensorRange":
+        return TensorRange(ranges=tuple(DimRange(start=0, stop=d) for d in self.shape))
+
     @classmethod
     def from_torch(
         cls,

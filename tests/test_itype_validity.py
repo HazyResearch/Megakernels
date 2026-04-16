@@ -103,15 +103,17 @@ def check_validity(inst):
         dtype=s.dtype, shape=tuple(g * 2 for g in s.granularity),
         device=megakittens.schema.device.Device(type="cuda", index=0),
     ) for s in outputs)
+    src_ranges = tuple(m.full_range for m in src_metas)
+    dst_ranges = tuple(m.full_range for m in dst_metas)
 
     try:
-        block_idx_list = inst.block_indices(src_metas, dst_metas)
+        block_idx_list = inst.block_indices(src_metas, dst_metas, src_ranges, dst_ranges)
         assert isinstance(block_idx_list, list), f"{cls.__name__}.block_indices must return list"
         for i, idx in enumerate(block_idx_list):
             assert isinstance(idx, tuple), f"{cls.__name__}.block_indices()[{i}] must be tuple"
             for j, val in enumerate(idx):
                 assert isinstance(val, int), f"{cls.__name__}.block_indices()[{i}][{j}] must be int"
-        num_inst = inst.num_instructions(src_metas, dst_metas)
+        num_inst = inst.num_instructions(src_metas, dst_metas, src_ranges, dst_ranges)
         assert isinstance(num_inst, int) and num_inst >= 0, f"{cls.__name__}.num_instructions"
         assert num_inst == len(block_idx_list), \
             f"{cls.__name__}.num_instructions()={num_inst} != len(block_indices())={len(block_idx_list)}"
@@ -170,7 +172,9 @@ def check_validity(inst):
         assert len(test_dst_metas) == len(test_inst.outputs), \
             f"{cls.__name__}: test_fn produced {len(test_dst_metas)} tensor outputs, expected {len(test_inst.outputs)} outputs"
 
-        block_idx_list = test_inst.block_indices(test_src_metas, test_dst_metas)
+        test_src_ranges = tuple(m.full_range for m in test_src_metas)
+        test_dst_ranges = tuple(m.full_range for m in test_dst_metas)
+        block_idx_list = test_inst.block_indices(test_src_metas, test_dst_metas, test_src_ranges, test_dst_ranges)
         min_src_ndims = [len(spec.granularity) for spec in test_inst.inputs]
         min_dst_ndims = [len(spec.granularity) for spec in test_inst.outputs]
         first_src, first_dst = test_inst.access_regions(block_idx_list[0], test_src_metas, test_dst_metas)
@@ -217,7 +221,7 @@ def check_validity(inst):
     # validate() returns None
 
     try:
-        result = inst.validate(src_metas, dst_metas)
+        result = inst.validate(src_metas, dst_metas, src_ranges, dst_ranges)
         assert result is None, f"{cls.__name__}.validate must return None"
     except RuntimeError:
         pass
@@ -231,8 +235,9 @@ def check_validity(inst):
                 device=megakittens.schema.device.Device(type="cuda", index=0),
             ) for s in inputs[:-1]
         )
+        wrong_src_ranges = tuple(m.full_range for m in wrong_src)
         try:
-            inst.validate(wrong_src, dst_metas)
+            inst.validate(wrong_src, dst_metas, wrong_src_ranges, dst_ranges)
             assert False, f"{cls.__name__}.validate should reject wrong input count"
         except (RuntimeError, IndexError):
             pass
@@ -243,8 +248,9 @@ def check_validity(inst):
                 device=megakittens.schema.device.Device(type="cuda", index=0),
             ) for s in outputs[:-1]
         )
+        wrong_dst_ranges = tuple(m.full_range for m in wrong_dst)
         try:
-            inst.validate(src_metas, wrong_dst)
+            inst.validate(src_metas, wrong_dst, src_ranges, wrong_dst_ranges)
             assert False, f"{cls.__name__}.validate should reject wrong output count"
         except (RuntimeError, IndexError):
             pass

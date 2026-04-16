@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import builtins
-from typing import List, Optional, Tuple
+from typing import List, Tuple
 
 from pydantic import BaseModel, NonNegativeInt
 
@@ -18,9 +18,9 @@ class Node(BaseModel):
     is_output: bool = False  # There should be only 1 output node
     itype: IType | None = None  # None if input/output
     in_nodes: Tuple[Tuple[Node, NonNegativeInt], ...]
-    in_ranges: Tuple[Optional[TensorRange], ...] | None = None
+    in_ranges: Tuple[TensorRange, ...]
     out_tensors: Tuple[TensorMeta, ...]
-    out_ranges: Tuple[Optional[TensorRange], ...] | None = None
+    out_ranges: Tuple[TensorRange, ...]
     out_nodes: Tuple[List[Node], ...]
 
     # Op-specific fields
@@ -93,45 +93,39 @@ class DAG:
                 raise RuntimeError(
                     f"[MegaKittens] Node arity mismatch: out_nodes={len(node.out_nodes)} out_tensors={len(node.out_tensors)}"
                 )
-            if node.in_ranges and len(node.in_ranges) != len(node.in_nodes):
+            if len(node.in_ranges) != len(node.in_nodes):
                 raise RuntimeError(
                     f"[MegaKittens] Node arity mismatch: in_ranges={len(node.in_ranges)} in_nodes={len(node.in_nodes)}"
                 )
-            if node.out_ranges and len(node.out_ranges) != len(node.out_tensors):
+            if len(node.out_ranges) != len(node.out_tensors):
                 raise RuntimeError(
                     f"[MegaKittens] Node arity mismatch: out_ranges={len(node.out_ranges)} out_tensors={len(node.out_tensors)}"
                 )
-            for i, ((in_node, slot_idx), range) in enumerate(
-                zip(node.in_nodes, node.in_ranges or (None,) * len(node.in_nodes))
-            ):
-                if range is not None:
-                    src_shape = in_node.out_tensors[slot_idx].shape
-                    if len(range) != len(src_shape):
+            for i, ((in_node, slot_idx), range) in enumerate(zip(node.in_nodes, node.in_ranges)):
+                src_shape = in_node.out_tensors[slot_idx].shape
+                if len(range) != len(src_shape):
+                    raise RuntimeError(
+                        f"[MegaKittens] Range ndim ({len(range)}) != tensor ndim ({len(src_shape)}) "
+                        f"for in_node edge {i}"
+                    )
+                for d, (dim_range, dim_size) in enumerate(zip(range, src_shape)):
+                    if dim_range.stop > dim_size:
                         raise RuntimeError(
-                            f"[MegaKittens] Range ndim ({len(range)}) != tensor ndim ({len(src_shape)}) "
+                            f"[MegaKittens] Range dim {d} stop ({dim_range.stop}) > tensor dim ({dim_size}) "
                             f"for in_node edge {i}"
                         )
-                    for d, (dim_range, dim_size) in enumerate(zip(range, src_shape)):
-                        if dim_range.stop > dim_size:
-                            raise RuntimeError(
-                                f"[MegaKittens] Range dim {d} stop ({dim_range.stop}) > tensor dim ({dim_size}) "
-                                f"for in_node edge {i}"
-                            )
-            for i, (out_meta, range) in enumerate(
-                zip(node.out_tensors, node.out_ranges or (None,) * len(node.out_tensors))
-            ):
-                if range is not None:
-                    if len(range) != len(out_meta.shape):
+            for i, (out_meta, range) in enumerate(zip(node.out_tensors, node.out_ranges)):
+                if len(range) != len(out_meta.shape):
+                    raise RuntimeError(
+                        f"[MegaKittens] Range ndim ({len(range)}) != tensor ndim ({len(out_meta.shape)}) "
+                        f"for out_tensor {i}"
+                    )
+                for d, (dim_range, dim_size) in enumerate(zip(range, out_meta.shape)):
+                    if dim_range.stop > dim_size:
                         raise RuntimeError(
-                            f"[MegaKittens] Range ndim ({len(range)}) != tensor ndim ({len(out_meta.shape)}) "
+                            f"[MegaKittens] Range dim {d} stop ({dim_range.stop}) > tensor dim ({dim_size}) "
                             f"for out_tensor {i}"
                         )
-                    for d, (dim_range, dim_size) in enumerate(zip(range, out_meta.shape)):
-                        if dim_range.stop > dim_size:
-                            raise RuntimeError(
-                                f"[MegaKittens] Range dim {d} stop ({dim_range.stop}) > tensor dim ({dim_size}) "
-                                f"for out_tensor {i}"
-                            )
 
         input_nodes = [node for node in self.nodes if node.is_input]
         output_nodes = [node for node in self.nodes if node.is_output]

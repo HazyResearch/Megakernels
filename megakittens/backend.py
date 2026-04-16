@@ -326,8 +326,10 @@ def fx_graph_to_mk_dag(
             is_input=is_input,
             is_output=is_output,
             itype=itype,
-            out_tensors=out_tensors,
             in_nodes=tuple(in_nodes_list),
+            in_ranges=tuple(src_node.out_tensors[slot].full_range for src_node, slot in in_nodes_list),
+            out_tensors=out_tensors,
+            out_ranges=tuple(tensor_meta.full_range for tensor_meta in out_tensors),
             out_nodes=tuple([] for _ in out_tensors),
             input_index=input_index,
         )

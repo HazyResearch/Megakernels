@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 import re
-from typing import List, Optional, Tuple
+from typing import List, Tuple
 
 import torch
 
@@ -99,8 +99,8 @@ class IType(ABC):
         self,
         src_metas: Tuple[TensorMeta, ...],
         dst_metas: Tuple[TensorMeta, ...],
-        src_ranges: Tuple[Optional[TensorRange], ...] | None = None,
-        dst_ranges: Tuple[Optional[TensorRange], ...] | None = None,
+        src_ranges: Tuple[TensorRange, ...],
+        dst_ranges: Tuple[TensorRange, ...],
     ) -> List[Tuple[int, ...]]:
         """Return instruction coordinate tuples for one node. Each becomes one instruction's indices."""
         ...
@@ -109,8 +109,8 @@ class IType(ABC):
         self,
         src_metas: Tuple[TensorMeta, ...],
         dst_metas: Tuple[TensorMeta, ...],
-        src_ranges: Tuple[Optional[TensorRange], ...] | None = None,
-        dst_ranges: Tuple[Optional[TensorRange], ...] | None = None,
+        src_ranges: Tuple[TensorRange, ...],
+        dst_ranges: Tuple[TensorRange, ...],
     ) -> int:
         """Number of instructions this node generates. Override if computable without building the full list."""
         return len(self.block_indices(src_metas, dst_metas, src_ranges, dst_ranges))
@@ -119,8 +119,8 @@ class IType(ABC):
         self,
         src_metas: Tuple[TensorMeta, ...],
         dst_metas: Tuple[TensorMeta, ...],
-        src_ranges: Tuple[Optional[TensorRange], ...] | None = None,
-        dst_ranges: Tuple[Optional[TensorRange], ...] | None = None,
+        src_ranges: Tuple[TensorRange, ...],
+        dst_ranges: Tuple[TensorRange, ...],
     ) -> None:
         """Validate input/output TensorMeta against specs. Override for custom checks."""
         if len(src_metas) != len(self.inputs):
@@ -131,11 +131,11 @@ class IType(ABC):
             raise RuntimeError(
                 f"[MegaKittens] {self.name} requires {len(self.outputs)} outputs, got {len(dst_metas)}"
             )
-        if src_ranges is not None and len(src_ranges) != len(src_metas):
+        if len(src_ranges) != len(src_metas):
             raise RuntimeError(
                 f"[MegaKittens] {self.name} src_ranges length {len(src_ranges)} != src_metas length {len(src_metas)}"
             )
-        if dst_ranges is not None and len(dst_ranges) != len(dst_metas):
+        if len(dst_ranges) != len(dst_metas):
             raise RuntimeError(
                 f"[MegaKittens] {self.name} dst_ranges length {len(dst_ranges)} != dst_metas length {len(dst_metas)}"
             )
@@ -161,11 +161,7 @@ class IType(ABC):
                             f"{meta.shape[offset + g_dim]} not a multiple of {gran}"
                         )
         for label, ranges, specs in [("src", src_ranges, self.inputs), ("dst", dst_ranges, self.outputs)]:
-            if ranges is None:
-                continue
             for i, range in enumerate(ranges):
-                if range is None:
-                    continue
                 if len(range) > 4:
                     raise RuntimeError(
                         f"[MegaKittens] {self.name} {label} {i}: range must be at most 4D, got {len(range)}D"
