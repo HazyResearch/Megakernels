@@ -13,6 +13,7 @@ class Node(BaseModel):
     """
     Graph vertex for the DAG. This schema is node-centric (no separate Edge objects).
     """
+    model_config = {"arbitrary_types_allowed": True}
     is_input: bool = False
     is_output: bool = False  # There should be only 1 output node
 
