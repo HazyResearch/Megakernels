@@ -219,6 +219,13 @@ def resolve_input_node(input_node: torch.fx.Node) -> tuple[torch.fx.Node, int, l
                 raise RuntimeError(f"[MegaKittens] Unsupported getitem index type for node '{current_node.name}'")
             output_idx = args[1]
             current_node = args[0]
+            if current_node.op == "call_function" and current_node.target in {
+                operator.getitem, torch.ops.aten.select.int, torch.ops.aten.slice.Tensor,
+            }:
+                raise RuntimeError(  # we do not support additional indexing after getitem
+                    f"[MegaKittens] getitem must be adjacent to its source node;"
+                    f" got view op '{current_node.name}' ({current_node.target!r}) as getitem's parent"
+                )
         elif current_node.op == "call_function" and current_node.target == torch.ops.aten.select.int:
             args = current_node.args
             if len(args) != 3:
@@ -268,7 +275,8 @@ def resolve_input_node(input_node: torch.fx.Node) -> tuple[torch.fx.Node, int, l
 
     if not isinstance(current_node, torch.fx.Node):
         raise RuntimeError(f"[MegaKittens] Failed to resolve input node for '{input_node.name}'")
-    return current_node, output_idx, slice_chain.reverse()  # source-to-destination order
+    slice_chain.reverse()  # return as source-to-destination
+    return current_node, output_idx, slice_chain
 
 
 def trace(gm: torch.fx.GraphModule, example_inputs: List[Any]) -> DAG:
