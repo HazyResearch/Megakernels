@@ -24,6 +24,9 @@ def _resolve_from_custom_op(args, kwargs):
     ops_str = args[1] if len(args) > 1 else kwargs.get("ops", "relu")
     return ElementwiseUnary(ops=tuple(ops_str.split(",")))
 
+def _resolve_identity(args, kwargs):
+    return ElementwiseUnary(ops=("identity",))
+
 def _resolve_relu(args, kwargs):
     return ElementwiseUnary(ops=("relu",))
 
@@ -73,6 +76,8 @@ class ElementwiseUnary(IType):
     torch_functions_map = {
         torch.ops.megakittens.elementwise_unary: _resolve_from_custom_op,
         torch.ops.megakittens.elementwise_unary.default: _resolve_from_custom_op,
+        torch.clone: _resolve_identity,
+        torch.ops.aten.clone: _resolve_identity, torch.ops.aten.clone.default: _resolve_identity,
         torch.relu: _resolve_relu,
         torch.ops.aten.relu: _resolve_relu, torch.ops.aten.relu.default: _resolve_relu,
         torch.abs: _resolve_abs,
