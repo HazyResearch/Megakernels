@@ -28,13 +28,16 @@ def check(
     Raises:
         AssertionError if results don't match within tolerance.
     """
+    def _fresh(a):
+        return tuple(t.clone() if isinstance(t, torch.Tensor) else t for t in a)
+
     torch._dynamo.reset()  # by default, dynamo limits to 8 compilations per function object
-    expected = fn(*args)
+    expected = fn(*_fresh(args))
     expected_tuple = expected if isinstance(expected, tuple) else (expected,)
 
     for global_work_queue in [True, False]:
         compiled_fn = megakittens.compile(fn, use_jit_cache=True, save_dag=False, save_schedule=False, verbose=False, global_work_queue=global_work_queue)
-        result = compiled_fn(*args)
+        result = compiled_fn(*_fresh(args))
         result_tuple = result if isinstance(result, tuple) else (result,)
 
         mode_str = "global_work_queue" if global_work_queue else "per_sm_queue"

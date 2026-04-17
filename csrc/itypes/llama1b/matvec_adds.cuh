@@ -7,7 +7,7 @@
 
 namespace megakittens {
 
-template <typename Config, typename Globals, int N, int SRC0, int SRC1, int DST>
+template <typename Config, typename Globals, int N, int SRC_RESIDUAL, int SRC0, int SRC1, int DST>
 struct MatVecAdds {
     struct parsed_instruction {
         int layer_idx, start_block_idx, end_block_idx, reduction_col_offset, iters;

@@ -298,7 +298,7 @@ def _schedule_o_proj(
             continue
         instructions.append(Instruction(
             icode=icode,
-            src_tensors=(T.ATTN_OUT, T.O_WEIGHTS),
+            src_tensors=(T.HIDDEN_STATES, T.ATTN_OUT, T.O_WEIGHTS),
             dst_tensors=(T.HIDDEN_STATES,),
             indices=(layer_idx, start, end, 0),
             src_barriers=(attn_red_barrier,),
@@ -360,7 +360,7 @@ def _schedule_downproj(
                 continue
             instructions.append(Instruction(
                 icode=icode,
-                src_tensors=(T.SILU_OUT, T.DOWN_WEIGHTS),
+                src_tensors=(T.HIDDEN_STATES, T.SILU_OUT, T.DOWN_WEIGHTS),
                 dst_tensors=(T.HIDDEN_STATES,),
                 indices=(layer_idx, start, end, col_offset),
                 src_barriers=(upgate_sub,),
@@ -468,7 +468,7 @@ def schedule_decode(
                                      T.POS_ID, T.RMS_NORM_EPS),
                         dst_tensors=(T.Q_POST_ROPE,)),
         InstructionMeta(icode=ICODE_O_PROJ, itype=_matvec_adds_itype,
-                        src_tensors=(T.ATTN_OUT, T.O_WEIGHTS),
+                        src_tensors=(T.HIDDEN_STATES, T.ATTN_OUT, T.O_WEIGHTS),
                         dst_tensors=(T.HIDDEN_STATES,)),
         InstructionMeta(icode=ICODE_UPGATE, itype=_rms_upgate_silu_itype,
                         src_tensors=(T.HIDDEN_STATES, T.MLP_NORM_WEIGHTS,
@@ -476,7 +476,7 @@ def schedule_decode(
                                      T.RMS_NORM_EPS),
                         dst_tensors=(T.SILU_OUT,)),
         InstructionMeta(icode=ICODE_DOWNPROJ, itype=_matvec_adds_itype,
-                        src_tensors=(T.SILU_OUT, T.DOWN_WEIGHTS),
+                        src_tensors=(T.HIDDEN_STATES, T.SILU_OUT, T.DOWN_WEIGHTS),
                         dst_tensors=(T.HIDDEN_STATES,)),
         InstructionMeta(icode=ICODE_LM_HEAD, itype=_rms_lm_head_itype,
                         src_tensors=(T.HIDDEN_STATES, T.LM_HEAD_NORM_WEIGHT,

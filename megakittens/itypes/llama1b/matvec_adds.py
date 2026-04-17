@@ -8,26 +8,26 @@ from ...schema.tensor import TensorMeta, TensorRange, TensorSpec
 from ...jit.pykittens import sv, st
 
 
-@torch.library.custom_op("megakittens::mat_vec_adds", mutates_args=())
+@torch.library.custom_op("megakittens::mat_vec_adds", mutates_args=("residual",))
 def matvec_adds_op(
+    residual: torch.Tensor,
     x: torch.Tensor,
     down_weights: torch.Tensor,
-) -> torch.Tensor:
-    return down_weights[0] @ x
+) -> None:
+    residual.add_(down_weights[0] @ x)
 
 
 @matvec_adds_op.register_fake
-def _matvec_adds_fake(x, down_weights):
-    out_dim = down_weights.shape[1]
-    return torch.empty(out_dim, dtype=x.dtype, device=x.device)
+def _matvec_adds_fake(residual, x, down_weights) -> None:
+    pass
 
 
 BLOCK_SIZE = 16
 
 
 def _resolve_mat_vec_adds(args, kwargs):
-    x = args[0].meta['val']
-    return MatVecAdds(n=x.shape[-1])
+    x = args[1].meta['val']
+    return MatVecAdds(n=x.shape[-1]), [1]
 
 
 class MatVecAdds(IType):
@@ -45,6 +45,11 @@ class MatVecAdds(IType):
     bench_cases = [
         ((2048,), (2048,)),
     ]
+
+    @staticmethod
+    def test_fn(residual, x, down_weights):
+        torch.ops.megakittens.mat_vec_adds(residual, x, down_weights)
+        return residual
 
     def __init__(self, n=0):
         self._n = n
@@ -68,17 +73,23 @@ class MatVecAdds(IType):
     @property
     def inputs(self) -> list[TensorSpec]:
         return [
-            TensorSpec(dtype=DType.bf16, granularity=(1,)),                          # activations
-            TensorSpec(dtype=DType.bf16, granularity=(1, 16, 512),                    # weights
+            TensorSpec(dtype=DType.bf16, granularity=(BLOCK_SIZE,),                    # residual
+                       tma_types=[sv(dtype=DType.bf16, length=BLOCK_SIZE)]),
+            TensorSpec(dtype=DType.bf16, granularity=(1,)),                            # activations
+            TensorSpec(dtype=DType.bf16, granularity=(1, 16, 512),                     # weights
                        tma_types=[st(dtype=DType.bf16, rows=16, cols=512)]),
         ]
 
     @property
     def outputs(self) -> list[TensorSpec]:
         return [
-            TensorSpec(dtype=DType.bf16, granularity=(16,),                            # output (store_add)
-                       tma_types=[sv(dtype=DType.bf16, length=16)]),
+            TensorSpec(dtype=DType.bf16, granularity=(BLOCK_SIZE,),                    # residual (store_add)
+                       tma_types=[sv(dtype=DType.bf16, length=BLOCK_SIZE)]),
         ]
+
+    @property
+    def inplace_mapping(self) -> dict[int, int]:
+        return {0: 0}
 
     def num_instructions(
         self,
@@ -105,17 +116,19 @@ class MatVecAdds(IType):
     def test_args(self, case):
         out_dim, = case
         n = self._n
+        residual = torch.randn(out_dim, dtype=torch.bfloat16, device="cuda")
         x = torch.randn(n, dtype=torch.bfloat16, device="cuda")
         down_weights = torch.randn(1, out_dim, n, dtype=torch.bfloat16, device="cuda")
-        return (x, down_weights)
+        return (residual, x, down_weights)
 
     def access_regions(self, block_index, src_metas, dst_metas):
         layer_idx, start_block, end_block, col_offset = block_index
         n = self._n
+        residual_region = ((start_block * BLOCK_SIZE, end_block * BLOCK_SIZE),)
         x_region = ((col_offset, col_offset + n),)
         w_region = ((layer_idx, layer_idx + 1), (start_block * BLOCK_SIZE, end_block * BLOCK_SIZE), (col_offset, col_offset + n))
         out_region = ((start_block * BLOCK_SIZE, end_block * BLOCK_SIZE),)
-        return [x_region, w_region], [out_region]
+        return [residual_region, x_region, w_region], [out_region]
 
     def validate(
         self,
@@ -125,7 +138,7 @@ class MatVecAdds(IType):
         dst_ranges: Tuple[TensorRange, ...],
     ) -> None:
         super().validate(src_metas, dst_metas, src_ranges, dst_ranges)
-        if src_metas[0].shape[-1] != self._n:
+        if src_metas[1].shape[-1] != self._n:
             raise RuntimeError(
-                f"[MegaKittens] {self.name}: expected n={self._n}, got {src_metas[0].shape[-1]}"
+                f"[MegaKittens] {self.name}: expected n={self._n}, got {src_metas[1].shape[-1]}"
             )
