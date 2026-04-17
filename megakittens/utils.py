@@ -54,6 +54,10 @@ def save_dag_as_png_as_json(
                     [node_index_by_id[in_node.id], input_slot]
                     for in_node, input_slot in node.in_nodes
                 ],
+                "in_ranges": [
+                    [[dim_range.start, dim_range.stop, dim_range.stride] for dim_range in tensor_range]
+                    for tensor_range in node.in_ranges
+                ],
                 "out_nodes": [
                     [node_index_by_id[out_node.id] for out_node in out_nodes]
                     for out_nodes in node.out_nodes
@@ -66,6 +70,10 @@ def save_dag_as_png_as_json(
                     }
                     for tensor in node.out_tensors
                 ],
+                "out_ranges": [
+                    [[dim_range.start, dim_range.stop, dim_range.stride] for dim_range in tensor_range]
+                    for tensor_range in node.out_ranges
+                ],
             }
             for idx, node in enumerate(dag.nodes)
         ],
@@ -76,6 +84,24 @@ def save_dag_as_png_as_json(
     json_path.write_text(json.dumps(dag_json, indent=2))
 
     return dag_json
+
+
+def format_range(range_triples: list[list[int]], shape: list[int]) -> str | None:
+    pad = len(range_triples) - len(shape)
+    parts: list[str] = []
+    is_full = True
+    for i, (start, stop, stride) in enumerate(range_triples):
+        if i < pad:
+            if (start, stop, stride) != (0, 1, 1):
+                is_full = False
+            continue
+        dim_size = shape[i - pad]
+        if (start, stop, stride) == (0, dim_size, 1):
+            parts.append(":")
+        else:
+            is_full = False
+            parts.append(f"{start}:{stop}" if stride == 1 else f"{start}:{stop}:{stride}")
+    return None if is_full else "[" + ", ".join(parts) + "]"
 
 
 def save_dag_as_png(
@@ -98,16 +124,20 @@ def save_dag_as_png(
     dot.attr("node", shape="record", style="filled", fillcolor="#e8e8e8", fontname="Menlo")
     dot.attr("edge", fontname="Menlo")
 
+    nodes_by_id = {node["id"]: node for node in dag_json["nodes"]}
+
     for node in dag_json["nodes"]:
         nid = str(node["id"])
         itype = node["itype"]
         op_line = f"Input[{node['input_index']}]" if itype == "input" else itype
         lines = [f"#{nid}", op_line]
-        for t in node["out_tensors"]:
+        for i, t in enumerate(node["out_tensors"]):
             shape_str = "\u00d7".join(str(d) for d in t["shape"])
             dev = t["device"]
             device_str = f"{dev['type']}:{dev['index']}" if dev["index"] is not None else dev["type"]
             lines.append(f"- {t['dtype'].upper()} [{shape_str}] {device_str.upper()}")
+            if format_range(node["out_ranges"][i], t["shape"]) is not None:
+                raise RuntimeError("[MegaKittens] Out range is not full, which is impossible currently")
         label = "\\n".join(lines)
 
         if itype == "input":
@@ -118,8 +148,11 @@ def save_dag_as_png(
             dot.node(nid, label=label, fillcolor="#a8c8d8")
 
     for node in dag_json["nodes"]:
-        for src_id, input_slot in node["in_nodes"]:
-            dot.edge(str(src_id), str(node["id"]), label=f" {input_slot} ")
+        for edge_i, (src_id, input_slot) in enumerate(node["in_nodes"]):
+            src_shape = nodes_by_id[src_id]["out_tensors"][input_slot]["shape"]
+            in_range_str = format_range(node["in_ranges"][edge_i], src_shape)
+            label = f" {input_slot} " if in_range_str is None else f" {input_slot}{in_range_str} "
+            dot.edge(str(src_id), str(node["id"]), label=label)
 
     base_path.parent.mkdir(parents=True, exist_ok=True)
     dot.render(filename=str(base_path) + ".graph", cleanup=True)

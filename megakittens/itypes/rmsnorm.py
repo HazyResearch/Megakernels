@@ -6,7 +6,7 @@ import torch
 from ..dispatcher import Dispatcher
 from ..schema.dtype import DType
 from ..schema.itype import IType
-from ..schema.tensor import TensorMeta, TensorSpec
+from ..schema.tensor import TensorMeta, TensorRange, TensorSpec
 from ..jit.pykittens import sv
 
 
@@ -102,36 +102,56 @@ class RMSNorm(IType):
             TensorSpec(dtype=DType.bf16, granularity=(1, 64)),
         ]
 
-    def block_indices(self, src_metas: Tuple[TensorMeta, ...], dst_metas: Tuple[TensorMeta, ...]) -> List[Tuple[int, ...]]:
-        shape = src_metas[0].shape
-        B, D, R, C = (1,) * (4 - len(shape)) + shape
-        rows_per_inst = _rows_per_inst(C)
+    def block_indices(
+        self,
+        src_metas: Tuple[TensorMeta, ...],
+        dst_metas: Tuple[TensorMeta, ...],
+        src_ranges: Tuple[TensorRange, ...],
+        dst_ranges: Tuple[TensorRange, ...],
+    ) -> List[Tuple[int, ...]]:
+        x_range = src_ranges[0]
+        y_range = dst_ranges[0]
+        rows_per_inst = _rows_per_inst(x_range[3].size)
         indices = []
-        for b in range(B):
-            for d in range(D):
+        for b in range(x_range[0].size):
+            for d in range(x_range[1].size):
                 r = 0
-                while r < R:
-                    n = min(rows_per_inst, R - r)
-                    indices.append((b, d, r, n))
+                while r < x_range[2].size:
+                    n = min(rows_per_inst, x_range[2].size - r)
+                    indices.append((
+                        x_range[0].start + b, x_range[1].start + d, x_range[2].start + r,
+                        y_range[0].start + b, y_range[1].start + d, y_range[2].start + r,
+                        n,
+                    ))
                     r += n
         return indices
 
-    def num_instructions(self, src_metas: Tuple[TensorMeta, ...], dst_metas: Tuple[TensorMeta, ...]) -> int:
-        shape = src_metas[0].shape
-        B, D, R, C = (1,) * (4 - len(shape)) + shape
-        return B * D * math.ceil(R / _rows_per_inst(C))
+    def num_instructions(
+        self,
+        src_metas: Tuple[TensorMeta, ...],
+        dst_metas: Tuple[TensorMeta, ...],
+        src_ranges: Tuple[TensorRange, ...],
+        dst_ranges: Tuple[TensorRange, ...],
+    ) -> int:
+        x_range = src_ranges[0]
+        return x_range[0].size * x_range[1].size * math.ceil(x_range[2].size / _rows_per_inst(x_range[3].size))
 
     def access_regions(self, block_index, src_metas, dst_metas):
-        b, d, r, n = block_index
+        b_x, d_x, r_x, b_y, d_y, r_y, n = block_index
         C = src_metas[0].shape[-1]
-        x_region = ((b, b + 1), (d, d + 1), (r, r + n), (0, C))
+        x_region = ((b_x, b_x + 1), (d_x, d_x + 1), (r_x, r_x + n), (0, C))
         w_region = ((0, C),)
-        y_region = ((b, b + 1), (d, d + 1), (r, r + n), (0, C))
+        y_region = ((b_y, b_y + 1), (d_y, d_y + 1), (r_y, r_y + n), (0, C))
         return [x_region, w_region], [y_region]
 
-    def validate(self, src_metas: Tuple[TensorMeta, ...], dst_metas: Tuple[TensorMeta, ...]) -> None:
-        super().validate(src_metas, dst_metas)
-
+    def validate(
+        self,
+        src_metas: Tuple[TensorMeta, ...],
+        dst_metas: Tuple[TensorMeta, ...],
+        src_ranges: Tuple[TensorRange, ...],
+        dst_ranges: Tuple[TensorRange, ...],
+    ) -> None:
+        super().validate(src_metas, dst_metas, src_ranges, dst_ranges)
         x_meta = src_metas[0]
         w_meta = src_metas[1]
         C = x_meta.shape[-1]
@@ -141,9 +161,29 @@ class RMSNorm(IType):
                 f"[MegaKittens] RMSNorm weight shape {w_meta.shape} doesn't match x last dim {C}"
             )
 
-        if dst_metas[0].shape != x_meta.shape:
+        x_range = src_ranges[0]
+        w_range = src_ranges[1]
+        y_range = dst_ranges[0]
+
+        if x_range[3].start != 0 or x_range[3].stop != C:
             raise RuntimeError(
-                f"[MegaKittens] RMSNorm output shape {dst_metas[0].shape} doesn't match input shape {x_meta.shape}"
+                f"[MegaKittens] RMSNorm requires full-C range on x, got "
+                f"[{x_range[3].start}, {x_range[3].stop}) against C={C}"
+            )
+        if y_range[3].start != 0 or y_range[3].stop != dst_metas[0].shape[-1]:
+            raise RuntimeError(
+                f"[MegaKittens] RMSNorm requires full-C range on y, got "
+                f"[{y_range[3].start}, {y_range[3].stop}) against C={dst_metas[0].shape[-1]}"
+            )
+        if not w_range.is_full(w_meta):
+            raise RuntimeError(
+                f"[MegaKittens] RMSNorm weight must be full-range, got "
+                f"[{w_range[0].start}, {w_range[0].stop}) against C={C}"
+            )
+        if x_range.effective_shape != y_range.effective_shape:
+            raise RuntimeError(
+                f"[MegaKittens] RMSNorm effective shape mismatch: "
+                f"x={x_range.effective_shape} y={y_range.effective_shape}"
             )
 
         # TMA sv constraint: length <= 256 OR (length * sizeof(dtype)) % 128 == 0

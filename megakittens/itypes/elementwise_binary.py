@@ -6,7 +6,7 @@ import torch
 from ..dispatcher import Dispatcher
 from ..schema.dtype import DType
 from ..schema.itype import IType
-from ..schema.tensor import TensorMeta, TensorSpec
+from ..schema.tensor import TensorMeta, TensorRange, TensorSpec
 from ..jit.pykittens import st
 
 
@@ -51,6 +51,7 @@ def _resolve_atan2(args, kwargs):
 
 
 class ElementwiseBinary(IType):
+    MAX_OPS = 1
     TILE_SIZE = 128
     MAX_TILES_PER_INST = 2
     TMA = st(dtype=DType.bf16, rows=128, cols=128)
@@ -98,16 +99,17 @@ class ElementwiseBinary(IType):
         for op in BINARY_OPS.keys()
         for shape in [(128, 128), (512, 1024), (1280, 2048), (2, 128, 256), (3, 512, 1024), (2, 3, 128, 256)]
     ] + [
-        ((ops,), shape)
-        for ops in [
-            ("add", "add"),                                         # 2 ops, 3 inputs
-            ("mul", "add"), ("sub", "div"), ("max", "min"),
-            ("add", "mul", "sub"),                                  # 3 ops, 4 inputs
-            ("add", "sub", "mul", "div"),                           # 4 ops, 5 inputs
-            ("add", "sub", "mul", "max", "min"),                    # 5 ops, 6 inputs
-            ("add", "sub", "mul", "div", "max", "min"),             # 6 ops, 7 inputs
-        ]
-        for shape in [(128, 128), (512, 1024), (1280, 2048), (2, 128, 256), (3, 512, 1024), (2, 3, 128, 256)]
+        # Disabled for now, as the current MAX_OPS is 1
+        # ((ops,), shape)
+        # for ops in [
+        #     ("add", "add"),                                         # 2 ops, 3 inputs
+        #     ("mul", "add"), ("sub", "div"), ("max", "min"),
+        #     ("add", "mul", "sub"),                                  # 3 ops, 4 inputs
+        #     ("add", "sub", "mul", "div"),                           # 4 ops, 5 inputs
+        #     ("add", "sub", "mul", "max", "min"),                    # 5 ops, 6 inputs
+        #     ("add", "sub", "mul", "div", "max", "min"),             # 6 ops, 7 inputs
+        # ]
+        # for shape in [(128, 128), (512, 1024), (1280, 2048), (2, 128, 256), (3, 512, 1024), (2, 3, 128, 256)]
     ]
     test_atol = 0.2
     test_rtol = 1e-2
@@ -155,40 +157,74 @@ class ElementwiseBinary(IType):
             TensorSpec(dtype=DType.bf16, granularity=(self.TILE_SIZE, self.TILE_SIZE), tma_types=[self.TMA]),
         ]
 
-    def block_indices(self, src_metas: Tuple[TensorMeta, ...], dst_metas: Tuple[TensorMeta, ...]) -> List[Tuple[int, ...]]:
-        B, D, _R, _C = (1,) * (4 - len(dst_metas[0].shape)) + dst_metas[0].shape
-        R = _R // self.TILE_SIZE
-        C = _C // self.TILE_SIZE
+    def block_indices(
+        self,
+        src_metas: Tuple[TensorMeta, ...],
+        dst_metas: Tuple[TensorMeta, ...],
+        src_ranges: Tuple[TensorRange, ...],
+        dst_ranges: Tuple[TensorRange, ...],
+    ) -> List[Tuple[int, ...]]:
+        dst_range = dst_ranges[0]
         indices = []
-        for b in range(B):
-            for d in range(D):
-                for r in range(R):
-                    for c in range(0, C, self.tiles_per_inst):
-                        n = min(self.tiles_per_inst, C - c)
-                        indices.append((b, d, r, c, n))
+        for b in range(dst_range[0].size):
+            for d in range(dst_range[1].size):
+                for r in range(dst_range[2].size // self.TILE_SIZE):
+                    for c in range(0, dst_range[3].size // self.TILE_SIZE, self.tiles_per_inst):
+                        n = min(self.tiles_per_inst, dst_range[3].size // self.TILE_SIZE - c)
+                        index: list[int] = []
+                        for src_range in src_ranges:
+                            index.extend([src_range[0].start + b, src_range[1].start + d, src_range[2].start // self.TILE_SIZE + r, src_range[3].start // self.TILE_SIZE + c])
+                        index.extend([dst_range[0].start + b, dst_range[1].start + d, dst_range[2].start // self.TILE_SIZE + r, dst_range[3].start // self.TILE_SIZE + c])
+                        index.append(n)
+                        indices.append(tuple(index))
         return indices
 
-    def num_instructions(self, src_metas: Tuple[TensorMeta, ...], dst_metas: Tuple[TensorMeta, ...]) -> int:
-        B, D, _R, _C = (1,) * (4 - len(dst_metas[0].shape)) + dst_metas[0].shape
-        R = _R // self.TILE_SIZE
-        C = _C // self.TILE_SIZE
-        return B * D * R * ((C + self.tiles_per_inst - 1) // self.tiles_per_inst)
+    def num_instructions(
+        self,
+        src_metas: Tuple[TensorMeta, ...],
+        dst_metas: Tuple[TensorMeta, ...],
+        src_ranges: Tuple[TensorRange, ...],
+        dst_ranges: Tuple[TensorRange, ...],
+    ) -> int:
+        dst_range = dst_ranges[0]
+        return dst_range[0].size * dst_range[1].size * (dst_range[2].size // self.TILE_SIZE) * ((dst_range[3].size // self.TILE_SIZE + self.tiles_per_inst - 1) // self.tiles_per_inst)
 
     def access_regions(self, block_index, src_metas, dst_metas):
-        b, d, r, c, n = block_index
-        region = ((b, b + 1), (d, d + 1),
-                  (r * self.TILE_SIZE, (r + 1) * self.TILE_SIZE),
-                  (c * self.TILE_SIZE, (c + n) * self.TILE_SIZE))
-        return [region] * self.num_inputs, [region]
+        n = block_index[-1]
+        src_regions = []
+        for i in range(self.num_inputs):
+            b_src, d_src, r_src, c_src = block_index[i * 4: i * 4 + 4]
+            src_regions.append((
+                (b_src, b_src + 1), (d_src, d_src + 1),
+                (r_src * self.TILE_SIZE, (r_src + 1) * self.TILE_SIZE),
+                (c_src * self.TILE_SIZE, (c_src + n) * self.TILE_SIZE),
+            ))
+        b_dst, d_dst, r_dst, c_dst = block_index[self.num_inputs * 4: self.num_inputs * 4 + 4]
+        dst_region = (
+            (b_dst, b_dst + 1), (d_dst, d_dst + 1),
+            (r_dst * self.TILE_SIZE, (r_dst + 1) * self.TILE_SIZE),
+            (c_dst * self.TILE_SIZE, (c_dst + n) * self.TILE_SIZE),
+        )
+        return src_regions, [dst_region]
 
-    def validate(self, src_metas: Tuple[TensorMeta, ...], dst_metas: Tuple[TensorMeta, ...]) -> None:
-        super().validate(src_metas, dst_metas)
+    def validate(
+        self,
+        src_metas: Tuple[TensorMeta, ...],
+        dst_metas: Tuple[TensorMeta, ...],
+        src_ranges: Tuple[TensorRange, ...],
+        dst_ranges: Tuple[TensorRange, ...],
+    ) -> None:
+        super().validate(src_metas, dst_metas, src_ranges, dst_ranges)
         for op in self.ops:
             if op not in self.BINARY_OPS:
                 raise RuntimeError(f"[MegaKittens] ElementwiseBinary: unknown op {op!r}")
-        shapes = [m.shape for m in src_metas]
-        if len(set(shapes)) > 1:
+        if len(self.ops) > self.MAX_OPS:
             raise RuntimeError(
-                f"[MegaKittens] ElementwiseBinary requires same-shape inputs, got {shapes}. "
-                f"Broadcasting is not supported."
+                f"[MegaKittens] ElementwiseBinary supports at most {self.MAX_OPS} op(s) with per-tensor indices, got {len(self.ops)}"
             )
+        for i, src_range in enumerate(src_ranges):
+            if src_range.effective_shape != dst_ranges[0].effective_shape:
+                raise RuntimeError(
+                    f"[MegaKittens] ElementwiseBinary effective shape mismatch at src {i}: "
+                    f"src={src_range.effective_shape} dst={dst_ranges[0].effective_shape}"
+                )

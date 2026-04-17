@@ -24,7 +24,7 @@ MAX_BARRIERS = 2**32 - 1
 MAX_TENSOR_ALLOCATIONS = 256
 
 
-def _get_instruction_count_and_offset(
+def get_instruction_count_and_offset(
     dag: DAG,
 ) -> Tuple[Dict[int, int], Dict[int, int]]:
     """Phase 1: Count instructions per node and compute cluster-aligned offsets.
@@ -52,14 +52,14 @@ def _get_instruction_count_and_offset(
                 f"[MegaKittens] Node has {len(node.out_tensors)} dst tensors (max {Instruction.MAX_DST_TENSORS})"
             )
         src_metas = tuple(in_node.out_tensors[slot_idx] for in_node, slot_idx in node.in_nodes)
-        count = node.itype.num_instructions(src_metas, node.out_tensors)
+        count = node.itype.num_instructions(src_metas, node.out_tensors, src_ranges=node.in_ranges, dst_ranges=node.out_ranges)
         node_inst_count[node.id] = count
         node_inst_offset[node.id] = cumulative_offset
         cumulative_offset += count + (-count) % Dispatcher.CLUSTER_SIZE  # CTA pairs must get same instruction type
     return node_inst_count, node_inst_offset
 
 
-def _assign_tensors(
+def assign_tensors(
     dag: DAG,
     node_inst_count: Dict[int, int],
     node_inst_offset: Dict[int, int],
@@ -87,17 +87,33 @@ def _assign_tensors(
     release_barriers: List[Tuple[List[int], int, int]] = []
 
     for node in dag.nodes:
+        if node.is_output:
+            if len(output_tensor_indices) != 0:
+                raise RuntimeError("[MegaKittens] Expected 1 output node")
+            output_tensor_indices.extend(tensor_index[(in_node.id, slot_idx)] for in_node, slot_idx in node.in_nodes)
+            continue  # no need to allocate tensors for the output node
+
+        inplace_mapping = node.itype.inplace_mapping if node.itype is not None else None
         for out_idx, tensor_meta in enumerate(node.out_tensors):
             reused = False
-            if not node.is_input and not node.is_output:
-                free_tensors = tensor_pool.get(tensor_meta, [])
-                for i, (consumer_node_ids, last_consumer_inst, num_consumer_insts, tid) in enumerate(free_tensors):
-                    if node_inst_offset[node.id] - last_consumer_inst >= get_sm_count():
-                        tensor_index[(node.id, out_idx)] = tid
-                        free_tensors.pop(i)
-                        release_barriers.append((consumer_node_ids, num_consumer_insts, node.id))
-                        reused = True
-                        break
+            if not node.is_input:
+                if inplace_mapping is not None and out_idx in inplace_mapping:
+                    in_node, in_slot = node.in_nodes[inplace_mapping[out_idx]]
+                    tensor_index[(node.id, out_idx)] = tensor_index[(in_node.id, in_slot)]
+                    reused = True
+                    other_consumer_ids = ([in_node.id] if not in_node.is_input else []) + [consumer.id for consumer in in_node.out_nodes[in_slot] if consumer.id != node.id and not consumer.is_output]
+                    if other_consumer_ids:
+                        num_other_consumer_insts = sum(node_inst_count[cid] for cid in other_consumer_ids)
+                        release_barriers.append((other_consumer_ids, num_other_consumer_insts, node.id))
+                else:
+                    free_tensors = tensor_pool.get(tensor_meta, [])
+                    for i, (consumer_node_ids, last_consumer_inst, num_consumer_insts, tid) in enumerate(free_tensors):
+                        if node_inst_offset[node.id] - last_consumer_inst >= get_sm_count():
+                            tensor_index[(node.id, out_idx)] = tid
+                            free_tensors.pop(i)
+                            release_barriers.append((consumer_node_ids, num_consumer_insts, node.id))
+                            reused = True
+                            break
 
             if not reused:
                 if len(tensor_metas) >= MAX_TENSOR_ALLOCATIONS:
@@ -110,6 +126,12 @@ def _assign_tensors(
             consumer_nodes = [node] + node.out_nodes[out_idx]
             if node.is_input or any(c.is_output for c in consumer_nodes):
                 continue
+            if any(  # if any consumer is in-place-mutating this, then don't put this to reuse pool
+                c.itype is not None and c.itype.inplace_mapping is not None and
+                any(c.in_nodes[c_in_idx][0].id == node.id and c.in_nodes[c_in_idx][1] == out_idx for c_in_idx in c.itype.inplace_mapping.values())
+                for c in node.out_nodes[out_idx]
+            ):
+                continue
             consumer_node_ids = [c.id for c in consumer_nodes]
             num_consumer_insts = sum(node_inst_count[cid] for cid in consumer_node_ids)
             last_consumer_inst = max(node_inst_offset[c.id] + node_inst_count[c.id] + (-node_inst_count[c.id]) % Dispatcher.CLUSTER_SIZE for c in consumer_nodes)
@@ -117,16 +139,9 @@ def _assign_tensors(
 
         if node.is_input:
             if len(node.out_tensors) != 1:
-                raise RuntimeError(
-                    f"[MegaKittens] Input node has {len(node.out_tensors)} outputs (expected 1)"
-                )
+                raise RuntimeError(f"[MegaKittens] Input node has {len(node.out_tensors)} outputs (expected 1)")
             input_tensor_indices.append(tensor_index[(node.id, 0)])
-        elif node.is_output:
-            if len(output_tensor_indices) != 0:
-                raise RuntimeError("[MegaKittens] Expected 1 output node")
-            output_tensor_indices.extend(
-                tensor_index[(in_node.id, slot_idx)] for in_node, slot_idx in node.in_nodes
-            )
+
     if not input_tensor_indices:
         raise RuntimeError("[MegaKittens] Graph has no input tensors")
     if not output_tensor_indices:
@@ -135,7 +150,7 @@ def _assign_tensors(
     return tensor_metas, tensor_index, input_tensor_indices, output_tensor_indices, release_barriers
 
 
-def _assign_barriers(
+def assign_barriers(
     dag: DAG,
     node_inst_count: Dict[int, int],
     release_barriers: List[Tuple[List[int], int, int]],
@@ -171,7 +186,7 @@ def _assign_barriers(
         if node.is_input or node.is_output:
             continue
         src_metas = tuple(in_node.out_tensors[slot_idx] for in_node, slot_idx in node.in_nodes)
-        block_indices = node.itype.block_indices(src_metas, node.out_tensors)
+        block_indices = node.itype.block_indices(src_metas, node.out_tensors, src_ranges=node.in_ranges, dst_ranges=node.out_ranges)
         node_block_indices[node.id] = block_indices
         node_regions[node.id] = [
             node.itype.access_regions(block_index, src_metas, node.out_tensors)
@@ -263,7 +278,7 @@ def _assign_barriers(
     return node_block_indices, inst_dst_barriers, inst_src_barriers, inst_num_input_barriers, inst_num_reuse_barriers, barrier_counter
 
 
-def _generate_instructions(
+def generate_instructions(
     dag: DAG,
     tensor_index: Dict[Tuple[int, int], int],
     node_block_indices: Dict[int, list],
@@ -310,7 +325,7 @@ def _generate_instructions(
 
         src_metas = tuple(in_node.out_tensors[slot_idx] for in_node, slot_idx in node.in_nodes)
         dst_metas = node.out_tensors
-        node.itype.validate(src_metas, dst_metas)
+        node.itype.validate(src_metas, dst_metas, src_ranges=node.in_ranges, dst_ranges=node.out_ranges)
 
         key = (node.itype, src_tensors, dst_tensors)
         if key not in icode_map:
@@ -366,13 +381,13 @@ def schedule(
         - output_tensor_indices: Tuple[int, ...], tensor_metas indices for graph outputs, in order.
     """
     with timed("[Scheduler] Counted instructions and offsets", verbose):
-        node_inst_count, node_inst_offset = _get_instruction_count_and_offset(dag)
+        node_inst_count, node_inst_offset = get_instruction_count_and_offset(dag)
     with timed("[Scheduler] Assigned tensors", verbose):
-        tensor_metas, tensor_index, input_tensor_indices, output_tensor_indices, release_barriers = _assign_tensors(dag, node_inst_count, node_inst_offset)
+        tensor_metas, tensor_index, input_tensor_indices, output_tensor_indices, release_barriers = assign_tensors(dag, node_inst_count, node_inst_offset)
     with timed("[Scheduler] Assigned barriers", verbose):
-        node_block_indices, inst_dst_barriers, inst_src_barriers, inst_num_input_barriers, inst_num_reuse_barriers, barrier_counter = _assign_barriers(dag, node_inst_count, release_barriers)
+        node_block_indices, inst_dst_barriers, inst_src_barriers, inst_num_input_barriers, inst_num_reuse_barriers, barrier_counter = assign_barriers(dag, node_inst_count, release_barriers)
     with timed("[Scheduler] Generated instructions", verbose):
-        instruction_metas, instructions = _generate_instructions(dag, tensor_index, node_block_indices, inst_dst_barriers, inst_src_barriers, inst_num_input_barriers, inst_num_reuse_barriers)
+        instruction_metas, instructions = generate_instructions(dag, tensor_index, node_block_indices, inst_dst_barriers, inst_src_barriers, inst_num_input_barriers, inst_num_reuse_barriers)
 
     return (
         instruction_metas,

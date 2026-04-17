@@ -10,6 +10,8 @@ pytest
 
 Tests disable JIT file cache (`use_jit_cache=False`) so they always recompile.
 
+Test files must not depend on `pytest` at import time, but must still be runnable under `pytest`. Guard any `pytest`-only decorators (e.g. `pytest.mark.parametrize`) behind `try: import pytest / except ImportError: pass`, and include an `if __name__ == "__main__":` block so the file is runnable as a plain Python script.
+
 ## Adding a new instruction type
 
 Two files:
@@ -44,6 +46,7 @@ Two files:
 - Tensor indices on instruction types are compile-time template params (e.g. `ElementwiseBinary<MKConfig, MKGlobals, BinaryOps<BinaryOp::ADD>, 0, 1, 2>`), not read from the instruction at runtime.
 - `gls<I>()` on `MKGlobals` is a JIT-generated `if constexpr` chain returning the actual typed gl member. Each tensor keeps its original gl type (dtype, shape, TMA descriptors).
 - `tensor_to_gl` left-pads tensor shapes to 4D: `(M, N)` → `(1, 1, M, N)`, `(B, M, N)` → `(1, B, M, N)`. The gl is always `gl<dtype, -1, -1, -1, -1>` for data tensors.
+- Tensor ranges are absolute half-open slices of the backing tensor. `Node` requires `in_ranges` and `out_ranges` as concrete `Tuple[TensorRange, ...]`, one per `in_nodes` / `out_tensors` entry. Callers must pass `TensorMeta.full_range` explicitly where the whole tensor is intended. `block_indices` emits one instruction per tile in the effective range with absolute per-tensor coordinates into the backing tensor; `access_regions` likewise must return absolute backing-tensor regions for dependency barriers.
 - `aot_autograd` flattens user inputs (including `list[Tensor]`) into individual tensors via pytree. String/scalar args (except for ints and floats, which become tensors) become graph constants. The dispatcher only sees flat tensors at runtime.
 - Cross-SM barriers use global memory atomics. Source barriers check `target > 0` (unused targets are 0). Destination barriers use `0xFF` padding for unused slots.
 - `compile_source_to_cubin` has both an in-memory `@functools.cache` and a file-backed cache (`~/.cache/megakittens/cubin/`). Pass `use_jit_cache=False` to skip file cache; in-memory cache still applies per-process.

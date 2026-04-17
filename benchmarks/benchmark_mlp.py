@@ -6,12 +6,12 @@ NUM_LAYERS = 3
 
 
 def mlp(
-    x: torch.Tensor, 
-    Ws: list[torch.Tensor],
-    bs: list[torch.Tensor],
+    x: torch.Tensor,
+    W: torch.Tensor,
+    b: torch.Tensor,
 ) -> torch.Tensor:
     for i in range(NUM_LAYERS):
-        x = torch.relu(x @ Ws[i] + bs[i])
+        x = torch.relu(x @ W[i] + b[i])
     return x
 
 
@@ -26,13 +26,11 @@ def benchmark_mlp() -> None:
         (16384, 4096),
         (16384, 8192),
     ]:
-        args = (torch.randn(M, H, dtype=torch.bfloat16, device="cuda"), [], [])
-        for _ in range(NUM_LAYERS):
-            args[1].append(torch.randn(H, H, dtype=torch.bfloat16, device="cuda"))
-            args[2].append(torch.randn(H, dtype=torch.bfloat16, device="cuda").unsqueeze(0).expand(M, H).contiguous())
+        x = torch.randn(M, H, dtype=torch.bfloat16, device="cuda")
+        W = torch.randn(NUM_LAYERS, H, H, dtype=torch.bfloat16, device="cuda")
+        b = torch.randn(NUM_LAYERS, M, H, dtype=torch.bfloat16, device="cuda")
 
-        mk_ms, pt_ms = benchmark(mlp, args)
-
+        mk_ms, pt_ms = benchmark(mlp, (x, W, b))
         print(f"  ({M:>5},{H:>5})  {mk_ms*1000:>10.2f}  {pt_ms*1000:>10.2f}  {pt_ms/mk_ms:>6.2f}x")
 
 

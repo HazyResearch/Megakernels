@@ -5,7 +5,7 @@ import torch
 
 from ..schema.dtype import DType
 from ..schema.itype import IType
-from ..schema.tensor import TensorMeta, TensorSpec
+from ..schema.tensor import TensorMeta, TensorRange, TensorSpec
 from ..jit.pykittens import st
 
 
@@ -92,50 +92,85 @@ class Gemm(IType):
             tiles.append((row_idx, col_idx))
         return tiles
 
-    def block_indices(self, src_metas: Tuple[TensorMeta, ...], dst_metas: Tuple[TensorMeta, ...]) -> List[Tuple[int, ...]]:
-        B, D, _R, _K = (1,) * (4 - len(src_metas[0].shape)) + src_metas[0].shape
-        R = _R // self.TILE_M
-        C = src_metas[1].shape[-1] // self.TILE_N
+    def block_indices(
+        self,
+        src_metas: Tuple[TensorMeta, ...],
+        dst_metas: Tuple[TensorMeta, ...],
+        src_ranges: Tuple[TensorRange, ...],
+        dst_ranges: Tuple[TensorRange, ...],
+    ) -> List[Tuple[int, ...]]:
+        A_range = src_ranges[0]
+        B_range = src_ranges[1]
+        D_range = dst_ranges[0]
         indices = []
-        for b in range(B):
-            for d in range(D):
-                for r, c in self._swizzled_tile_order(R, C, self.SUPERGROUP_SIZE):
-                    indices.append((b, d, r, c))
-                    indices.append((b, d, r, c))  # duplicate for CTA 1
+        for b in range(D_range[0].size):
+            for d in range(D_range[1].size):
+                for r, c in self._swizzled_tile_order(
+                    D_range[2].size // self.TILE_M, D_range[3].size // self.TILE_N, self.SUPERGROUP_SIZE
+                ):
+                    index = (
+                        A_range[0].start + b, A_range[1].start + d, A_range[2].start // self.TILE_M + r,
+                        B_range[0].start + b, B_range[1].start + d, B_range[3].start // self.TILE_N + c,
+                        D_range[0].start + b, D_range[1].start + d, D_range[2].start // self.TILE_M + r, D_range[3].start // self.TILE_N + c,
+                    )
+                    indices.append(index)
+                    indices.append(index)  # duplicate for CTA 1
         return indices
 
-    def num_instructions(self, src_metas: Tuple[TensorMeta, ...], dst_metas: Tuple[TensorMeta, ...]) -> int:
-        B, D, _R, _K = (1,) * (4 - len(src_metas[0].shape)) + src_metas[0].shape
-        R = _R // self.TILE_M
-        C = src_metas[1].shape[-1] // self.TILE_N
-        return B * D * R * C * 2
+    def num_instructions(
+        self,
+        src_metas: Tuple[TensorMeta, ...],
+        dst_metas: Tuple[TensorMeta, ...],
+        src_ranges: Tuple[TensorRange, ...],
+        dst_ranges: Tuple[TensorRange, ...],
+    ) -> int:
+        D_range = dst_ranges[0]
+        return D_range[0].size * D_range[1].size * (D_range[2].size // self.TILE_M) * (D_range[3].size // self.TILE_N) * 2
 
     def access_regions(self, block_index, src_metas, dst_metas):
-        b, d, r, c = block_index
+        b_A, d_A, r_A, b_B, d_B, c_B, b_D, d_D, r_D, c_D = block_index
         K = src_metas[0].shape[-1]
-        a_region = ((b, b + 1), (d, d + 1), (r * self.TILE_M, (r + 1) * self.TILE_M), (0, K))
-        b_region = ((b, b + 1), (d, d + 1), (0, K), (c * self.TILE_N, (c + 1) * self.TILE_N))
-        d_region = ((b, b + 1), (d, d + 1), (r * self.TILE_M, (r + 1) * self.TILE_M), (c * self.TILE_N, (c + 1) * self.TILE_N))
+        a_region = ((b_A, b_A + 1), (d_A, d_A + 1), (r_A * self.TILE_M, (r_A + 1) * self.TILE_M), (0, K))
+        b_region = ((b_B, b_B + 1), (d_B, d_B + 1), (0, K), (c_B * self.TILE_N, (c_B + 1) * self.TILE_N))
+        d_region = ((b_D, b_D + 1), (d_D, d_D + 1), (r_D * self.TILE_M, (r_D + 1) * self.TILE_M), (c_D * self.TILE_N, (c_D + 1) * self.TILE_N))
         return [a_region, b_region], [d_region]
 
-    def validate(self, src_metas: Tuple[TensorMeta, ...], dst_metas: Tuple[TensorMeta, ...]) -> None:
-        super().validate(src_metas, dst_metas)
-        A_shape = src_metas[0].shape
-        B_shape = src_metas[1].shape
-        C_shape = dst_metas[0].shape
-        if A_shape[:-2] != B_shape[:-2]:
+    def validate(
+        self,
+        src_metas: Tuple[TensorMeta, ...],
+        dst_metas: Tuple[TensorMeta, ...],
+        src_ranges: Tuple[TensorRange, ...],
+        dst_ranges: Tuple[TensorRange, ...],
+    ) -> None:
+        super().validate(src_metas, dst_metas, src_ranges, dst_ranges)
+        A_range = src_ranges[0]
+        B_range = src_ranges[1]
+        D_range = dst_ranges[0]
+        K = src_metas[0].shape[-1]
+        if A_range[3].start != 0 or A_range[3].stop != K:
             raise RuntimeError(
-                f"[MegaKittens] Gemm outer dims mismatch: A has {A_shape[:-2]}, B has {B_shape[:-2]}"
+                f"[MegaKittens] Gemm requires full-K range on A, got "
+                f"[{A_range[3].start}, {A_range[3].stop}) against K={K}"
             )
-        if A_shape[-1] != B_shape[-2]:
+        if B_range[2].start != 0 or B_range[2].stop != K:
             raise RuntimeError(
-                f"[MegaKittens] Gemm K-dim mismatch: A has K={A_shape[-1]}, B has K={B_shape[-2]}"
+                f"[MegaKittens] Gemm requires full-K range on B, got "
+                f"[{B_range[2].start}, {B_range[2].stop}) against K={K}"
             )
-        if A_shape[-1] % self.TILE_K != 0:
+
+        A_effective_shape = A_range.effective_shape
+        B_effective_shape = B_range.effective_shape
+        D_effective_shape = D_range.effective_shape
+        if A_effective_shape[:-2] != B_effective_shape[:-2] or A_effective_shape[:-2] != D_effective_shape[:-2]:
             raise RuntimeError(
-                f"[MegaKittens] Gemm requires K ({A_shape[-1]}) to be a multiple of {self.TILE_K}"
+                f"[MegaKittens] Gemm outer effective-dim mismatch: "
+                f"A={A_effective_shape[:-2]} B={B_effective_shape[:-2]} D={D_effective_shape[:-2]}"
             )
-        if C_shape[-2:] != (A_shape[-2], B_shape[-1]):
+        if A_effective_shape[-2] != D_effective_shape[-2]:
             raise RuntimeError(
-                f"[MegaKittens] Gemm output shape mismatch: expected ({A_shape[-2]}, {B_shape[-1]}), got {C_shape[-2:]}"
+                f"[MegaKittens] Gemm effective M mismatch: A={A_effective_shape[-2]} D={D_effective_shape[-2]}"
+            )
+        if B_effective_shape[-1] != D_effective_shape[-1]:
+            raise RuntimeError(
+                f"[MegaKittens] Gemm effective N mismatch: B={B_effective_shape[-1]} D={D_effective_shape[-1]}"
             )

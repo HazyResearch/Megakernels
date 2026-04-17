@@ -6,7 +6,7 @@ from typing import List, Tuple
 from pydantic import BaseModel, NonNegativeInt
 
 from .itype import IType
-from .tensor import TensorMeta
+from .tensor import TensorMeta, TensorRange
 
 
 class Node(BaseModel):
@@ -16,14 +16,18 @@ class Node(BaseModel):
     model_config = {"arbitrary_types_allowed": True}
     is_input: bool = False
     is_output: bool = False  # There should be only 1 output node
+
     itype: IType | None = None  # None if input/output
-    in_nodes: Tuple[Tuple[Node, NonNegativeInt], ...]
+
+    in_nodes: Tuple[Tuple[Node, NonNegativeInt], ...]  # [[source_node, output_slot_idx], ...]
+    in_ranges: Tuple[TensorRange, ...]
     out_tensors: Tuple[TensorMeta, ...]
-    out_nodes: Tuple[List[Node], ...]
+    out_ranges: Tuple[TensorRange, ...]
+    out_nodes: Tuple[List[Node], ...]  # [[destination_node, ...], ...]
 
     # Op-specific fields
-    input_index: int | None = None  # None if not an input
     # TODO: support default values
+    input_index: int | None = None  # None if not an input
 
     # Unique identifier for this node
     id: int = 0
@@ -91,6 +95,30 @@ class DAG:
                 raise RuntimeError(
                     f"[MegaKittens] Node arity mismatch: out_nodes={len(node.out_nodes)} out_tensors={len(node.out_tensors)}"
                 )
+            if len(node.in_ranges) != len(node.in_nodes):
+                raise RuntimeError(
+                    f"[MegaKittens] Node arity mismatch: in_ranges={len(node.in_ranges)} in_nodes={len(node.in_nodes)}"
+                )
+            if len(node.out_ranges) != len(node.out_tensors):
+                raise RuntimeError(
+                    f"[MegaKittens] Node arity mismatch: out_ranges={len(node.out_ranges)} out_tensors={len(node.out_tensors)}"
+                )
+            for label, edges in [("in_node", list(zip(node.in_nodes, node.in_ranges))), ("out_tensor", list(zip(node.out_tensors, node.out_ranges)))]:
+                for i, (src, range) in enumerate(edges):
+                    src_shape = src[0].out_tensors[src[1]].shape if label == "in_node" else src.shape
+                    pad = len(range) - len(src_shape)
+                    for d, dim_range in enumerate(range.ranges[:pad]):
+                        if dim_range.start != 0 or dim_range.stop != 1 or dim_range.stride != 1:
+                            raise RuntimeError(
+                                f"[MegaKittens] Range dim {d} ({dim_range.start}, {dim_range.stop}, {dim_range.stride}) "
+                                f"is outside tensor shape {src_shape} and must be (0, 1, 1) for {label} {i}"
+                            )
+                    for d, (dim_range, dim_size) in enumerate(zip(range.ranges[pad:], src_shape)):
+                        if dim_range.stop > dim_size:
+                            raise RuntimeError(
+                                f"[MegaKittens] Range dim {pad + d} stop ({dim_range.stop}) > tensor dim ({dim_size}) "
+                                f"for {label} {i}"
+                            )
 
         input_nodes = [node for node in self.nodes if node.is_input]
         output_nodes = [node for node in self.nodes if node.is_output]
