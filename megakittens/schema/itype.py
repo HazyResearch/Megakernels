@@ -202,6 +202,11 @@ class IType(ABC):
         Returns (src_regions, dst_regions); one tuple of (start, end) ranges per tensor."""
         ...
 
+    @property
+    def inplace_mapping(self) -> dict[int, int] | None:
+        """Maps output_idx -> input_idx for in-place aliasing. None (default) means not an in-place operation."""
+        return None
+
     @classmethod
     def from_torch(cls, target: Callable | str | type, args=(), kwargs={}) -> "IType | tuple[IType, list[int]]":
         if isinstance(target, str):

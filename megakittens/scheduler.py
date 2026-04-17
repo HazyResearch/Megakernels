@@ -93,17 +93,23 @@ def assign_tensors(
             output_tensor_indices.extend(tensor_index[(in_node.id, slot_idx)] for in_node, slot_idx in node.in_nodes)
             continue  # no need to allocate tensors for the output node
 
+        inplace_mapping = node.itype.inplace_mapping if node.itype is not None else None
         for out_idx, tensor_meta in enumerate(node.out_tensors):
             reused = False
             if not node.is_input:
-                free_tensors = tensor_pool.get(tensor_meta, [])
-                for i, (consumer_node_ids, last_consumer_inst, num_consumer_insts, tid) in enumerate(free_tensors):
-                    if node_inst_offset[node.id] - last_consumer_inst >= get_sm_count():
-                        tensor_index[(node.id, out_idx)] = tid
-                        free_tensors.pop(i)
-                        release_barriers.append((consumer_node_ids, num_consumer_insts, node.id))
-                        reused = True
-                        break
+                if inplace_mapping is not None and out_idx in inplace_mapping:
+                    in_node, in_slot = node.in_nodes[inplace_mapping[out_idx]]
+                    tensor_index[(node.id, out_idx)] = tensor_index[(in_node.id, in_slot)]
+                    reused = True
+                else:
+                    free_tensors = tensor_pool.get(tensor_meta, [])
+                    for i, (consumer_node_ids, last_consumer_inst, num_consumer_insts, tid) in enumerate(free_tensors):
+                        if node_inst_offset[node.id] - last_consumer_inst >= get_sm_count():
+                            tensor_index[(node.id, out_idx)] = tid
+                            free_tensors.pop(i)
+                            release_barriers.append((consumer_node_ids, num_consumer_insts, node.id))
+                            reused = True
+                            break
 
             if not reused:
                 if len(tensor_metas) >= MAX_TENSOR_ALLOCATIONS:
@@ -116,6 +122,8 @@ def assign_tensors(
             consumer_nodes = [node] + node.out_nodes[out_idx]
             if node.is_input or any(c.is_output for c in consumer_nodes):
                 continue
+            if inplace_mapping is not None and out_idx in inplace_mapping:
+                continue  # in-place outputs share storage with an input; don't add a duplicate pool entry
             consumer_node_ids = [c.id for c in consumer_nodes]
             num_consumer_insts = sum(node_inst_count[cid] for cid in consumer_node_ids)
             last_consumer_inst = max(node_inst_offset[c.id] + node_inst_count[c.id] + (-node_inst_count[c.id]) % Dispatcher.CLUSTER_SIZE for c in consumer_nodes)

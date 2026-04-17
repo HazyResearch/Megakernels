@@ -5,6 +5,7 @@ from collections.abc import Iterable
 from typing import Any, Dict, List
 
 import torch
+from torch._higher_order_ops.auto_functionalize import auto_functionalized_v2
 from torch.fx.passes.shape_prop import TensorMetadata
 
 from .schema.dag import DAG, Node
@@ -37,30 +38,76 @@ def prune_fx_graph(fx_nodes: Iterable[torch.fx.Node]) -> list[torch.fx.Node]:
     ]
 
 
-def convert_fx_node_to_itype(gm: torch.fx.GraphModule, node: torch.fx.Node) -> tuple[IType, list[int]]:
-    if node.op == "call_function":
-        target = node.target
-    elif node.op == "call_method":
-        target = node.target
+def unwrap_auto_functionalized_v2(node: torch.fx.Node) -> tuple[Any, list, list[torch.fx.Node]]:
+    """Unwrap a torch ``auto_functionalized_v2`` FX node back to the underlying op's call."""
+    underlying_fx_node = node.args[0]
+    canonical_args = underlying_fx_node._schema.arguments
+    mutated_args = list(node.kwargs.get("_all_bases", []))
+
+    reconstructed_args: list = []          # structure-preserved list of input FX nodes
+    input_nodes: list[torch.fx.Node] = []  # flattened list of input FX nodes
+    for canonical_arg in canonical_args:
+        base_index_key = f"_{canonical_arg.name}_base_index"
+        length_key = f"_{canonical_arg.name}_length"
+        if base_index_key in node.kwargs:  # case 1. mutated arg is a standalone tensor
+            input_node = mutated_args[node.kwargs[base_index_key]]
+            reconstructed_args.append(input_node)
+            input_nodes.append(input_node)
+        elif length_key in node.kwargs:    # case 2. mutated arg is an iterable of tensors
+            length = node.kwargs[length_key]
+            input_node_list: list[torch.fx.Node] = []
+            for i in range(length):
+                input_node = mutated_args[node.kwargs[f"_{canonical_arg.name}_{i}_base_index"]]
+                input_nodes.append(input_node)
+                input_node_list.append(input_node)
+            reconstructed_args.append(input_node_list)
+        elif canonical_arg.name in node.kwargs:  # case 3. arg is a plain tensor, not mutated
+            val = node.kwargs[canonical_arg.name]
+            reconstructed_args.append(val)
+            if isinstance(val, torch.fx.Node):
+                input_nodes.append(val)
+            elif isinstance(val, (list, tuple)):
+                for v in val:
+                    if not isinstance(v, torch.fx.Node):
+                        raise RuntimeError("[MegaKittens] Invalid auto_functionalized_v2 argument")
+                    input_nodes.append(v)
+            else:
+                raise RuntimeError("[MegaKittens] Invalid auto_functionalized_v2 argument")
+        else:
+            raise RuntimeError("[MegaKittens] Invalid auto_functionalized_v2 argument")
+
+    return underlying_fx_node, reconstructed_args, input_nodes
+
+
+def handle_call_fx_node(gm: torch.fx.GraphModule, node: torch.fx.Node) -> tuple[IType, list[int], list[torch.fx.Node]]:
+    if node.op == "call_function" and node.target is auto_functionalized_v2:
+        target, args, input_fx_nodes = unwrap_auto_functionalized_v2(node)
+        kwargs = {}
+    elif node.op in {"call_function", "call_method"}:
+        target, args, kwargs = node.target, node.args, node.kwargs
+        input_fx_nodes = list(node.all_input_nodes)
     elif node.op == "call_module":
         try:
             target = type(gm.get_submodule(node.target))
         except Exception:
             raise RuntimeError(f"[MegaKittens] Invalid call_module node '{node.name}' target={node.target!r}")
+        args, kwargs = node.args, node.kwargs
+        input_fx_nodes = list(node.all_input_nodes)
     else:
         raise RuntimeError(f"[MegaKittens] Node op '{node.op}' for node '{node.name}' cannot be converted to an IType")
 
-    result = IType.from_torch(target, args=node.args, kwargs=node.kwargs)
+    result = IType.from_torch(target, args=args, kwargs=kwargs)
 
     if isinstance(result, tuple):
         itype, aten_output_indices = result
         if not isinstance(itype, IType) or not isinstance(aten_output_indices, list):
             raise RuntimeError(f"[MegaKittens] Invalid resolver result for node '{node.name}': {result!r}")
-        return itype, aten_output_indices
     else:
         if not isinstance(result, IType):
             raise RuntimeError(f"[MegaKittens] Invalid resolve result for node '{node.name}': expected IType, got {type(result).__name__}")
-        return result, []
+        itype, aten_output_indices = result, []
+
+    return itype, aten_output_indices, input_fx_nodes
 
 
 def extract_fx_node_outputs(node: torch.fx.Node, aten_output_indices: list[int] = []) -> tuple[TensorMeta, ...]:
@@ -333,8 +380,7 @@ def trace(gm: torch.fx.GraphModule, example_inputs: List[Any]) -> DAG:
             out_tensors = (TensorMeta.from_torch(attr),)
 
         elif fx_node.op in {"call_function", "call_module", "call_method"}:
-            itype, aten_output_indices = convert_fx_node_to_itype(gm, fx_node)
-            input_fx_nodes = fx_node.all_input_nodes
+            itype, aten_output_indices, input_fx_nodes = handle_call_fx_node(gm, fx_node)
             out_tensors = extract_fx_node_outputs(fx_node, aten_output_indices=aten_output_indices)
             if aten_output_indices:
                 output_idx_map[fx_node.name] = {aten_idx: itype_idx for itype_idx, aten_idx in enumerate(aten_output_indices)}
