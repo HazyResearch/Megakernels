@@ -101,6 +101,10 @@ def assign_tensors(
                     in_node, in_slot = node.in_nodes[inplace_mapping[out_idx]]
                     tensor_index[(node.id, out_idx)] = tensor_index[(in_node.id, in_slot)]
                     reused = True
+                    other_consumer_ids = ([in_node.id] if not in_node.is_input else []) + [consumer.id for consumer in in_node.out_nodes[in_slot] if consumer.id != node.id and not consumer.is_output]
+                    if other_consumer_ids:
+                        num_other_consumer_insts = sum(node_inst_count[cid] for cid in other_consumer_ids)
+                        release_barriers.append((other_consumer_ids, num_other_consumer_insts, node.id))
                 else:
                     free_tensors = tensor_pool.get(tensor_meta, [])
                     for i, (consumer_node_ids, last_consumer_inst, num_consumer_insts, tid) in enumerate(free_tensors):
@@ -122,8 +126,12 @@ def assign_tensors(
             consumer_nodes = [node] + node.out_nodes[out_idx]
             if node.is_input or any(c.is_output for c in consumer_nodes):
                 continue
-            if inplace_mapping is not None and out_idx in inplace_mapping:
-                continue  # in-place outputs share storage with an input; don't add a duplicate pool entry
+            if any(  # if any consumer is in-place-mutating this, then don't put this to reuse pool
+                c.itype is not None and c.itype.inplace_mapping is not None and
+                any(c.in_nodes[c_in_idx][0].id == node.id and c.in_nodes[c_in_idx][1] == out_idx for c_in_idx in c.itype.inplace_mapping.values())
+                for c in node.out_nodes[out_idx]
+            ):
+                continue
             consumer_node_ids = [c.id for c in consumer_nodes]
             num_consumer_insts = sum(node_inst_count[cid] for cid in consumer_node_ids)
             last_consumer_inst = max(node_inst_offset[c.id] + node_inst_count[c.id] + (-node_inst_count[c.id]) % Dispatcher.CLUSTER_SIZE for c in consumer_nodes)
