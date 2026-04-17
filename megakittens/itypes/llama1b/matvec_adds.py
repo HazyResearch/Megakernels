@@ -1,8 +1,10 @@
+from typing import List, Tuple
+
 import torch
 
 from ...schema.dtype import DType
 from ...schema.itype import IType
-from ...schema.tensor import TensorSpec
+from ...schema.tensor import TensorMeta, TensorRange, TensorSpec
 from ...jit.pykittens import sv, st
 
 
@@ -78,14 +80,27 @@ class MatVecAdds(IType):
                        tma_types=[sv(dtype=DType.bf16, length=16)]),
         ]
 
-    def num_instructions(self, src_metas, dst_metas):
-        out_dim = dst_metas[0].shape[0]
-        return out_dim // BLOCK_SIZE
+    def num_instructions(
+        self,
+        src_metas: Tuple[TensorMeta, ...],
+        dst_metas: Tuple[TensorMeta, ...],
+        src_ranges: Tuple[TensorRange, ...],
+        dst_ranges: Tuple[TensorRange, ...],
+    ) -> int:
+        out_range = dst_ranges[0]
+        return out_range[-1].size // BLOCK_SIZE
 
-    def block_indices(self, src_metas, dst_metas):
-        out_dim = dst_metas[0].shape[0]
-        num_blocks = out_dim // BLOCK_SIZE
-        return [(0, b, b + 1, 0) for b in range(num_blocks)]
+    def block_indices(
+        self,
+        src_metas: Tuple[TensorMeta, ...],
+        dst_metas: Tuple[TensorMeta, ...],
+        src_ranges: Tuple[TensorRange, ...],
+        dst_ranges: Tuple[TensorRange, ...],
+    ) -> List[Tuple[int, ...]]:
+        out_range = dst_ranges[0]
+        block_start = out_range[-1].start // BLOCK_SIZE
+        block_stop = out_range[-1].stop // BLOCK_SIZE
+        return [(0, b, b + 1, 0) for b in range(block_start, block_stop)]
 
     def test_args(self, case):
         out_dim, = case
@@ -102,8 +117,14 @@ class MatVecAdds(IType):
         out_region = ((start_block * BLOCK_SIZE, end_block * BLOCK_SIZE),)
         return [x_region, w_region], [out_region]
 
-    def validate(self, src_metas, dst_metas):
-        super().validate(src_metas, dst_metas)
+    def validate(
+        self,
+        src_metas: Tuple[TensorMeta, ...],
+        dst_metas: Tuple[TensorMeta, ...],
+        src_ranges: Tuple[TensorRange, ...],
+        dst_ranges: Tuple[TensorRange, ...],
+    ) -> None:
+        super().validate(src_metas, dst_metas, src_ranges, dst_ranges)
         if src_metas[0].shape[-1] != self._n:
             raise RuntimeError(
                 f"[MegaKittens] {self.name}: expected n={self._n}, got {src_metas[0].shape[-1]}"

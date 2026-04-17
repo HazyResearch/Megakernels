@@ -30,21 +30,27 @@ def check(
     """
     torch._dynamo.reset()  # by default, dynamo limits to 8 compilations per function object
     expected = fn(*args)
+    expected_tuple = expected if isinstance(expected, tuple) else (expected,)
 
     for global_work_queue in [True, False]:
         compiled_fn = megakittens.compile(fn, use_jit_cache=True, save_dag=False, save_schedule=False, verbose=False, global_work_queue=global_work_queue)
         result = compiled_fn(*args)
-
-        diff = (result - expected).abs()
-        max_diff = diff.max().item()
-        mean_diff = diff.mean().item()
+        result_tuple = result if isinstance(result, tuple) else (result,)
 
         mode_str = "global_work_queue" if global_work_queue else "per_sm_queue"
-        if atol == 0.0 and rtol == 0.0:
-            assert torch.equal(result, expected), \
-                f"[{mode_str}] exact match failed: max_diff={max_diff}, mean_diff={mean_diff}"
-        else:
-            assert torch.allclose(result, expected, atol=atol, rtol=rtol), \
-                f"[{mode_str}] allclose failed: max_diff={max_diff}, mean_diff={mean_diff}"
+        max_diff = 0.0
+        mean_diff = 0.0
+        for i, (r, e) in enumerate(zip(result_tuple, expected_tuple)):
+            diff = (r - e).abs()
+            max_diff = max(max_diff, diff.max().item())
+            mean_diff += diff.mean().item()
+            label = f"[{mode_str}]" + (f"[out {i}]" if len(result_tuple) > 1 else "")
+            if atol == 0.0 and rtol == 0.0:
+                assert torch.equal(r, e), \
+                    f"{label} exact match failed: max_diff={diff.max().item()}, mean_diff={diff.mean().item()}"
+            else:
+                assert torch.allclose(r, e, atol=atol, rtol=rtol), \
+                    f"{label} allclose failed: max_diff={diff.max().item()}, mean_diff={diff.mean().item()}"
+        mean_diff /= len(result_tuple)
 
     return max_diff, mean_diff

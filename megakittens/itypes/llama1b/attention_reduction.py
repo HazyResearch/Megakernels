@@ -1,8 +1,10 @@
+from typing import List, Tuple
+
 import torch
 
 from ...schema.dtype import DType
 from ...schema.itype import IType
-from ...schema.tensor import TensorSpec
+from ...schema.tensor import TensorMeta, TensorRange, TensorSpec
 from ...jit.pykittens import sv
 
 
@@ -73,15 +75,28 @@ class AttentionReduction(IType):
                        tma_types=[sv(dtype=DType.bf16, length=self._head_dim)]),  # attn_out
         ]
 
-    def num_instructions(self, src_metas, dst_metas):
-        num_heads = src_metas[0].shape[0]
-        return num_heads // self._q_heads_per_instruction
+    def num_instructions(
+        self,
+        src_metas: Tuple[TensorMeta, ...],
+        dst_metas: Tuple[TensorMeta, ...],
+        src_ranges: Tuple[TensorRange, ...],
+        dst_ranges: Tuple[TensorRange, ...],
+    ) -> int:
+        lse_range = src_ranges[0]
+        return lse_range[-2].size // self._q_heads_per_instruction
 
-    def block_indices(self, src_metas, dst_metas):
-        num_heads = src_metas[0].shape[0]
-        num_partials = src_metas[1].shape[1]
+    def block_indices(
+        self,
+        src_metas: Tuple[TensorMeta, ...],
+        dst_metas: Tuple[TensorMeta, ...],
+        src_ranges: Tuple[TensorRange, ...],
+        dst_ranges: Tuple[TensorRange, ...],
+    ) -> List[Tuple[int, ...]]:
+        lse_range = src_ranges[0]
+        o_range = src_ranges[1]
+        num_partials = o_range[-2].size
         return [(0, q_start, num_partials) for q_start in
-                range(0, num_heads, self._q_heads_per_instruction)]
+                range(lse_range[-2].start, lse_range[-2].stop, self._q_heads_per_instruction)]
 
     def test_args(self, case):
         num_heads, num_partials, head_dim = case
@@ -101,5 +116,11 @@ class AttentionReduction(IType):
         out_region = ((q_start * head_dim, q_end * head_dim),)
         return [lse_region, o_region], [out_region]
 
-    def validate(self, src_metas, dst_metas):
-        super().validate(src_metas, dst_metas)
+    def validate(
+        self,
+        src_metas: Tuple[TensorMeta, ...],
+        dst_metas: Tuple[TensorMeta, ...],
+        src_ranges: Tuple[TensorRange, ...],
+        dst_ranges: Tuple[TensorRange, ...],
+    ) -> None:
+        super().validate(src_metas, dst_metas, src_ranges, dst_ranges)

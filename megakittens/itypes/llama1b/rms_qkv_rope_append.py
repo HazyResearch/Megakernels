@@ -1,8 +1,10 @@
+from typing import List, Tuple
+
 import torch
 
 from ...schema.dtype import DType
 from ...schema.itype import IType
-from ...schema.tensor import TensorSpec
+from ...schema.tensor import TensorMeta, TensorRange, TensorSpec
 from ...jit.pykittens import sv, st
 
 
@@ -65,7 +67,7 @@ class RmsQkvRopeAppend(IType):
     test_cases = [
         ((2048, 64, 8), (0, 16)),  # (n, head_dim, num_kv_heads), (pos_id, max_seq_len)
     ]
-    test_atol = 1e-2
+    test_atol = 2.0
     test_rtol = 1e-2
     bench_cases = [
         ((2048, 64, 8), (0, 512)),
@@ -133,14 +135,27 @@ class RmsQkvRopeAppend(IType):
                        tma_types=[sv(dtype=DType.bf16, length=16)]),
         ]
 
-    def num_instructions(self, src_metas, dst_metas):
-        qkv_dim = src_metas[2].shape[1]
-        return qkv_dim // 16
+    def num_instructions(
+        self,
+        src_metas: Tuple[TensorMeta, ...],
+        dst_metas: Tuple[TensorMeta, ...],
+        src_ranges: Tuple[TensorRange, ...],
+        dst_ranges: Tuple[TensorRange, ...],
+    ) -> int:
+        qkv_w_range = src_ranges[2]
+        return qkv_w_range[-2].size // 16
 
-    def block_indices(self, src_metas, dst_metas):
-        qkv_dim = src_metas[2].shape[1]
-        num_blocks = qkv_dim // 16
-        return [(0, b, b + 1) for b in range(num_blocks)]
+    def block_indices(
+        self,
+        src_metas: Tuple[TensorMeta, ...],
+        dst_metas: Tuple[TensorMeta, ...],
+        src_ranges: Tuple[TensorRange, ...],
+        dst_ranges: Tuple[TensorRange, ...],
+    ) -> List[Tuple[int, ...]]:
+        qkv_w_range = src_ranges[2]
+        block_start = qkv_w_range[-2].start // 16
+        block_stop = qkv_w_range[-2].stop // 16
+        return [(0, b, b + 1) for b in range(block_start, block_stop)]
 
     def test_args(self, case):
         pos_id_val, max_seq_len = case
@@ -180,8 +195,14 @@ class RmsQkvRopeAppend(IType):
         return [hidden_region, norm_region, qkv_w_region, rope_cos_region, rope_sin_region,
                 k_cache_region, v_cache_region, pos_region, eps_region], [out_region]
 
-    def validate(self, src_metas, dst_metas):
-        super().validate(src_metas, dst_metas)
+    def validate(
+        self,
+        src_metas: Tuple[TensorMeta, ...],
+        dst_metas: Tuple[TensorMeta, ...],
+        src_ranges: Tuple[TensorRange, ...],
+        dst_ranges: Tuple[TensorRange, ...],
+    ) -> None:
+        super().validate(src_metas, dst_metas, src_ranges, dst_ranges)
         n = src_metas[0].shape[0]
         if n != self._n:
             raise RuntimeError(

@@ -1,8 +1,10 @@
+from typing import List, Tuple
+
 import torch
 
 from ...schema.dtype import DType
 from ...schema.itype import IType
-from ...schema.tensor import TensorSpec
+from ...schema.tensor import TensorMeta, TensorRange, TensorSpec
 from ...jit.pykittens import sv, st
 
 
@@ -92,14 +94,28 @@ class RmsUpgateSilu(IType):
                        tma_types=[sv(dtype=DType.bf16, length=16)]),
         ]
 
-    def num_instructions(self, src_metas, dst_metas):
-        intermediate_dim = dst_metas[0].shape[0]
-        return intermediate_dim // 16
+    def num_instructions(
+        self,
+        src_metas: Tuple[TensorMeta, ...],
+        dst_metas: Tuple[TensorMeta, ...],
+        src_ranges: Tuple[TensorRange, ...],
+        dst_ranges: Tuple[TensorRange, ...],
+    ) -> int:
+        out_range = dst_ranges[0]
+        return out_range[-1].size // 16
 
-    def block_indices(self, src_metas, dst_metas):
-        intermediate_dim = dst_metas[0].shape[0]
-        num_blocks = intermediate_dim // 16
-        return [(0, b, num_blocks, num_blocks) for b in range(num_blocks)]
+    def block_indices(
+        self,
+        src_metas: Tuple[TensorMeta, ...],
+        dst_metas: Tuple[TensorMeta, ...],
+        src_ranges: Tuple[TensorRange, ...],
+        dst_ranges: Tuple[TensorRange, ...],
+    ) -> List[Tuple[int, ...]]:
+        out_range = dst_ranges[0]
+        num_blocks = out_range[-1].size // 16
+        block_start = out_range[-1].start // 16
+        block_stop = out_range[-1].stop // 16
+        return [(0, b, num_blocks, num_blocks) for b in range(block_start, block_stop)]
 
     def test_args(self, case):
         intermediate_dim, = case
@@ -123,8 +139,14 @@ class RmsUpgateSilu(IType):
         out_region = ((0, intermediate_dim),)
         return [x_region, norm_region, up_region, gate_region, eps_region], [out_region]
 
-    def validate(self, src_metas, dst_metas):
-        super().validate(src_metas, dst_metas)
+    def validate(
+        self,
+        src_metas: Tuple[TensorMeta, ...],
+        dst_metas: Tuple[TensorMeta, ...],
+        src_ranges: Tuple[TensorRange, ...],
+        dst_ranges: Tuple[TensorRange, ...],
+    ) -> None:
+        super().validate(src_metas, dst_metas, src_ranges, dst_ranges)
         if src_metas[0].shape[-1] != self._n:
             raise RuntimeError(
                 f"[MegaKittens] {self.name}: expected n={self._n}, got {src_metas[0].shape[-1]}"
