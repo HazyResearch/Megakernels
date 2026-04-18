@@ -8,9 +8,6 @@ from ...schema.tensor import TensorMeta, TensorRange, TensorSpec
 from ...jit.pykittens import sv, st
 
 
-SM_COUNT = 148
-
-
 @torch.library.custom_op("megakittens::rms_qkv_rope_append", mutates_args=("k_cache", "v_cache"))
 def rms_qkv_rope_append_op(
     hidden_states: torch.Tensor, attn_norm_weights: torch.Tensor,
@@ -159,8 +156,8 @@ class RmsQkvRopeAppend(IType):
         src_ranges: Tuple[TensorRange, ...],
         dst_ranges: Tuple[TensorRange, ...],
     ) -> int:
-        num_blocks = src_ranges[2][-2].size // 16
-        return min(SM_COUNT, num_blocks)
+        qkv_w_range = src_ranges[2]
+        return qkv_w_range[-2].size // 16
 
     def block_indices(
         self,
@@ -173,14 +170,7 @@ class RmsQkvRopeAppend(IType):
         layer_idx = qkv_w_range[-3].start
         block_start = qkv_w_range[-2].start // 16
         block_stop = qkv_w_range[-2].stop // 16
-        num_blocks = block_stop - block_start
-        num_insts = min(SM_COUNT, num_blocks)
-        return [
-            (layer_idx,
-             block_start + round(i * num_blocks / num_insts),
-             block_start + round((i + 1) * num_blocks / num_insts))
-            for i in range(num_insts)
-        ]
+        return [(layer_idx, b, b + 1) for b in range(block_start, block_stop)]
 
     def test_args(self, case):
         pos_id_val, max_seq_len = case
@@ -217,36 +207,24 @@ class RmsQkvRopeAppend(IType):
         rope_sin_region = ((0, max_seq_len), (0, head_dim))
         pos_region = ((0, 1),)
         eps_region = ((0, 1),)
+        # one block per inst under auto-scheduler: tight per-head write regions so each
+        # inst gets a single dst_barrier for its head
         empty_q = ((0, 0),)
         empty_kv = ((0, 0), (0, 0), (0, 0), (0, 0))
-
-        # Instruction covers blocks [start_block, end_block). Clip into each region
-        # (Q / K / V) and report a bounding-box per-tensor region.
-        q_lo = max(start_block, 0)
-        q_hi = min(end_block, k_blk_start)
-        if q_lo < q_hi:
-            q_region = ((q_lo * 16, q_hi * 16),)
-        else:
-            q_region = empty_q
-
-        k_lo = max(start_block, k_blk_start)
-        k_hi = min(end_block, v_blk_start)
-        if k_lo < k_hi:
-            kv_head_lo = (k_lo - k_blk_start) // blocks_per_head
-            kv_head_hi = (k_hi - 1 - k_blk_start) // blocks_per_head + 1
-            dst_k_region = ((layer_idx, layer_idx + 1), (0, max_seq_len), (kv_head_lo, kv_head_hi), (0, head_dim))
-        else:
+        if start_block < k_blk_start:
+            q_region = ((start_block * 16, end_block * 16),)
             dst_k_region = empty_kv
-
-        v_lo = max(start_block, v_blk_start)
-        v_hi = end_block
-        if v_lo < v_hi:
-            kv_head_lo = (v_lo - v_blk_start) // blocks_per_head
-            kv_head_hi = (v_hi - 1 - v_blk_start) // blocks_per_head + 1
-            dst_v_region = ((layer_idx, layer_idx + 1), (0, max_seq_len), (kv_head_lo, kv_head_hi), (0, head_dim))
-        else:
             dst_v_region = empty_kv
-
+        elif start_block < v_blk_start:
+            kv_head = (start_block - k_blk_start) // blocks_per_head
+            q_region = empty_q
+            dst_k_region = ((layer_idx, layer_idx + 1), (0, max_seq_len), (kv_head, kv_head + 1), (0, head_dim))
+            dst_v_region = empty_kv
+        else:
+            kv_head = (start_block - v_blk_start) // blocks_per_head
+            q_region = empty_q
+            dst_k_region = empty_kv
+            dst_v_region = ((layer_idx, layer_idx + 1), (0, max_seq_len), (kv_head, kv_head + 1), (0, head_dim))
         # k/v cache are write-only here; empty src regions keep cross-layer
         # reads (forced by mutates_args) from creating false dependencies.
         return [hidden_region, norm_region, qkv_w_region, rope_cos_region, rope_sin_region,
