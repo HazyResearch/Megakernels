@@ -8,12 +8,21 @@ end-to-end instead of the hand-written schedule in `scheduler.py`.
 
 from __future__ import annotations
 
+import ctypes
 import math
+import time
 
+import cuda.bindings.driver as cuda_driver
 import torch
 
 import megakittens
 from megakittens.jit.cuda_utils import initialize_cuda_context
+from .benchmark_instructions import (
+    _make_rope_table,
+    _prefill_kv_cache,
+    _rmsnorm,
+    _stack_weights,
+)
 from .scheduler import (
     HEAD_DIM,
     HIDDEN_DIM,
@@ -21,7 +30,6 @@ from .scheduler import (
     MAX_SEQ_LEN,
     NUM_KV_HEADS,
     NUM_LAYERS,
-    QKV_DIM,
     RMS_NORM_EPS,
     VOCAB_SIZE,
 )
@@ -90,62 +98,145 @@ def decode(
     return logits
 
 
-def main():
-    initialize_cuda_context()
-    torch._dynamo.reset()
+@torch.inference_mode()
+def benchmark_tok_per_sec(prompt="Hello, my name is", max_new_tokens=200, num_samples=5, warmup=5):
+    """tok/s with HF weights + greedy decode, using megakittens.compile(decode)."""
+    from transformers import AutoModelForCausalLM, AutoTokenizer
 
     D = "cuda"
-    L = NUM_LAYERS
 
-    hidden = torch.randn(HIDDEN_DIM, dtype=torch.bfloat16, device=D)
-    qkv_w = torch.randn(L, QKV_DIM, HIDDEN_DIM, dtype=torch.bfloat16, device=D)
-    o_w = torch.randn(L, HIDDEN_DIM, HIDDEN_DIM, dtype=torch.bfloat16, device=D)
-    attn_norm = torch.randn(L, HIDDEN_DIM, dtype=torch.bfloat16, device=D)
-    mlp_norm = torch.randn(L, HIDDEN_DIM, dtype=torch.bfloat16, device=D)
-    up_w = torch.randn(L, INTERMEDIATE_DIM, HIDDEN_DIM, dtype=torch.bfloat16, device=D)
-    gate_w = torch.randn(L, INTERMEDIATE_DIM, HIDDEN_DIM, dtype=torch.bfloat16, device=D)
-    down_w = torch.randn(L, HIDDEN_DIM, INTERMEDIATE_DIM, dtype=torch.bfloat16, device=D)
-    lm_head_norm = torch.randn(HIDDEN_DIM, dtype=torch.bfloat16, device=D)
-    lm_head = torch.randn(VOCAB_SIZE, HIDDEN_DIM, dtype=torch.bfloat16, device=D)
-    k_cache = torch.zeros(L, MAX_SEQ_LEN, NUM_KV_HEADS, HEAD_DIM, dtype=torch.bfloat16, device=D)
-    v_cache = torch.zeros(L, MAX_SEQ_LEN, NUM_KV_HEADS, HEAD_DIM, dtype=torch.bfloat16, device=D)
-    rope_cos = torch.randn(MAX_SEQ_LEN, HEAD_DIM, dtype=torch.float32, device=D)
-    rope_sin = torch.randn(MAX_SEQ_LEN, HEAD_DIM, dtype=torch.float32, device=D)
-    pos_id = torch.tensor([0], dtype=torch.int32, device=D)
-    attn_scale = torch.tensor([ATTN_SCALE], dtype=torch.float32, device=D)
-    rms_eps = torch.tensor([RMS_NORM_EPS], dtype=torch.float32, device=D)
+    print("Loading Llama-3.2-1B weights from HuggingFace...")
+    hf_model = AutoModelForCausalLM.from_pretrained(
+        "meta-llama/Llama-3.2-1B-Instruct", dtype=torch.bfloat16, device_map=D,
+    )
+    weights = _stack_weights(hf_model)
+    rope_cos, rope_sin = _make_rope_table(hf_model.config, MAX_SEQ_LEN, D)
+    embed_weight = weights["embed_weight"]
 
-    args = (
-        hidden, qkv_w, o_w, attn_norm, mlp_norm, up_w, gate_w, down_w,
-        lm_head_norm, lm_head, k_cache, v_cache, rope_cos, rope_sin,
-        pos_id, attn_scale, rms_eps,
+    tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-1B-Instruct")
+    input_ids = tokenizer(prompt, return_tensors="pt", add_special_tokens=True)["input_ids"][0]
+    prompt_len = input_ids.shape[0]
+    print(f"Prompt: {prompt!r}, {prompt_len} tokens")
+
+    del hf_model
+
+    k_cache = torch.zeros(NUM_LAYERS, MAX_SEQ_LEN, NUM_KV_HEADS, HEAD_DIM, dtype=torch.bfloat16, device=D)
+    v_cache = torch.zeros(NUM_LAYERS, MAX_SEQ_LEN, NUM_KV_HEADS, HEAD_DIM, dtype=torch.bfloat16, device=D)
+    print("Prefilling KV cache...")
+    with torch.inference_mode():
+        last_hidden = _prefill_kv_cache(input_ids, weights, k_cache, v_cache, rope_cos, rope_sin)
+    prefill_logits = weights["lm_head_weight"] @ _rmsnorm(last_hidden, weights["lm_head_norm_weight"], RMS_NORM_EPS)
+    first_token = torch.argmax(prefill_logits)
+    k_cache_snapshot = k_cache.clone()
+    v_cache_snapshot = v_cache.clone()
+
+    print("Attention mode: no reduction")
+
+    hidden_states = embed_weight[first_token].clone()
+    pos_id_tensor = torch.tensor([prompt_len], dtype=torch.int32, device=D)
+    attn_scale_tensor = torch.tensor([ATTN_SCALE], dtype=torch.float32, device=D)
+    rms_norm_eps_tensor = torch.tensor([RMS_NORM_EPS], dtype=torch.float32, device=D)
+
+    # same order as decode() signature
+    decode_args = (
+        hidden_states,
+        weights["qkv_weights"], weights["o_weights"],
+        weights["attn_norm_weights"], weights["mlp_norm_weights"],
+        weights["up_weights"], weights["gate_weights"], weights["down_weights"],
+        weights["lm_head_norm_weight"], weights["lm_head_weight"],
+        k_cache, v_cache, rope_cos, rope_sin,
+        pos_id_tensor, attn_scale_tensor, rms_norm_eps_tensor,
     )
 
-    # Eager reference: run the uncompiled forward first to capture expected logits.
-    eager_hidden = hidden.clone()
-    eager_k = k_cache.clone()
-    eager_v = v_cache.clone()
-    eager_args = (
-        eager_hidden, qkv_w, o_w, attn_norm, mlp_norm, up_w, gate_w, down_w,
-        lm_head_norm, lm_head, eager_k, eager_v, rope_cos, rope_sin,
-        pos_id, attn_scale, rms_eps,
-    )
-    eager_logits = decode(*eager_args)
+    compiled = megakittens.compile(decode, use_jit_cache=False, verbose=False)
+
+    # Pre-allocate CPU-side buffer and cache GPU address for fast pos_id updates
+    _pos_id_buf = (ctypes.c_int * 1)(0)
+    _pos_id_gpu_ptr = pos_id_tensor.data_ptr()
+
+    weight_tensors = [
+        weights["qkv_weights"], weights["o_weights"],
+        weights["attn_norm_weights"], weights["mlp_norm_weights"],
+        weights["up_weights"], weights["gate_weights"], weights["down_weights"],
+        weights["lm_head_norm_weight"], weights["lm_head_weight"],
+    ]
+    model_size = sum(t.nelement() * t.element_size() for t in weight_tensors)
+    params = sum(t.nelement() for t in weight_tensors)
+
+    embedding = torch.nn.Embedding(VOCAB_SIZE, HIDDEN_DIM, device=D, dtype=torch.bfloat16)
+    embedding.weight.data.copy_(embed_weight)
+    num_decode_tokens = max_new_tokens - 1
+    output_tokens = torch.zeros(max_new_tokens, dtype=torch.long, device=D)
+
+    def _decode_step(pos_id, input_token):
+        hidden_states.copy_(embedding(input_token))
+        _pos_id_buf[0] = pos_id
+        stream = torch.cuda.current_stream().cuda_stream
+        cuda_driver.cuMemcpyHtoDAsync(_pos_id_gpu_ptr, _pos_id_buf, 4, stream)
+        logits = compiled(*decode_args)
+        return torch.argmax(logits, dim=-1)
+
+    compiled(*decode_args)
+    output_tokens[0] = first_token
+    print(f"Warming up ({warmup} runs)...")
+    for _ in range(warmup):
+        k_cache.copy_(k_cache_snapshot)
+        v_cache.copy_(v_cache_snapshot)
+        token = first_token
+        for i in range(num_decode_tokens):
+            token = _decode_step(prompt_len + i, token)
+            output_tokens[i + 1] = token
     torch.cuda.synchronize()
+    print("Warmup done.")
 
-    compiled = megakittens.compile(
-        decode,
-        use_jit_cache=False,
-        verbose=True,
-    )
-    mk_logits = compiled(*args)
-    torch.cuda.synchronize()
+    decode_tokens_per_sec_list = []
+    for sample in range(num_samples):
+        k_cache.copy_(k_cache_snapshot)
+        v_cache.copy_(v_cache_snapshot)
+        torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        token = first_token
+        for i in range(num_decode_tokens):
+            token = _decode_step(prompt_len + i, token)
+            output_tokens[i + 1] = token
+        torch.cuda.synchronize()
+        t1 = time.perf_counter()
 
-    diff = (eager_logits.float() - mk_logits.float()).abs()
-    print(f"logits shape: {mk_logits.shape} dtype: {mk_logits.dtype}")
-    print(f"max_diff={diff.max().item():.4f}  mean_diff={diff.mean().item():.6f}  "
-          f"argmax_match={eager_logits.argmax().item() == mk_logits.argmax().item()}")
+        decode_time = t1 - t0
+        decode_tok_sec = num_decode_tokens / decode_time
+        decode_tokens_per_sec_list.append(decode_tok_sec)
+        bandwidth_gbs = model_size * decode_tok_sec / 1e9
+        flops_tfs = params * decode_tok_sec * 2 / 1e12
+        print(f"Time for inference {sample + 1}: {decode_time:.02f} sec total, {decode_tok_sec:.02f} tokens/sec")
+        print(f"Bandwidth achieved: {bandwidth_gbs:.02f} GB/s")
+        print(f"FLOPS achieved: {flops_tfs:.02f} TF/s")
+        print()
+
+    all_ids = torch.cat([input_ids.to(D), output_tokens[:max_new_tokens]])
+    print(tokenizer.decode(all_ids.tolist()))
+    print()
+
+    print("==========")
+    print(f"Prompt Length: {prompt_len}")
+    print(f"Generated tokens: {max_new_tokens}")
+    print(f"Attention mode: no reduction")
+    print(f"Average tokens/sec (decode only): {torch.mean(torch.tensor(decode_tokens_per_sec_list)).item():.2f}")
+    print(f"Memory used: {torch.cuda.max_memory_reserved() / 1e9:.02f} GB")
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    initialize_cuda_context()
+    torch._dynamo.reset()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--prompt", default="Hello, my name is")
+    parser.add_argument("--max-new-tokens", type=int, default=200)
+    parser.add_argument("--num-samples", type=int, default=5)
+    parser.add_argument("--warmup", type=int, default=5)
+    args = parser.parse_args()
+    benchmark_tok_per_sec(
+        prompt=args.prompt,
+        max_new_tokens=args.max_new_tokens,
+        num_samples=args.num_samples,
+        warmup=args.warmup,
+    )
