@@ -8,6 +8,9 @@ from ...schema.tensor import TensorMeta, TensorRange, TensorSpec
 from ...jit.pykittens import sv, st
 
 
+SM_COUNT = 148
+
+
 @torch.library.custom_op("megakittens::rms_lm_head", mutates_args=())
 def rms_lm_head_op(
     x: torch.Tensor,
@@ -99,8 +102,8 @@ class RmsLmHead(IType):
         src_ranges: Tuple[TensorRange, ...],
         dst_ranges: Tuple[TensorRange, ...],
     ) -> int:
-        out_range = dst_ranges[0]
-        return out_range[-1].size // 16
+        num_blocks = dst_ranges[0][-1].size // 16
+        return min(SM_COUNT, num_blocks)
 
     def block_indices(
         self,
@@ -112,7 +115,13 @@ class RmsLmHead(IType):
         out_range = dst_ranges[0]
         block_start = out_range[-1].start // 16
         block_stop = out_range[-1].stop // 16
-        return [(b, b + 1) for b in range(block_start, block_stop)]
+        num_blocks = block_stop - block_start
+        num_insts = min(SM_COUNT, num_blocks)
+        return [
+            (block_start + round(i * num_blocks / num_insts),
+             block_start + round((i + 1) * num_blocks / num_insts))
+            for i in range(num_insts)
+        ]
 
     def test_args(self, case):
         vocab_size, = case

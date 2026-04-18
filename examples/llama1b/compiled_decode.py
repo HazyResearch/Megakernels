@@ -148,7 +148,7 @@ def benchmark_tok_per_sec(prompt="Hello, my name is", max_new_tokens=200, num_sa
         pos_id_tensor, attn_scale_tensor, rms_norm_eps_tensor,
     )
 
-    compiled = megakittens.compile(decode, use_jit_cache=False, verbose=False)
+    compiled = megakittens.compile(decode, use_jit_cache=False, verbose=False, save_schedule=True)
 
     # Pre-allocate CPU-side buffer and cache GPU address for fast pos_id updates
     _pos_id_buf = (ctypes.c_int * 1)(0)

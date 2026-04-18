@@ -818,6 +818,11 @@ def benchmark_tok_per_sec(prompt="Hello, my name is", max_new_tokens=200, num_sa
                                max_partitions=max_np if max_np > 1 else None)
     instruction_metas, tensor_metas, instructions, num_barriers, input_indices, output_indices = schedule
 
+    from megakittens.utils import create_log_base_path, save_schedule_as_txt
+    _hand_base = create_log_base_path(fn=benchmark_tok_per_sec)
+    save_schedule_as_txt(tensor_metas, instructions, instruction_metas, num_barriers, _hand_base)
+    print(f"[hand] schedule dumped to {_hand_base}.schedule.txt")
+
     dispatcher = Dispatcher(
         instruction_metas, tensor_metas, instructions, num_barriers,
         input_indices, output_indices,

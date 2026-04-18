@@ -8,6 +8,9 @@ from ...schema.tensor import TensorMeta, TensorRange, TensorSpec
 from ...jit.pykittens import sv, st
 
 
+SM_COUNT = 148
+
+
 @torch.library.custom_op("megakittens::rms_upgate_silu", mutates_args=())
 def rms_upgate_silu_op(
     x: torch.Tensor, norm_weight: torch.Tensor,
@@ -101,8 +104,8 @@ class RmsUpgateSilu(IType):
         src_ranges: Tuple[TensorRange, ...],
         dst_ranges: Tuple[TensorRange, ...],
     ) -> int:
-        out_range = dst_ranges[0]
-        return out_range[-1].size // 16
+        num_blocks = dst_ranges[0][-1].size // 16
+        return min(SM_COUNT, num_blocks)
 
     def block_indices(
         self,
@@ -114,9 +117,9 @@ class RmsUpgateSilu(IType):
         out_range = dst_ranges[0]
         layer_idx = src_ranges[2][-3].start
         num_blocks = out_range[-1].size // 16
-        block_start = out_range[-1].start // 16
-        block_stop = out_range[-1].stop // 16
-        return [(layer_idx, b, num_blocks, num_blocks) for b in range(block_start, block_stop)]
+        num_insts = min(SM_COUNT, num_blocks)
+        # kernel iterates strided: SM i handles blocks [i, i+num_insts, i+2*num_insts, ...]
+        return [(layer_idx, i, num_insts, num_blocks) for i in range(num_insts)]
 
     def test_args(self, case):
         intermediate_dim, = case
@@ -137,8 +140,9 @@ class RmsUpgateSilu(IType):
         up_region = ((layer_idx, layer_idx + 1), (0, intermediate_dim), (0, n))
         gate_region = ((layer_idx, layer_idx + 1), (0, intermediate_dim), (0, n))
         eps_region = ((0, 1),)
-        # one block per inst under auto: tight out region for fine-grained barriers
-        out_region = ((sm_idx * 16, (sm_idx + 1) * 16),)
+        # strided writes span the whole out range; report full range so downstream
+        # consumers wait on a single barrier with target = num instructions.
+        out_region = ((0, intermediate_dim),)
         return [x_region, norm_region, up_region, gate_region, eps_region], [out_region]
 
     def validate(
