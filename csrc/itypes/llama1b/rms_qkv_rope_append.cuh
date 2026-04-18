@@ -12,8 +12,7 @@ template <typename Config, typename Globals, int N, int HEAD_DIM, int NUM_KV_HEA
           int SRC_K_CACHE, int SRC_V_CACHE, int SCALAR_POS_ID, int SCALAR_RMS_EPS,
           int DST_Q, int DST_K_CACHE = -1, int DST_V_CACHE = -1>
 struct RmsQkvRopeAppend {
-    // DST_K_CACHE/DST_V_CACHE alias SRC_*; unused by the kernel, declared only so the
-    // auto-scheduler's 3-output IType matches the template
+    // KV outputs alias their inputs (inplace); kernel writes via SRC_*
     static_assert(DST_K_CACHE == -1 || DST_K_CACHE == SRC_K_CACHE);
     static_assert(DST_V_CACHE == -1 || DST_V_CACHE == SRC_V_CACHE);
     static constexpr int BLOCK_SIZE = 16;
@@ -23,12 +22,11 @@ struct RmsQkvRopeAppend {
     using rope_t = kittens::sv_fl<HEAD_DIM>;
 
     struct parsed_instruction {
-        int layer_idx, start_block_idx, end_block_idx, iters, barrier_base;
+        int layer_idx, start_block_idx, end_block_idx, iters;
         __device__ inline parsed_instruction(const instruction_t &instruction) {
             layer_idx       = instruction.indices[0];
             start_block_idx = instruction.indices[1];
             end_block_idx   = instruction.indices[2];
-            barrier_base    = instruction.indices[3];
             iters           = end_block_idx - start_block_idx;
         }
         __device__ inline parsed_instruction(state_t<Config> &s)
@@ -106,12 +104,10 @@ struct RmsQkvRopeAppend {
                         {inst.layer_idx, static_cast<int>(g.template gls<SCALAR_POS_ID>().raw_ptr[0]), head_idx, dim_idx});
                 }
                 kittens::tma::store_async_wait();
-                // fine-grained per-head sub-barriers for hand schedule; auto schedule
-                // arrives on dst_barriers once per inst in storer::run instead
-                if (s.instruction().num_dst_barriers == 0) {
-                    barrier_arrive<Config>(
-                        &g.barriers.raw_ptr[inst.barrier_base + block_idx / (HEAD_DIM / BLOCK_SIZE)], 1);
-                }
+                int sub = block_idx / (HEAD_DIM / BLOCK_SIZE)
+                        - inst.start_block_idx / (HEAD_DIM / BLOCK_SIZE);
+                barrier_arrive<Config>(
+                    &g.barriers.raw_ptr[s.instruction().dst_barriers[sub]], 1);
             }
             kittens::warp::sync();
         }
@@ -178,11 +174,8 @@ struct RmsQkvRopeAppend {
 
     struct storer {
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
+            // per-block barriers signaled in store(), no all_barrier_arrive needed
             pipeline::storer_loop(s, g);
-            // no-op when num_dst_barriers = 0 (hand schedule)
-            kittens::warp::sync();
-            if (kittens::warp::elect_leader())
-                all_barrier_arrive<Config>(g, s.instruction());
         }
     };
 };

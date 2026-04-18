@@ -58,7 +58,8 @@ def _resolve_rms_qkv_rope_append(args, kwargs):
         head_dim=args[3].meta['val'].shape[-1],       # rope_cos last dim
         num_kv_heads=args[5].meta['val'].shape[-2],   # k_cache second-to-last dim
     )
-    # auto_functionalized_v2 tuple is (q, k_cache_copy, v_cache_copy)
+    # auto_functionalized_v2 wraps this into (q, k_cache_copy, v_cache_copy); map itype
+    # outputs [q, k_cache, v_cache] to aten tuple indices [0, 1, 2]
     return itype, [0, 1, 2]
 
 
@@ -195,20 +196,37 @@ class RmsQkvRopeAppend(IType):
         max_seq_len, head_dim = src_metas[3].shape
         num_kv_heads = src_metas[5].shape[2]
         q_dim = (n // head_dim) * head_dim
+        k_blk_start = q_dim // 16
+        v_blk_start = (q_dim + num_kv_heads * head_dim) // 16
+        blocks_per_head = head_dim // 16
         hidden_region = ((0, n),)
         norm_region = ((layer_idx, layer_idx + 1), (0, n))
         qkv_w_region = ((layer_idx, layer_idx + 1), (start_block * 16, end_block * 16), (0, n))
         rope_cos_region = ((0, max_seq_len), (0, head_dim))
         rope_sin_region = ((0, max_seq_len), (0, head_dim))
-        # every QKV inst declared as writing the full KV slab: one barrier per layer,
-        # target = num_qkv_insts
-        kv_cache_region = ((layer_idx, layer_idx + 1), (0, max_seq_len), (0, num_kv_heads), (0, head_dim))
         pos_region = ((0, 1),)
         eps_region = ((0, 1),)
-        q_region = ((0, q_dim),)
+        # one block per inst under auto-scheduler: tight per-head write regions so each
+        # inst gets a single dst_barrier for its head
+        empty_q = ((0, 0),)
+        empty_kv = ((0, 0), (0, 0), (0, 0), (0, 0))
+        if start_block < k_blk_start:
+            q_region = ((start_block * 16, end_block * 16),)
+            k_region = empty_kv
+            v_region = empty_kv
+        elif start_block < v_blk_start:
+            kv_head = (start_block - k_blk_start) // blocks_per_head
+            q_region = empty_q
+            k_region = ((layer_idx, layer_idx + 1), (0, max_seq_len), (kv_head, kv_head + 1), (0, head_dim))
+            v_region = empty_kv
+        else:
+            kv_head = (start_block - v_blk_start) // blocks_per_head
+            q_region = empty_q
+            k_region = empty_kv
+            v_region = ((layer_idx, layer_idx + 1), (0, max_seq_len), (kv_head, kv_head + 1), (0, head_dim))
         return [hidden_region, norm_region, qkv_w_region, rope_cos_region, rope_sin_region,
-                kv_cache_region, kv_cache_region, pos_region, eps_region], \
-               [q_region, kv_cache_region, kv_cache_region]
+                k_region, v_region, pos_region, eps_region], \
+               [q_region, k_region, v_region]
 
     def validate(
         self,

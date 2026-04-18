@@ -158,7 +158,6 @@ def _schedule_qkv(
     prev_barrier: int | None,
     prev_barrier_target: int,
 ) -> list[Instruction]:
-    barrier_base = _barrier_index(layer_idx, 0, 0)
     num_blocks = QKV_DIM // MATVEC_BLOCK_SIZE  # 192
     instructions = []
     for sm in range(sm_count):
@@ -166,18 +165,23 @@ def _schedule_qkv(
         end = round((sm + 1) * num_blocks / sm_count)
         src_barriers = (prev_barrier,) if prev_barrier is not None else ()
         src_targets = (prev_barrier_target,) if prev_barrier is not None else ()
+        first_sub = start // BLOCKS_PER_HEAD
+        last_sub = max(first_sub, (end - 1) // BLOCKS_PER_HEAD)
+        dst_barriers = tuple(
+            _barrier_index(layer_idx, 0, s) for s in range(first_sub, last_sub + 1)
+        )
         instructions.append(Instruction(
             icode=icode,
             src_tensors=(T.HIDDEN_STATES, T.ATTN_NORM_WEIGHTS, T.QKV_WEIGHTS,
                          T.ROPE_COS, T.ROPE_SIN, T.K_CACHE, T.V_CACHE),
-            dst_tensors=(T.Q_POST_ROPE,),
-            indices=(layer_idx, start, end, barrier_base),
+            dst_tensors=(T.Q_POST_ROPE, T.K_CACHE, T.V_CACHE),
+            indices=(layer_idx, start, end),
             src_barriers=src_barriers,
             src_barrier_targets=src_targets,
             num_input_barriers=len(src_barriers),
             num_reuse_barriers=0,
-            num_dst_barriers=0,
-            dst_barriers=(),
+            num_dst_barriers=len(dst_barriers),
+            dst_barriers=dst_barriers,
         ))
     _pad_to_cluster(instructions)
     return instructions
