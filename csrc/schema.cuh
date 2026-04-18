@@ -35,10 +35,10 @@ struct instruction_t {
     int indices[MAX_INDICES];                   // 64B
     uint32_t src_barriers[MAX_SRC_BARRIERS];    // 64B
     int src_barrier_targets[MAX_SRC_BARRIERS];  // 64B
-    uint8_t num_input_barriers;                 //  1B
-    uint8_t num_reuse_barriers;                 //  1B
-    uint8_t num_dst_barriers;                   //  1B
-    uint8_t _;                                  //  1B (padding)
+    uint8_t num_src_input_barriers;             //  1B
+    uint8_t num_src_reuse_barriers;             //  1B
+    uint8_t num_dst_input_barriers;             //  1B
+    uint8_t num_dst_reuse_barriers;             //  1B
     uint32_t dst_barriers[MAX_DST_BARRIERS];    // 32B
 };
 static_assert(sizeof(instruction_t) == 256);
