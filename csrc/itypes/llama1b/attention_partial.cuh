@@ -218,8 +218,14 @@ struct AttentionPartial {
                     int stage = local_i % NUM_STAGES;
                     kv_st &K_smem = get_K_smem(s, stage);
                     kv_st &V_smem = get_V_smem(s, stage);
-                    if (local_i == num_local_blocks - 1)
-                        all_reuse_barrier_wait<Config>(g, s.instruction());
+                    if (local_i == num_local_blocks - 1) {
+                        // K, V are the last 2 src_barriers in both hand and auto schedules
+                        const auto &raw = s.instruction();
+                        int total = raw.num_input_barriers + raw.num_reuse_barriers;
+                        for (int i = total - 2; i < total; i++)
+                            barrier_wait<Config>(&g.barriers.raw_ptr[raw.src_barriers[i]],
+                                                 raw.src_barrier_targets[i]);
+                    }
                     if (local_i >= NUM_STAGES) {
                         kittens::wait(K_finished(s, stage), (local_i / NUM_STAGES - 1) % 2);
                         kittens::wait(V_finished(s, stage), (local_i / NUM_STAGES - 1) % 2);

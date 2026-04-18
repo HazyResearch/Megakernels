@@ -83,8 +83,13 @@ def decode_one_layer(
         rms_norm_eps,
     )
 
-    # down_proj + residual: mutates hidden_states in place
-    torch.ops.megakittens.mat_vec_adds(hidden_states, silu_out, down_weights[i:i+1])
+    # down_proj + residual: chunk into n=HIDDEN_DIM reductions to fit the pipeline
+    for c in range(INTERMEDIATE_DIM // HIDDEN_DIM):
+        torch.ops.megakittens.mat_vec_adds(
+            hidden_states,
+            silu_out[c * HIDDEN_DIM:(c + 1) * HIDDEN_DIM],
+            down_weights[i:i+1, :, c * HIDDEN_DIM:(c + 1) * HIDDEN_DIM],
+        )
 
     logits = torch.ops.megakittens.rms_lm_head(
         hidden_states, lm_head_norm_weight, lm_head_weight, rms_norm_eps,

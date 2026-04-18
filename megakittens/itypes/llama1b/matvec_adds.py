@@ -138,7 +138,8 @@ class MatVecAdds(IType):
         dst_ranges: Tuple[TensorRange, ...],
     ) -> None:
         super().validate(src_metas, dst_metas, src_ranges, dst_ranges)
-        if src_metas[1].shape[-1] != self._n:
+        n = src_ranges[1].effective_shape[-1]
+        if n != self._n:
             raise RuntimeError(
-                f"[MegaKittens] {self.name}: expected n={self._n}, got {src_metas[1].shape[-1]}"
+                f"[MegaKittens] {self.name}: expected n={self._n}, got {n}"
             )
