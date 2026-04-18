@@ -176,8 +176,19 @@ struct RmsQkvRopeAppend {
 
     struct storer {
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
-            // per-block barriers signaled in store(), no all_barrier_arrive needed
+            // per-head sub-barriers in store(); auto-scheduler reuse barriers below
             pipeline::storer_loop(s, g);
+            const auto &inst = s.instruction();
+            parsed_instruction pinst{inst};
+            constexpr int BPH = HEAD_DIM / BLOCK_SIZE;
+            int num_handled = (pinst.end_block_idx - 1) / BPH - pinst.start_block_idx / BPH + 1;
+            if (inst.num_dst_barriers > num_handled) {
+                kittens::warp::sync();
+                if (kittens::warp::elect_leader()) {
+                    for (int i = num_handled; i < inst.num_dst_barriers; i++)
+                        barrier_arrive<Config>(&g.barriers.raw_ptr[inst.dst_barriers[i]], 1);
+                }
+            }
         }
     };
 };

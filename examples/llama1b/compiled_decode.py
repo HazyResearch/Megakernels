@@ -35,7 +35,7 @@ from .scheduler import (
 ATTN_SCALE = 1.0 / math.sqrt(HEAD_DIM)
 
 
-def we (
+def decode_one_layer(
     hidden_states,         # [HIDDEN_DIM] bf16
     qkv_weights,           # [L, QKV_DIM, HIDDEN_DIM] bf16
     o_weights,             # [L, HIDDEN_DIM, HIDDEN_DIM] bf16
