@@ -92,7 +92,7 @@ DOWNPROJ_SUB_BARRIERS = 1
 # Target counts for fine-grained barriers
 QKV_TARGET_PER_SUB = BLOCKS_PER_HEAD                                    # 4
 UPGATE_TARGET_PER_SUB = HIDDEN_DIM // MATVEC_BLOCK_SIZE                 # 128
-ATTN_RED_TARGET = NUM_ATTENTION_HEADS                                   # 32
+ATTN_RED_TARGET = NUM_KV_HEADS                                          # 8 (one arrive per attention inst)
 OPROJ_TARGET = HIDDEN_DIM // MATVEC_BLOCK_SIZE                          # 128
 DOWNPROJ_TARGET = INTERMEDIATE_DIM // MATVEC_BLOCK_SIZE  # 512
 
@@ -210,13 +210,13 @@ def _schedule_attention(
             icode=icode,
             src_tensors=(T.Q_POST_ROPE, T.K_CACHE, T.V_CACHE),
             dst_tensors=(T.ATTN_OUT,),
-            indices=(layer_idx, kv_head, attn_red_barrier),
+            indices=(layer_idx, kv_head),
             src_barriers=src_barriers,
             src_barrier_targets=src_targets,
             num_input_barriers=GQA_RATIO,       # Q barriers (consumer)
             num_reuse_barriers=2,                # K + V barriers (launcher, deferred)
-            num_dst_barriers=0,
-            dst_barriers=(),
+            num_dst_barriers=1,
+            dst_barriers=(attn_red_barrier,),
         ))
     _pad_to_cluster(instructions)
     return instructions

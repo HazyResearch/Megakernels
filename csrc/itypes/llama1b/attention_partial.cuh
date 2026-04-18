@@ -51,7 +51,7 @@ struct AttentionPartial {
             } else {
                 partial_idx  = 0;
                 num_partials = 1;
-                barrier_base = instruction.indices[2];
+                barrier_base = 0;  // single-partition reads dst_barriers[0] instead
             }
         }
         __device__ inline parsed_instruction(state_t<Config> &s)
@@ -424,7 +424,7 @@ struct AttentionPartial {
                 kittens::tma::store_async_wait();
                 if (kittens::warp::elect_leader()) {
                     s.page_finish(qol_pid(s));
-                    barrier_arrive<Config>(&g.barriers.raw_ptr[inst.barrier_base], GQA_RATIO);
+                    barrier_arrive<Config>(&g.barriers.raw_ptr[s.instruction().dst_barriers[0]], 1);
                 }
             }
         }
