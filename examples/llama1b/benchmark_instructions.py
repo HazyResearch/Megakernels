@@ -165,7 +165,7 @@ def _pt_rms_lm_head(x, norm_weight, lm_head_weight):
 
 def _setup_rms_qkv_rope_append(sm_count):
     itype = RmsQkvRopeAppend(n=HIDDEN_DIM, head_dim=HEAD_DIM, num_kv_heads=NUM_KV_HEADS)
-    src, dst = (0, 1, 2, 3, 4, 5, 6, 8, 9), (7,)
+    src, dst = (0, 1, 2, 3, 4, 5, 6, 8, 9), (7, 5, 6)
     inst_meta = InstructionMeta(icode=1, itype=itype, src_tensors=src, dst_tensors=dst)
 
     tensor_metas = [

@@ -8,7 +8,7 @@ from ...schema.tensor import TensorMeta, TensorRange, TensorSpec
 from ...jit.pykittens import sv, st
 
 
-@torch.library.custom_op("megakittens::rms_qkv_rope_append", mutates_args=())
+@torch.library.custom_op("megakittens::rms_qkv_rope_append", mutates_args=("k_cache", "v_cache"))
 def rms_qkv_rope_append_op(
     hidden_states: torch.Tensor, attn_norm_weights: torch.Tensor,
     qkv_weights: torch.Tensor, rope_cos: torch.Tensor, rope_sin: torch.Tensor,
@@ -27,6 +27,7 @@ def rms_qkv_rope_append_op(
     qkv = qkv_weights[0] @ h
     q = qkv[:q_dim].view(num_attn_heads, head_dim)
     k = qkv[q_dim:q_dim + k_dim].view(num_kv_heads, head_dim)
+    v = qkv[q_dim + k_dim:].view(num_kv_heads, head_dim)
     cos = rope_cos[pos]
     sin = rope_sin[pos]
     q_f = q.float()
@@ -35,6 +36,8 @@ def rms_qkv_rope_append_op(
     k_f = k.float()
     x1_k, x2_k = k_f[..., ::2], k_f[..., 1::2]
     k = (k_f * cos + torch.stack((-x2_k, x1_k), dim=-1).flatten(-2) * sin).to(k.dtype)
+    k_cache[0, pos] = k
+    v_cache[0, pos] = v
     return q.reshape(-1)
 
 
@@ -50,11 +53,13 @@ def _rms_qkv_rope_append_fake(hidden_states, attn_norm_weights, qkv_weights,
 
 def _resolve_rms_qkv_rope_append(args, kwargs):
     hidden_states = args[0].meta['val']
-    return RmsQkvRopeAppend(
+    itype = RmsQkvRopeAppend(
         n=hidden_states.shape[-1],
         head_dim=args[3].meta['val'].shape[-1],       # rope_cos last dim
         num_kv_heads=args[5].meta['val'].shape[-2],   # k_cache second-to-last dim
     )
+    # auto_functionalized_v2 tuple is (q, k_cache_copy, v_cache_copy)
+    return itype, [0, 1, 2]
 
 
 class RmsQkvRopeAppend(IType):
@@ -133,7 +138,15 @@ class RmsQkvRopeAppend(IType):
         return [
             TensorSpec(dtype=DType.bf16, granularity=(16,),                               # q_post_rope
                        tma_types=[sv(dtype=DType.bf16, length=16)]),
+            TensorSpec(dtype=DType.bf16, granularity=(1, 1, 1, 16),                       # k_cache (inplace)
+                       tma_types=[sv(dtype=DType.bf16, length=16)]),
+            TensorSpec(dtype=DType.bf16, granularity=(1, 1, 1, 16),                       # v_cache (inplace)
+                       tma_types=[sv(dtype=DType.bf16, length=16)]),
         ]
+
+    @property
+    def inplace_mapping(self) -> dict[int, int]:
+        return {1: 5, 2: 6}
 
     def num_instructions(
         self,
@@ -187,13 +200,15 @@ class RmsQkvRopeAppend(IType):
         qkv_w_region = ((layer_idx, layer_idx + 1), (start_block * 16, end_block * 16), (0, n))
         rope_cos_region = ((0, max_seq_len), (0, head_dim))
         rope_sin_region = ((0, max_seq_len), (0, head_dim))
-        k_cache_region = ((layer_idx, layer_idx + 1), (0, max_seq_len), (0, num_kv_heads), (0, head_dim))
-        v_cache_region = ((layer_idx, layer_idx + 1), (0, max_seq_len), (0, num_kv_heads), (0, head_dim))
+        # every QKV inst declared as writing the full KV slab: one barrier per layer,
+        # target = num_qkv_insts
+        kv_cache_region = ((layer_idx, layer_idx + 1), (0, max_seq_len), (0, num_kv_heads), (0, head_dim))
         pos_region = ((0, 1),)
         eps_region = ((0, 1),)
-        out_region = ((0, q_dim),)
+        q_region = ((0, q_dim),)
         return [hidden_region, norm_region, qkv_w_region, rope_cos_region, rope_sin_region,
-                k_cache_region, v_cache_region, pos_region, eps_region], [out_region]
+                kv_cache_region, kv_cache_region, pos_region, eps_region], \
+               [q_region, kv_cache_region, kv_cache_region]
 
     def validate(
         self,

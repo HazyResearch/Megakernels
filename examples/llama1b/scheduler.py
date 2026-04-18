@@ -466,7 +466,7 @@ def schedule_decode(
                                      T.QKV_WEIGHTS, T.ROPE_COS, T.ROPE_SIN,
                                      T.K_CACHE, T.V_CACHE,
                                      T.POS_ID, T.RMS_NORM_EPS),
-                        dst_tensors=(T.Q_POST_ROPE,)),
+                        dst_tensors=(T.Q_POST_ROPE, T.K_CACHE, T.V_CACHE)),
         InstructionMeta(icode=ICODE_O_PROJ, itype=_matvec_adds_itype,
                         src_tensors=(T.HIDDEN_STATES, T.ATTN_OUT, T.O_WEIGHTS),
                         dst_tensors=(T.HIDDEN_STATES,)),
