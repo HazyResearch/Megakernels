@@ -322,21 +322,26 @@ def _schedule_upgate(
     icode: int,
 ) -> list[Instruction]:
     oproj_barrier = _barrier_index(layer_idx, 3, 0)
-    upgate_barrier_base = _barrier_index(layer_idx, 4, 0)
     num_blocks = INTERMEDIATE_DIM // MATVEC_BLOCK_SIZE  # 512
+    blocks_per_sub = HIDDEN_DIM // MATVEC_BLOCK_SIZE    # 128
     instructions = []
     for sm in range(sm_count):
+        # one sub-barrier per chunk this SM's gate iters touch (sm + ii * sm_count)
+        dst_barriers = tuple(
+            _barrier_index(layer_idx, 4, (sm + ii * sm_count) // blocks_per_sub)
+            for ii in range((num_blocks - sm + sm_count - 1) // sm_count)
+        )
         instructions.append(Instruction(
             icode=icode,
             src_tensors=(T.HIDDEN_STATES, T.MLP_NORM_WEIGHTS, T.UP_WEIGHTS, T.GATE_WEIGHTS),
             dst_tensors=(T.SILU_OUT,),
-            indices=(layer_idx, sm, sm_count, num_blocks, upgate_barrier_base),
+            indices=(layer_idx, sm, sm_count, num_blocks),
             src_barriers=(oproj_barrier,),
             src_barrier_targets=(OPROJ_TARGET,),
             num_input_barriers=1,
             num_reuse_barriers=0,
-            num_dst_barriers=0,
-            dst_barriers=(),
+            num_dst_barriers=len(dst_barriers),
+            dst_barriers=dst_barriers,
         ))
     _pad_to_cluster(instructions)
     return instructions

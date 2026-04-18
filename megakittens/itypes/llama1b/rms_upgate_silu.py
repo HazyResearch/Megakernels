@@ -136,7 +136,8 @@ class RmsUpgateSilu(IType):
         up_region = ((layer_idx, layer_idx + 1), (0, intermediate_dim), (0, n))
         gate_region = ((layer_idx, layer_idx + 1), (0, intermediate_dim), (0, n))
         eps_region = ((0, 1),)
-        out_region = ((0, intermediate_dim),)
+        # one block per inst under auto: tight out region for fine-grained barriers
+        out_region = ((sm_idx * 16, (sm_idx + 1) * 16),)
         return [x_region, norm_region, up_region, gate_region, eps_region], [out_region]
 
     def validate(

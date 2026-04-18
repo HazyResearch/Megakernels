@@ -10,13 +10,12 @@ namespace megakittens {
 template <typename Config, typename Globals, int N, int SRC_ACT, int SRC_NORM, int SRC_UP, int SRC_GATE, int SCALAR_RMS_EPS, int DST>
 struct RmsUpgateSilu {
     struct parsed_instruction {
-        int layer_idx, sm_idx, sm_count, total_blocks, barrier_base, iters;
+        int layer_idx, sm_idx, sm_count, total_blocks, iters;
         __device__ inline parsed_instruction(const instruction_t &instruction) {
             layer_idx    = instruction.indices[0];
             sm_idx       = instruction.indices[1];
             sm_count     = instruction.indices[2];
             total_blocks = instruction.indices[3];
-            barrier_base = instruction.indices[4];
             iters        = 2 * ((total_blocks - sm_idx + sm_count - 1) / sm_count);
         }
         __device__ inline parsed_instruction(state_t<Config> &s)
@@ -123,8 +122,8 @@ struct RmsUpgateSilu {
                             g.template gls<DST>(), out_smem, {0, block_idx});
                         kittens::tma::store_async_wait();
 
-                        int sub_idx = block_idx * pipeline::MATVEC_BLOCK_SIZE / N;
-                        barrier_arrive<Config>(&g.barriers.raw_ptr[inst.barrier_base + sub_idx], 1);
+                        barrier_arrive<Config>(
+                            &g.barriers.raw_ptr[s.instruction().dst_barriers[i / 2]], 1);
                     }
                     kittens::warp::sync();
                 }
