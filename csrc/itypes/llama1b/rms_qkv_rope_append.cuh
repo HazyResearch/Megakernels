@@ -22,12 +22,16 @@ struct RmsQkvRopeAppend {
     using rope_t = kittens::sv_fl<HEAD_DIM>;
 
     struct parsed_instruction {
-        int layer_idx, start_block_idx, end_block_idx, iters;
+        int layer_idx, start_block_idx, end_block_idx, iters, barrier_base;
         __device__ inline parsed_instruction(const instruction_t &instruction) {
             layer_idx       = instruction.indices[0];
             start_block_idx = instruction.indices[1];
             end_block_idx   = instruction.indices[2];
             iters           = end_block_idx - start_block_idx;
+            // dst_barriers holds consecutive sub-barrier IDs starting at start_block/4;
+            // cache the base so per-block arrives avoid an LDS
+            barrier_base    = instruction.dst_barriers[0]
+                            - start_block_idx / (HEAD_DIM / BLOCK_SIZE);
         }
         __device__ inline parsed_instruction(state_t<Config> &s)
             : parsed_instruction(s.instruction()) {}
@@ -104,10 +108,8 @@ struct RmsQkvRopeAppend {
                         {inst.layer_idx, static_cast<int>(g.template gls<SCALAR_POS_ID>().raw_ptr[0]), head_idx, dim_idx});
                 }
                 kittens::tma::store_async_wait();
-                int sub = block_idx / (HEAD_DIM / BLOCK_SIZE)
-                        - inst.start_block_idx / (HEAD_DIM / BLOCK_SIZE);
                 barrier_arrive<Config>(
-                    &g.barriers.raw_ptr[s.instruction().dst_barriers[sub]], 1);
+                    &g.barriers.raw_ptr[inst.barrier_base + block_idx / (HEAD_DIM / BLOCK_SIZE)], 1);
             }
             kittens::warp::sync();
         }
