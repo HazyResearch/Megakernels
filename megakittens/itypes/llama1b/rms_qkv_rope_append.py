@@ -167,9 +167,10 @@ class RmsQkvRopeAppend(IType):
         dst_ranges: Tuple[TensorRange, ...],
     ) -> List[Tuple[int, ...]]:
         qkv_w_range = src_ranges[2]
+        layer_idx = qkv_w_range[-3].start
         block_start = qkv_w_range[-2].start // 16
         block_stop = qkv_w_range[-2].stop // 16
-        return [(0, b, b + 1) for b in range(block_start, block_stop)]
+        return [(layer_idx, b, b + 1) for b in range(block_start, block_stop)]
 
     def test_args(self, case):
         pos_id_val, max_seq_len = case
@@ -212,21 +213,23 @@ class RmsQkvRopeAppend(IType):
         empty_kv = ((0, 0), (0, 0), (0, 0), (0, 0))
         if start_block < k_blk_start:
             q_region = ((start_block * 16, end_block * 16),)
-            k_region = empty_kv
-            v_region = empty_kv
+            dst_k_region = empty_kv
+            dst_v_region = empty_kv
         elif start_block < v_blk_start:
             kv_head = (start_block - k_blk_start) // blocks_per_head
             q_region = empty_q
-            k_region = ((layer_idx, layer_idx + 1), (0, max_seq_len), (kv_head, kv_head + 1), (0, head_dim))
-            v_region = empty_kv
+            dst_k_region = ((layer_idx, layer_idx + 1), (0, max_seq_len), (kv_head, kv_head + 1), (0, head_dim))
+            dst_v_region = empty_kv
         else:
             kv_head = (start_block - v_blk_start) // blocks_per_head
             q_region = empty_q
-            k_region = empty_kv
-            v_region = ((layer_idx, layer_idx + 1), (0, max_seq_len), (kv_head, kv_head + 1), (0, head_dim))
+            dst_k_region = empty_kv
+            dst_v_region = ((layer_idx, layer_idx + 1), (0, max_seq_len), (kv_head, kv_head + 1), (0, head_dim))
+        # k/v cache are write-only here; empty src regions keep cross-layer
+        # reads (forced by mutates_args) from creating false dependencies.
         return [hidden_region, norm_region, qkv_w_region, rope_cos_region, rope_sin_region,
-                k_region, v_region, pos_region, eps_region], \
-               [q_region, k_region, v_region]
+                empty_kv, empty_kv, pos_region, eps_region], \
+               [q_region, dst_k_region, dst_v_region]
 
     def validate(
         self,

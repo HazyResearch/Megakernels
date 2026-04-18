@@ -103,7 +103,8 @@ class AttentionPartial(IType):
         dst_ranges: Tuple[TensorRange, ...],
     ) -> List[Tuple[int, ...]]:
         k_range = src_ranges[1]
-        return [(0, kv_head) for kv_head in range(k_range[-2].start, k_range[-2].stop)]
+        layer_idx = k_range[-4].start
+        return [(layer_idx, kv_head) for kv_head in range(k_range[-2].start, k_range[-2].stop)]
 
     def test_args(self, case):
         num_kv_heads, seq_len, max_seq_len = case
@@ -241,7 +242,8 @@ class AttentionPartialMulti(IType):
         dst_ranges: Tuple[TensorRange, ...],
     ) -> List[Tuple[int, ...]]:
         k_range = src_ranges[1]
-        return [(0, kv_head) for kv_head in range(k_range[-2].start, k_range[-2].stop)]
+        layer_idx = k_range[-4].start
+        return [(layer_idx, kv_head) for kv_head in range(k_range[-2].start, k_range[-2].stop)]
 
     def test_args(self, case):
         num_kv_heads, seq_len, max_seq_len = case

@@ -112,10 +112,11 @@ class RmsUpgateSilu(IType):
         dst_ranges: Tuple[TensorRange, ...],
     ) -> List[Tuple[int, ...]]:
         out_range = dst_ranges[0]
+        layer_idx = src_ranges[2][-3].start
         num_blocks = out_range[-1].size // 16
         block_start = out_range[-1].start // 16
         block_stop = out_range[-1].stop // 16
-        return [(0, b, num_blocks, num_blocks) for b in range(block_start, block_stop)]
+        return [(layer_idx, b, num_blocks, num_blocks) for b in range(block_start, block_stop)]
 
     def test_args(self, case):
         intermediate_dim, = case

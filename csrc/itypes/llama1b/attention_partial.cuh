@@ -430,7 +430,10 @@ struct AttentionPartial {
                 kittens::tma::store_async_wait();
                 if (kittens::warp::elect_leader()) {
                     s.page_finish(qol_pid(s));
-                    barrier_arrive<Config>(&g.barriers.raw_ptr[s.instruction().dst_barriers[0]], 1);
+                    const auto &dst_inst = s.instruction();
+                    barrier_arrive<Config>(&g.barriers.raw_ptr[dst_inst.dst_barriers[0]], 1);
+                    for (int i = 1; i < dst_inst.num_dst_barriers; i++)
+                        barrier_arrive<Config>(&g.barriers.raw_ptr[dst_inst.dst_barriers[i]], 1);
                 }
             }
         }
