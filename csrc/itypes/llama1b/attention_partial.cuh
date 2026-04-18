@@ -294,7 +294,11 @@ struct AttentionPartial {
             l_sv &L_smem = get_L_smem(s);
 
             if (kittens::warp::elect_leader()) {
-                all_input_barrier_wait<Config>(g, s.instruction());
+                const auto &raw = s.instruction();
+                int num_q = raw.num_input_barriers - 2;
+                for (int i = 0; i < num_q; i++)
+                    barrier_wait<Config>(&g.barriers.raw_ptr[raw.src_barriers[i]],
+                                         raw.src_barrier_targets[i]);
             }
             kittens::warp::sync();
 
@@ -377,6 +381,7 @@ struct AttentionPartial {
 
             if constexpr (MULTI_PARTITION) {
                 if (kittens::warp::elect_leader()) {
+                    all_reuse_barrier_wait<Config>(g, s.instruction());
                     for (int head_offset = 0; head_offset < GQA_RATIO; head_offset++) {
                         kittens::tma::store_async<kittens::cache_policy::EVICT_LAST>(
                             g.template gls<DST>(), O_smem[head_offset],
@@ -419,6 +424,7 @@ struct AttentionPartial {
                     kittens::warp::sync();
                 }
                 if (kittens::warp::elect_leader()) {
+                    all_reuse_barrier_wait<Config>(g, s.instruction());
                     for (int head_offset = 0; head_offset < GQA_RATIO; head_offset++) {
                         auto &smem_bf = *reinterpret_cast<o_sv_bf *>(&O_smem[head_offset]);
                         kittens::tma::store_async<kittens::cache_policy::EVICT_LAST>(

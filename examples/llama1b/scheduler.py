@@ -213,8 +213,8 @@ def _schedule_attention(
             indices=(layer_idx, kv_head),
             src_barriers=src_barriers,
             src_barrier_targets=src_targets,
-            num_input_barriers=GQA_RATIO,       # Q barriers (consumer)
-            num_reuse_barriers=2,                # K + V barriers (launcher, deferred)
+            num_input_barriers=GQA_RATIO + 2,
+            num_reuse_barriers=0,
             num_dst_barriers=1,
             dst_barriers=(attn_red_barrier,),
         ))
@@ -247,8 +247,8 @@ def _schedule_attention_multi(
                 indices=(layer_idx, kv_head, partial_idx, num_partitions, attn_barrier),
                 src_barriers=src_barriers,
                 src_barrier_targets=src_targets,
-                num_input_barriers=GQA_RATIO,
-                num_reuse_barriers=2,
+                num_input_barriers=GQA_RATIO + 2,
+                num_reuse_barriers=0,
                 num_dst_barriers=0,
                 dst_barriers=(),
             ))
