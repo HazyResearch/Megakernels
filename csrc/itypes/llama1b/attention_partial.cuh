@@ -287,7 +287,7 @@ struct AttentionPartial {
             max_vec_rv diff_scaled_max_vec_reg;
             norm_vec_rv norm_vec_reg;
             kittens::warp::neg_infty(max_vec_reg);
-            kittens::warp::zero(last_scaled_max_vec_reg);
+            kittens::warp::neg_infty(last_scaled_max_vec_reg);
             kittens::warp::zero(norm_vec_reg);
             kittens::warp::zero(O_reg);
             o_sv (&O_smem)[4] = get_O_smem(s);

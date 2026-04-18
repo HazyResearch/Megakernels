@@ -109,9 +109,10 @@ class MatVecAdds(IType):
         dst_ranges: Tuple[TensorRange, ...],
     ) -> List[Tuple[int, ...]]:
         out_range = dst_ranges[0]
+        col_offset = src_ranges[1][-1].start
         block_start = out_range[-1].start // BLOCK_SIZE
         block_stop = out_range[-1].stop // BLOCK_SIZE
-        return [(0, b, b + 1, 0) for b in range(block_start, block_stop)]
+        return [(0, b, b + 1, col_offset) for b in range(block_start, block_stop)]
 
     def test_args(self, case):
         out_dim, = case
