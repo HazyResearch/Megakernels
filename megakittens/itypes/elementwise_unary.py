@@ -180,7 +180,12 @@ class ElementwiseUnary(IType):
         dst_range = dst_ranges[0]
         return dst_range[0].size * dst_range[1].size * (dst_range[2].size // self.TILE_SIZE) * ((dst_range[3].size // self.TILE_SIZE + self.MAX_TILES_PER_INST - 1) // self.MAX_TILES_PER_INST)
 
-    def access_regions(self, block_index, src_metas, dst_metas):
+    def access_regions(
+        self,
+        block_index: Tuple[int, ...],
+        src_metas: Tuple[TensorMeta, ...],
+        dst_metas: Tuple[TensorMeta, ...],
+    ) -> tuple[list[list[tuple[tuple[int, int], ...]]], list[list[tuple[tuple[int, int], ...]]]]:
         b_src, d_src, r_src, c_src, b_dst, d_dst, r_dst, c_dst, n = block_index
         src_region = ((b_src, b_src + 1), (d_src, d_src + 1),
                       (r_src * self.TILE_SIZE, (r_src + 1) * self.TILE_SIZE),
@@ -188,7 +193,7 @@ class ElementwiseUnary(IType):
         dst_region = ((b_dst, b_dst + 1), (d_dst, d_dst + 1),
                       (r_dst * self.TILE_SIZE, (r_dst + 1) * self.TILE_SIZE),
                       (c_dst * self.TILE_SIZE, (c_dst + n) * self.TILE_SIZE))
-        return [src_region], [dst_region]
+        return [[src_region]], [[dst_region]]
 
     def validate(
         self,

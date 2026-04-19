@@ -210,33 +210,36 @@ def assign_barriers(
             producer_regions = [dst_regions[slot_idx] for _, dst_regions in node_regions[in_node.id]]
             consumer_regions = [src_regions[edge_idx] for src_regions, _ in node_regions[node.id]]
 
-            ndim = len(producer_regions[0])
+            ndim = len(producer_regions[0][0])
             unit_region: List[int] = []
             for d in range(ndim):
                 all_sizes: set[int] = set()
-                for region in producer_regions:
-                    all_sizes.add(region[d][1] - region[d][0])
-                for region in consumer_regions:
-                    all_sizes.add(region[d][1] - region[d][0])
+                for boxes in producer_regions:
+                    for box in boxes:
+                        all_sizes.add(box[d][1] - box[d][0])
+                for boxes in consumer_regions:
+                    for box in boxes:
+                        all_sizes.add(box[d][1] - box[d][0])
                 unit_region.append(reduce(gcd, all_sizes))
 
             unit_region_index_to_p_local_index: Dict[tuple, List[int]] = defaultdict(list)
-            for p_local_index, region in enumerate(producer_regions):
-                unit_region_indices = itertools.product(*[range(region[d][0] // unit_region[d], region[d][1] // unit_region[d]) for d in range(ndim)])
-                for unit_region_index in unit_region_indices:
-                    unit_region_index_to_p_local_index[unit_region_index].append(p_local_index)
+            for p_local_index, boxes in enumerate(producer_regions):
+                for box in boxes:
+                    for unit_region_index in itertools.product(*[range(box[d][0] // unit_region[d], box[d][1] // unit_region[d]) for d in range(ndim)]):
+                        unit_region_index_to_p_local_index[unit_region_index].append(p_local_index)
 
             c_region_cache: Dict[tuple, frozenset[int]] = {}
-            for c_local_index, region in enumerate(consumer_regions):
-                if region not in c_region_cache:
-                    unit_region_indices = itertools.product(*[range(region[d][0] // unit_region[d], region[d][1] // unit_region[d]) for d in range(ndim)])
+            for c_local_index, boxes in enumerate(consumer_regions):
+                cache_key = tuple(sorted(boxes))
+                if cache_key not in c_region_cache:
                     matching_p_local_indices: set[int] = set()
-                    for unit_region_index in unit_region_indices:
-                        if unit_region_index not in unit_region_index_to_p_local_index:
-                            raise RuntimeError("[MegaKittens] Matching producer region not found.")
-                        matching_p_local_indices.update(unit_region_index_to_p_local_index[unit_region_index])
-                    c_region_cache[region] = frozenset(matching_p_local_indices)
-                dependency_map.setdefault((in_node.id, c_region_cache[region]), {}).setdefault(node.id, []).append(c_local_index)
+                    for box in boxes:
+                        for unit_region_index in itertools.product(*[range(box[d][0] // unit_region[d], box[d][1] // unit_region[d]) for d in range(ndim)]):
+                            if unit_region_index not in unit_region_index_to_p_local_index:
+                                raise RuntimeError("[MegaKittens] Matching producer region not found.")
+                            matching_p_local_indices.update(unit_region_index_to_p_local_index[unit_region_index])
+                    c_region_cache[cache_key] = frozenset(matching_p_local_indices)
+                dependency_map.setdefault((in_node.id, c_region_cache[cache_key]), {}).setdefault(node.id, []).append(c_local_index)
 
     # Each unique (producer_node_id, dependency set) becomes one barrier
     for (producer_id, dependent_p_local_indices_set), consumers_by_node in dependency_map.items():

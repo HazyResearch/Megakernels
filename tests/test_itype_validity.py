@@ -128,18 +128,25 @@ def check_validity(inst):
                 f"{cls.__name__}.access_regions src count mismatch"
             assert len(dst_regions) == len(outputs), \
                 f"{cls.__name__}.access_regions dst count mismatch"
-            for region_list, region_label in [(src_regions, "src"), (dst_regions, "dst")]:
-                for ri, region in enumerate(region_list):
-                    assert isinstance(region, tuple), \
-                        f"{cls.__name__}.access_regions {region_label}[{ri}] must be tuple"
-                    for d, dim_range in enumerate(region):
-                        assert isinstance(dim_range, tuple) and len(dim_range) == 2, \
-                            f"{cls.__name__}.access_regions {region_label}[{ri}][{d}] must be (start, end)"
-                        start, end = dim_range
-                        assert isinstance(start, int) and isinstance(end, int), \
-                            f"{cls.__name__}.access_regions {region_label}[{ri}][{d}] bounds must be ints"
-                        assert start < end, \
-                            f"{cls.__name__}.access_regions {region_label}[{ri}][{d}] start >= end"
+            for tensor_regions, label in [(src_regions, "src"), (dst_regions, "dst")]:
+                for ri, boxes in enumerate(tensor_regions):
+                    assert isinstance(boxes, list), \
+                        f"{cls.__name__}.access_regions {label}[{ri}] must be list of boxes"
+                    assert len(boxes) >= 1, \
+                        f"{cls.__name__}.access_regions {label}[{ri}] must have at least one box"
+                    for bi, box in enumerate(boxes):
+                        assert isinstance(box, tuple), \
+                            f"{cls.__name__}.access_regions {label}[{ri}][{bi}] must be tuple"
+                        assert len(box) >= 1, \
+                            f"{cls.__name__}.access_regions {label}[{ri}][{bi}] cannot be an empty tuple"
+                        for d, dim_range in enumerate(box):
+                            assert isinstance(dim_range, tuple) and len(dim_range) == 2, \
+                                f"{cls.__name__}.access_regions {label}[{ri}][{bi}][{d}] must be (start, end)"
+                            start, end = dim_range
+                            assert isinstance(start, int) and isinstance(end, int), \
+                                f"{cls.__name__}.access_regions {label}[{ri}][{bi}][{d}] bounds must be ints"
+                            assert start < end, \
+                                f"{cls.__name__}.access_regions {label}[{ri}][{bi}][{d}] start >= end"
     except (RuntimeError, IndexError, ZeroDivisionError):
         pass
 

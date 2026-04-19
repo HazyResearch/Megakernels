@@ -119,23 +119,23 @@ class AddInplace(megakittens.schema.itype.IType):
         block_index: tuple[int, ...],
         src_metas: tuple[megakittens.schema.tensor.TensorMeta, ...],
         dst_metas: tuple[megakittens.schema.tensor.TensorMeta, ...],
-    ) -> tuple[list[tuple[tuple[int, int], ...]], list[tuple[tuple[int, int], ...]]]:
+    ) -> tuple[list[list[tuple[tuple[int, int], ...]]], list[list[tuple[tuple[int, int], ...]]]]:
         n = block_index[-1]
-        src_regions: list[tuple[tuple[int, int], ...]] = []
+        src_regions: list[list[tuple[tuple[int, int], ...]]] = []
         for i in range(len(self.inputs)):
             b, d, r, c = block_index[i * 4: i * 4 + 4]
-            src_regions.append((
+            src_regions.append([(
                 (b, b + 1), (d, d + 1),
                 (r * self.TILE_SIZE, (r + 1) * self.TILE_SIZE),
                 (c * self.TILE_SIZE, (c + n) * self.TILE_SIZE),
-            ))
+            )])
         b, d, r, c = block_index[len(self.inputs) * 4: len(self.inputs) * 4 + 4]
         dst_region = (
             (b, b + 1), (d, d + 1),
             (r * self.TILE_SIZE, (r + 1) * self.TILE_SIZE),
             (c * self.TILE_SIZE, (c + n) * self.TILE_SIZE),
         )
-        return src_regions, [dst_region]
+        return src_regions, [[dst_region]]
 
     def validate(
         self,

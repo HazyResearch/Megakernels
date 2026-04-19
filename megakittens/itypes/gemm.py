@@ -127,13 +127,18 @@ class Gemm(IType):
         D_range = dst_ranges[0]
         return D_range[0].size * D_range[1].size * (D_range[2].size // self.TILE_M) * (D_range[3].size // self.TILE_N) * 2
 
-    def access_regions(self, block_index, src_metas, dst_metas):
+    def access_regions(
+        self,
+        block_index: Tuple[int, ...],
+        src_metas: Tuple[TensorMeta, ...],
+        dst_metas: Tuple[TensorMeta, ...],
+    ) -> tuple[list[list[tuple[tuple[int, int], ...]]], list[list[tuple[tuple[int, int], ...]]]]:
         b_A, d_A, r_A, b_B, d_B, c_B, b_D, d_D, r_D, c_D = block_index
         K = src_metas[0].shape[-1]
         a_region = ((b_A, b_A + 1), (d_A, d_A + 1), (r_A * self.TILE_M, (r_A + 1) * self.TILE_M), (0, K))
         b_region = ((b_B, b_B + 1), (d_B, d_B + 1), (0, K), (c_B * self.TILE_N, (c_B + 1) * self.TILE_N))
         d_region = ((b_D, b_D + 1), (d_D, d_D + 1), (r_D * self.TILE_M, (r_D + 1) * self.TILE_M), (c_D * self.TILE_N, (c_D + 1) * self.TILE_N))
-        return [a_region, b_region], [d_region]
+        return [[a_region], [b_region]], [[d_region]]
 
     def validate(
         self,

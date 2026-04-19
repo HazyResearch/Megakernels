@@ -191,7 +191,12 @@ class Attention(IType):
         Q_range = src_ranges[0]
         return Q_range[0].size * Q_range[2].size * (Q_range[1].size // (self.Mb * self.TILES_PER_CLUSTER)) * self.CLUSTER_SIZE
 
-    def access_regions(self, block_index, src_metas, dst_metas):
+    def access_regions(
+        self,
+        block_index: Tuple[int, ...],
+        src_metas: Tuple[TensorMeta, ...],
+        dst_metas: Tuple[TensorMeta, ...],
+    ) -> tuple[list[list[tuple[tuple[int, int], ...]]], list[list[tuple[tuple[int, int], ...]]]]:
         b_Q, m_Q, h_Q, b_K, h_K, b_V, h_V, b_O, m_O, h_O = block_index
         seq_block = self.Mb * self.TILES_PER_CLUSTER
         S_k = src_metas[1].shape[1]
@@ -200,7 +205,7 @@ class Attention(IType):
         k_region = ((b_K, b_K + 1), (0, S_k),                                 (h_K, h_K + 1), (0, self.Db))
         v_region = ((b_V, b_V + 1), (0, S_v),                                 (h_V, h_V + 1), (0, self.Db))
         o_region = ((b_O, b_O + 1), (m_O * seq_block, (m_O + 1) * seq_block), (h_O, h_O + 1), (0, self.Db))
-        return [q_region, k_region, v_region], [o_region]
+        return [[q_region], [k_region], [v_region]], [[o_region]]
 
     def validate(
         self,
