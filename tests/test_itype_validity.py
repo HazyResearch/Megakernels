@@ -185,8 +185,8 @@ def check_validity(inst):
         min_src_ndims = [len(spec.granularity) for spec in test_inst.inputs]
         min_dst_ndims = [len(spec.granularity) for spec in test_inst.outputs]
         first_src, first_dst = test_inst.access_regions(block_idx_list[0], test_src_metas, test_dst_metas)
-        ref_src_ndims = [len(r) for r in first_src]
-        ref_dst_ndims = [len(r) for r in first_dst]
+        ref_src_ndims = [len(boxes[0]) for boxes in first_src]
+        ref_dst_ndims = [len(boxes[0]) for boxes in first_dst]
 
         for bi, block_index in enumerate(block_idx_list):
             src_regions, dst_regions = test_inst.access_regions(block_index, test_src_metas, test_dst_metas)
@@ -196,34 +196,33 @@ def check_validity(inst):
             assert len(dst_regions) == len(test_inst.outputs), \
                 f"{cls.__name__} block {bi}: dst_regions count {len(dst_regions)} != outputs count {len(test_inst.outputs)}"
 
-            for ri, (region, spec) in enumerate(zip(src_regions, test_inst.inputs)):
-                assert len(region) >= min_src_ndims[ri], \
-                    f"{cls.__name__} block {bi}: src_regions[{ri}] has {len(region)} dims, " \
-                    f"fewer than inputs[{ri}].granularity ndim {min_src_ndims[ri]}"
-                assert len(region) == ref_src_ndims[ri], \
-                    f"{cls.__name__} block {bi}: src_regions[{ri}] has {len(region)} dims, " \
-                    f"expected {ref_src_ndims[ri]} (consistent with block 0)"
-                offset = len(region) - len(spec.granularity)
-                for d, gran in enumerate(spec.granularity):
-                    start, end = region[offset + d]
-                    assert start % gran == 0, \
-                        f"{cls.__name__} block {bi}: src_regions[{ri}] dim {offset + d} start {start} not divisible by granularity {gran}"
-                    assert (end - start) % gran == 0, \
-                        f"{cls.__name__} block {bi}: src_regions[{ri}] dim {offset + d} size {end - start} not divisible by granularity {gran}"
-            for ri, (region, spec) in enumerate(zip(dst_regions, test_inst.outputs)):
-                assert len(region) >= min_dst_ndims[ri], \
-                    f"{cls.__name__} block {bi}: dst_regions[{ri}] has {len(region)} dims, " \
-                    f"fewer than outputs[{ri}].granularity ndim {min_dst_ndims[ri]}"
-                assert len(region) == ref_dst_ndims[ri], \
-                    f"{cls.__name__} block {bi}: dst_regions[{ri}] has {len(region)} dims, " \
-                    f"expected {ref_dst_ndims[ri]} (consistent with block 0)"
-                offset = len(region) - len(spec.granularity)
-                for d, gran in enumerate(spec.granularity):
-                    start, end = region[offset + d]
-                    assert start % gran == 0, \
-                        f"{cls.__name__} block {bi}: dst_regions[{ri}] dim {offset + d} start {start} not divisible by granularity {gran}"
-                    assert (end - start) % gran == 0, \
-                        f"{cls.__name__} block {bi}: dst_regions[{ri}] dim {offset + d} size {end - start} not divisible by granularity {gran}"
+            for tensor_label, tensor_access_regions, specs, min_ndims, ref_ndims in [
+                ("src", src_regions, test_inst.inputs,  min_src_ndims, ref_src_ndims),
+                ("dst", dst_regions, test_inst.outputs, min_dst_ndims, ref_dst_ndims),
+            ]:
+                for ri, (boxes, spec) in enumerate(zip(tensor_access_regions, specs)):
+                    assert len(boxes) >= 1, \
+                        f"{cls.__name__} block {bi}: {tensor_label}_regions[{ri}] must have at least one box"
+                    for box_i, box in enumerate(boxes):
+                        assert len(box) >= min_ndims[ri], \
+                            f"{cls.__name__} block {bi}: {tensor_label}_regions[{ri}][{box_i}] has {len(box)} dims, " \
+                            f"fewer than {tensor_label}s[{ri}].granularity ndim {min_ndims[ri]}"
+                        assert len(box) == ref_ndims[ri], \
+                            f"{cls.__name__} block {bi}: {tensor_label}_regions[{ri}][{box_i}] has {len(box)} dims, " \
+                            f"expected {ref_ndims[ri]} (consistent with block 0)"
+                        offset = len(box) - len(spec.granularity)
+                        for d, gran in enumerate(spec.granularity):
+                            start, end = box[offset + d]
+                            assert start % gran == 0, \
+                                f"{cls.__name__} block {bi}: {tensor_label}_regions[{ri}][{box_i}] dim {offset + d} start {start} not divisible by granularity {gran}"
+                            assert (end - start) % gran == 0, \
+                                f"{cls.__name__} block {bi}: {tensor_label}_regions[{ri}][{box_i}] dim {offset + d} size {end - start} not divisible by granularity {gran}"
+                    for i in range(len(boxes)):
+                        for j in range(i + 1, len(boxes)):
+                            assert any(
+                                a_end <= b_start or b_end <= a_start
+                                for (a_start, a_end), (b_start, b_end) in zip(boxes[i], boxes[j])
+                            ), f"{cls.__name__} block {bi}: {tensor_label}_regions[{ri}] boxes {i} and {j} overlap"
 
     # validate() returns None
 
