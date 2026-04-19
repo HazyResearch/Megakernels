@@ -18,20 +18,28 @@ struct RmsQkvRopeAppend {
     static constexpr int BLOCK_SIZE = 16;
     static constexpr int K_BLK_START = N / BLOCK_SIZE;
     static constexpr int V_BLK_START = (N + NUM_KV_HEADS * HEAD_DIM) / BLOCK_SIZE;
+    static constexpr int BPH = HEAD_DIM / BLOCK_SIZE;              // blocks per single head
+    static constexpr int GQA_RATIO = (N / HEAD_DIM) / NUM_KV_HEADS;
+    static constexpr int BPG = BPH * GQA_RATIO;                    // Q blocks per kv_head_group
 
     using rope_t = kittens::sv_fl<HEAD_DIM>;
 
+    // Global subregion index for a block: Q kv_head_groups 0..NUM_KV_HEADS-1,
+    // then K kv_heads NUM_KV_HEADS..2*NUM_KV_HEADS-1, then V 2*NUM_KV_HEADS..3*NUM_KV_HEADS-1.
+    __device__ __host__ static inline int subregion_offset(int block_idx) {
+        if (block_idx < K_BLK_START) return block_idx / BPG;
+        if (block_idx < V_BLK_START) return NUM_KV_HEADS + (block_idx - K_BLK_START) / BPH;
+        return 2 * NUM_KV_HEADS + (block_idx - V_BLK_START) / BPH;
+    }
+
     struct parsed_instruction {
-        int layer_idx, start_block_idx, end_block_idx, iters, barrier_base;
+        int layer_idx, start_block_idx, end_block_idx, iters, start_sub;
         __device__ inline parsed_instruction(const instruction_t &instruction) {
             layer_idx       = instruction.indices[0];
             start_block_idx = instruction.indices[1];
             end_block_idx   = instruction.indices[2];
             iters           = end_block_idx - start_block_idx;
-            // dst_barriers holds consecutive sub-barrier IDs starting at start_block/4;
-            // cache the base so per-block arrives avoid an LDS
-            barrier_base    = instruction.dst_barriers[0]
-                            - start_block_idx / (HEAD_DIM / BLOCK_SIZE);
+            start_sub       = subregion_offset(start_block_idx);
         }
         __device__ inline parsed_instruction(state_t<Config> &s)
             : parsed_instruction(s.instruction()) {}
@@ -108,8 +116,16 @@ struct RmsQkvRopeAppend {
                         {inst.layer_idx, static_cast<int>(g.template gls<SCALAR_POS_ID>().raw_ptr[0]), head_idx, dim_idx});
                 }
                 kittens::tma::store_async_wait();
-                barrier_arrive<Config>(
-                    &g.barriers.raw_ptr[inst.barrier_base + block_idx / (HEAD_DIM / BLOCK_SIZE)], 1);
+                // Arrive once per dst_barriers entry per instruction: only on the
+                // last block of each sub-region within the chunk.
+                int curr_sub = subregion_offset(block_idx);
+                bool last_of_sub = (output_idx + 1 == inst.iters) ||
+                                   (subregion_offset(block_idx + 1) != curr_sub);
+                if (last_of_sub) {
+                    int k = curr_sub - inst.start_sub;
+                    barrier_arrive<Config>(
+                        &g.barriers.raw_ptr[s.instruction().dst_barriers[k]], 1);
+                }
             }
             kittens::warp::sync();
         }

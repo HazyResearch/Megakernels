@@ -6,6 +6,7 @@ from ...schema.dtype import DType
 from ...schema.itype import IType
 from ...schema.tensor import TensorMeta, TensorRange, TensorSpec
 from ...jit.pykittens import sv, st
+from ...jit.cuda_utils import get_sm_count
 
 
 @torch.library.custom_op("megakittens::rms_qkv_rope_append", mutates_args=("k_cache", "v_cache"))
@@ -156,8 +157,7 @@ class RmsQkvRopeAppend(IType):
         src_ranges: Tuple[TensorRange, ...],
         dst_ranges: Tuple[TensorRange, ...],
     ) -> int:
-        qkv_w_range = src_ranges[2]
-        return qkv_w_range[-2].size // 16
+        return get_sm_count()
 
     def block_indices(
         self,
@@ -170,7 +170,14 @@ class RmsQkvRopeAppend(IType):
         layer_idx = qkv_w_range[-3].start
         block_start = qkv_w_range[-2].start // 16
         block_stop = qkv_w_range[-2].stop // 16
-        return [(layer_idx, b, b + 1) for b in range(block_start, block_stop)]
+        num_blocks = block_stop - block_start
+        sm_count = get_sm_count()
+        return [
+            (layer_idx,
+             block_start + round(sm * num_blocks / sm_count),
+             block_start + round((sm + 1) * num_blocks / sm_count))
+            for sm in range(sm_count)
+        ]
 
     def test_args(self, case):
         pos_id_val, max_seq_len = case
@@ -196,10 +203,12 @@ class RmsQkvRopeAppend(IType):
         n = src_metas[0].shape[0]
         max_seq_len, head_dim = src_metas[3].shape
         num_kv_heads = src_metas[5].shape[2]
-        q_dim = (n // head_dim) * head_dim
-        k_blk_start = q_dim // 16
-        v_blk_start = (q_dim + num_kv_heads * head_dim) // 16
+        num_attn_heads = n // head_dim
+        gqa_ratio = num_attn_heads // num_kv_heads
         blocks_per_head = head_dim // 16
+        blocks_per_group = blocks_per_head * gqa_ratio
+        k_blk_start = (num_attn_heads * head_dim) // 16
+        v_blk_start = k_blk_start + num_kv_heads * blocks_per_head
         hidden_region = ((0, n),)
         norm_region = ((layer_idx, layer_idx + 1), (0, n))
         qkv_w_region = ((layer_idx, layer_idx + 1), (start_block * 16, end_block * 16), (0, n))
@@ -207,29 +216,51 @@ class RmsQkvRopeAppend(IType):
         rope_sin_region = ((0, max_seq_len), (0, head_dim))
         pos_region = ((0, 1),)
         eps_region = ((0, 1),)
-        # one block per inst under auto-scheduler: tight per-head write regions so each
-        # inst gets a single dst_barrier for its head
         empty_q = ((0, 0),)
         empty_kv = ((0, 0), (0, 0), (0, 0), (0, 0))
-        if start_block < k_blk_start:
-            q_region = ((start_block * 16, end_block * 16),)
-            dst_k_region = empty_kv
-            dst_v_region = empty_kv
-        elif start_block < v_blk_start:
-            kv_head = (start_block - k_blk_start) // blocks_per_head
-            q_region = empty_q
-            dst_k_region = ((layer_idx, layer_idx + 1), (0, max_seq_len), (kv_head, kv_head + 1), (0, head_dim))
-            dst_v_region = empty_kv
-        else:
-            kv_head = (start_block - v_blk_start) // blocks_per_head
-            q_region = empty_q
-            dst_k_region = empty_kv
-            dst_v_region = ((layer_idx, layer_idx + 1), (0, max_seq_len), (kv_head, kv_head + 1), (0, head_dim))
+
+        # Output boxes must be emitted in block-index order so the kernel's k-th
+        # store maps to dst_barriers[k] (see subregion_offset in the .cuh).
+        q_regions = []
+        q_lo = start_block
+        q_hi = min(end_block, k_blk_start)
+        if q_hi > q_lo:
+            g_start = q_lo // blocks_per_group
+            g_stop = (q_hi + blocks_per_group - 1) // blocks_per_group
+            for g in range(g_start, g_stop):
+                lo = max(q_lo, g * blocks_per_group)
+                hi = min(q_hi, (g + 1) * blocks_per_group)
+                q_regions.append(((lo * 16, hi * 16),))
+        if not q_regions:
+            q_regions = [empty_q]
+
+        k_regions = []
+        k_lo = max(start_block, k_blk_start)
+        k_hi = min(end_block, v_blk_start)
+        if k_hi > k_lo:
+            h_start = (k_lo - k_blk_start) // blocks_per_head
+            h_stop = (k_hi - k_blk_start + blocks_per_head - 1) // blocks_per_head
+            for h in range(h_start, h_stop):
+                k_regions.append(((layer_idx, layer_idx + 1), (0, max_seq_len), (h, h + 1), (0, head_dim)))
+        if not k_regions:
+            k_regions = [empty_kv]
+
+        v_regions = []
+        v_lo = max(start_block, v_blk_start)
+        v_hi = end_block
+        if v_hi > v_lo:
+            h_start = (v_lo - v_blk_start) // blocks_per_head
+            h_stop = (v_hi - v_blk_start + blocks_per_head - 1) // blocks_per_head
+            for h in range(h_start, h_stop):
+                v_regions.append(((layer_idx, layer_idx + 1), (0, max_seq_len), (h, h + 1), (0, head_dim)))
+        if not v_regions:
+            v_regions = [empty_kv]
+
         # k/v cache are write-only here; empty src regions keep cross-layer
         # reads (forced by mutates_args) from creating false dependencies.
         return [[hidden_region], [norm_region], [qkv_w_region], [rope_cos_region], [rope_sin_region],
                 [empty_kv], [empty_kv], [pos_region], [eps_region]], \
-               [[q_region], [dst_k_region], [dst_v_region]]
+               [q_regions, k_regions, v_regions]
 
     def validate(
         self,

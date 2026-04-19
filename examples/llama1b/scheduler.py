@@ -81,8 +81,10 @@ BLOCKS_PER_HEAD = HEAD_DIM // MATVEC_BLOCK_SIZE   # 4
 NUM_BARRIER_SLOTS = 6   # qkv, attn, attn_red, oproj, upgate, downproj
 MAX_SUB_BARRIERS = 48   # largest: QKV with 32 Q + 8 K + 8 V = 48
 
-# Sub-barrier counts per opcode slot
-QKV_SUB_BARRIERS = NUM_ATTENTION_HEADS + 2 * NUM_KV_HEADS  # 48
+# Sub-barrier counts per opcode slot.
+# QKV: Q per kv_head_group, K per kv_head, V per kv_head (matches the kernel's
+# subregion_offset layout in rms_qkv_rope_append.cuh).
+QKV_SUB_BARRIERS = 3 * NUM_KV_HEADS                         # 24
 ATTN_SUB_BARRIERS = NUM_ATTENTION_HEADS                     # 32
 ATTN_RED_SUB_BARRIERS = 1
 OPROJ_SUB_BARRIERS = 1
@@ -90,11 +92,23 @@ UPGATE_SUB_BARRIERS = INTERMEDIATE_DIM // HIDDEN_DIM        # 4
 DOWNPROJ_SUB_BARRIERS = 1
 
 # Target counts for fine-grained barriers
-QKV_TARGET_PER_SUB = BLOCKS_PER_HEAD                                    # 4
 UPGATE_TARGET_PER_SUB = HIDDEN_DIM // MATVEC_BLOCK_SIZE                 # 128
 ATTN_RED_TARGET = NUM_KV_HEADS                                          # 8 (one arrive per attention inst)
 OPROJ_TARGET = HIDDEN_DIM // MATVEC_BLOCK_SIZE                          # 128
 DOWNPROJ_TARGET = INTERMEDIATE_DIM // MATVEC_BLOCK_SIZE  # 512
+
+
+def _qkv_subregion(block_idx: int) -> int:
+    """Mirror of rms_qkv_rope_append.cuh::subregion_offset (Python side)."""
+    k_blk_start = Q_DIM // MATVEC_BLOCK_SIZE
+    v_blk_start = (Q_DIM + NUM_KV_HEADS * HEAD_DIM) // MATVEC_BLOCK_SIZE
+    blocks_per_head = HEAD_DIM // MATVEC_BLOCK_SIZE
+    blocks_per_group = blocks_per_head * GQA_RATIO
+    if block_idx < k_blk_start:
+        return block_idx // blocks_per_group
+    if block_idx < v_blk_start:
+        return NUM_KV_HEADS + (block_idx - k_blk_start) // blocks_per_head
+    return 2 * NUM_KV_HEADS + (block_idx - v_blk_start) // blocks_per_head
 
 
 def _barrier_index(layer_idx: int, opcode_slot: int, sub_idx: int = 0) -> int:
@@ -157,19 +171,36 @@ def _schedule_qkv(
     icode: int,
     prev_barrier: int | None,
     prev_barrier_target: int,
-) -> list[Instruction]:
+) -> tuple[list[Instruction], list[int]]:
+    """Returns (instructions, target_per_sub) where target_per_sub[s] is the
+    number of chunks that arrive on sub-barrier s (kernel arrives once per
+    sub-region per instruction)."""
     num_blocks = QKV_DIM // MATVEC_BLOCK_SIZE  # 192
-    instructions = []
+    chunks = []
     for sm in range(sm_count):
         start = round(sm * num_blocks / sm_count)
         end = round((sm + 1) * num_blocks / sm_count)
+        if start == end:
+            continue
+        subs = []
+        prev_sub = -1
+        for b in range(start, end):
+            s = _qkv_subregion(b)
+            if s != prev_sub:
+                subs.append(s)
+                prev_sub = s
+        chunks.append((start, end, subs))
+
+    target_per_sub = [0] * QKV_SUB_BARRIERS
+    for _, _, subs in chunks:
+        for s in subs:
+            target_per_sub[s] += 1
+
+    instructions = []
+    for start, end, subs in chunks:
+        dst_barriers = tuple(_barrier_index(layer_idx, 0, s) for s in subs)
         src_barriers = (prev_barrier,) if prev_barrier is not None else ()
         src_targets = (prev_barrier_target,) if prev_barrier is not None else ()
-        first_sub = start // BLOCKS_PER_HEAD
-        last_sub = max(first_sub, (end - 1) // BLOCKS_PER_HEAD)
-        dst_barriers = tuple(
-            _barrier_index(layer_idx, 0, s) for s in range(first_sub, last_sub + 1)
-        )
         instructions.append(Instruction(
             icode=icode,
             src_tensors=(T.HIDDEN_STATES, T.ATTN_NORM_WEIGHTS, T.QKV_WEIGHTS,
@@ -185,28 +216,32 @@ def _schedule_qkv(
             dst_barriers=dst_barriers,
         ))
     _pad_to_cluster(instructions)
-    return instructions
+    return instructions, target_per_sub
 
 
 def _schedule_attention(
     layer_idx: int,
     icode: int,
+    qkv_target_per_sub: list[int],
 ) -> list[Instruction]:
     # No attention_reduction step currently (1 partial per head),
     # so attention signals the attn_red barrier (slot 2) directly.
     attn_red_barrier = _barrier_index(layer_idx, 2, 0)
     instructions = []
     for kv_head in range(NUM_KV_HEADS):
-        # Fine-grained consumer: wait on 6 QKV sub-barriers for this KV head
-        # (4 Q heads + 1 K head + 1 V head), each with target = BLOCKS_PER_HEAD
-        q_head_start = kv_head * GQA_RATIO
-        src_barriers = tuple(
-            _barrier_index(layer_idx, 0, q_head_start + h) for h in range(GQA_RATIO)
-        ) + (
-            _barrier_index(layer_idx, 0, NUM_ATTENTION_HEADS + kv_head),
-            _barrier_index(layer_idx, 0, NUM_ATTENTION_HEADS + NUM_KV_HEADS + kv_head),
+        q_sub = kv_head
+        k_sub = NUM_KV_HEADS + kv_head
+        v_sub = 2 * NUM_KV_HEADS + kv_head
+        src_barriers = (
+            _barrier_index(layer_idx, 0, q_sub),
+            _barrier_index(layer_idx, 0, k_sub),
+            _barrier_index(layer_idx, 0, v_sub),
         )
-        src_targets = (QKV_TARGET_PER_SUB,) * (GQA_RATIO + 2)
+        src_targets = (
+            qkv_target_per_sub[q_sub],
+            qkv_target_per_sub[k_sub],
+            qkv_target_per_sub[v_sub],
+        )
         instructions.append(Instruction(
             icode=icode,
             src_tensors=(T.Q_POST_ROPE, T.K_CACHE, T.V_CACHE),
@@ -228,18 +263,23 @@ def _schedule_attention_multi(
     layer_idx: int,
     icode: int,
     num_partitions: int,
+    qkv_target_per_sub: list[int],
 ) -> list[Instruction]:
-    attn_barrier_base = _barrier_index(layer_idx, 1, 0)
     instructions = []
     for kv_head in range(NUM_KV_HEADS):
-        q_head_start = kv_head * GQA_RATIO
-        src_barriers = tuple(
-            _barrier_index(layer_idx, 0, q_head_start + h) for h in range(GQA_RATIO)
-        ) + (
-            _barrier_index(layer_idx, 0, NUM_ATTENTION_HEADS + kv_head),
-            _barrier_index(layer_idx, 0, NUM_ATTENTION_HEADS + NUM_KV_HEADS + kv_head),
+        q_sub = kv_head
+        k_sub = NUM_KV_HEADS + kv_head
+        v_sub = 2 * NUM_KV_HEADS + kv_head
+        src_barriers = (
+            _barrier_index(layer_idx, 0, q_sub),
+            _barrier_index(layer_idx, 0, k_sub),
+            _barrier_index(layer_idx, 0, v_sub),
         )
-        src_targets = (QKV_TARGET_PER_SUB,) * (GQA_RATIO + 2)
+        src_targets = (
+            qkv_target_per_sub[q_sub],
+            qkv_target_per_sub[k_sub],
+            qkv_target_per_sub[v_sub],
+        )
         attn_barrier = _barrier_index(layer_idx, 1, kv_head)
         for partial_idx in range(num_partitions):
             instructions.append(Instruction(
@@ -531,18 +571,18 @@ def schedule_decode(
         prev_layer_barrier = _barrier_index(layer_idx - 1, 5, 0) if layer_idx > 0 else None
         prev_layer_target = DOWNPROJ_TARGET if layer_idx > 0 else 0
 
-        qkv_insts = _schedule_qkv(
+        qkv_insts, qkv_target_per_sub = _schedule_qkv(
             sm_count, layer_idx, icode_qkv,
             prev_layer_barrier, prev_layer_target,
         )
 
         if use_multi_partition:
             attn_insts = _schedule_attention_multi(
-                layer_idx, icode_attn_multi, num_partitions)
+                layer_idx, icode_attn_multi, num_partitions, qkv_target_per_sub)
             attn_red_insts = _schedule_attention_reduction(
                 layer_idx, icode_attn_red, num_partitions)
         else:
-            attn_insts = _schedule_attention(layer_idx, icode_attn)
+            attn_insts = _schedule_attention(layer_idx, icode_attn, qkv_target_per_sub)
             attn_red_insts = []
 
         oproj_insts = _schedule_o_proj(sm_count, layer_idx, icode_oproj,
