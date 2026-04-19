@@ -157,8 +157,7 @@ class RmsQkvRopeAppend(IType):
         src_ranges: Tuple[TensorRange, ...],
         dst_ranges: Tuple[TensorRange, ...],
     ) -> int:
-        qkv_w_range = src_ranges[2]
-        return qkv_w_range[-2].size // 16
+        return get_sm_count()
 
     def block_indices(
         self,
@@ -171,7 +170,14 @@ class RmsQkvRopeAppend(IType):
         layer_idx = qkv_w_range[-3].start
         block_start = qkv_w_range[-2].start // 16
         block_stop = qkv_w_range[-2].stop // 16
-        return [(layer_idx, b, b + 1) for b in range(block_start, block_stop)]
+        num_blocks = block_stop - block_start
+        sm_count = get_sm_count()
+        return [
+            (layer_idx,
+             block_start + round(sm * num_blocks / sm_count),
+             block_start + round((sm + 1) * num_blocks / sm_count))
+            for sm in range(sm_count)
+        ]
 
     def test_args(self, case):
         pos_id_val, max_seq_len = case
