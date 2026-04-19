@@ -11,6 +11,7 @@ def check(
     args: tuple[torch.Tensor, ...],
     atol: float = 0.0,
     rtol: float = 0.0,
+    **compile_kwargs,
 ) -> tuple[float, float]:
     """
     Run a function with and without MegaKittens compilation, compare results.
@@ -21,6 +22,7 @@ def check(
         args: Tuple of input tensors.
         atol: Absolute tolerance for allclose.
         rtol: Relative tolerance for allclose.
+        **compile_kwargs: Extra kwargs forwarded to ``megakittens.compile``.
 
     Returns:
         (max_diff, mean_diff): Maximum and mean absolute difference (from per-SM queue run).
@@ -28,11 +30,18 @@ def check(
     Raises:
         AssertionError if results don't match within tolerance.
     """
+    if "global_work_queue" in compile_kwargs:
+        raise RuntimeError("[MegaKittens] check() iterates global_work_queue internally; don't pass it")
+    compile_kwargs.setdefault("use_jit_cache", True)
+    compile_kwargs.setdefault("save_dag", False)
+    compile_kwargs.setdefault("save_schedule", False)
+    compile_kwargs.setdefault("verbose", False)
+
     torch._dynamo.reset()  # by default, dynamo limits to 8 compilations per function object
     expected = fn(*args)
 
     for global_work_queue in [True, False]:
-        compiled_fn = megakittens.compile(fn, use_jit_cache=True, save_dag=False, save_schedule=False, verbose=False, global_work_queue=global_work_queue)
+        compiled_fn = megakittens.compile(fn, global_work_queue=global_work_queue, **compile_kwargs)
         result = compiled_fn(*args)
 
         diff = (result - expected).abs()
