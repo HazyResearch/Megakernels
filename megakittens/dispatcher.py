@@ -75,10 +75,10 @@ def _pack_instructions_global(instructions: list[Instruction], *, device: str) -
     return torch.tensor(buf, dtype=torch.int32, device=device)
 
 
-def _pack_instructions_per_sm(instructions: list[Instruction], sm_count: int, device: str) -> torch.Tensor:
+def _pack_instructions_per_sm(instructions: list[Instruction], sm_count: int, cluster_size: int, device: str) -> torch.Tensor:
     """Pack a list of Instruction objects into a (max_per_sm_insts, sm_count, 64) int32 tensor."""
-    if sm_count % Dispatcher.CLUSTER_SIZE != 0:
-        raise RuntimeError(f"[MegaKittens] sm_count must be a multiple of {Dispatcher.CLUSTER_SIZE}, got {sm_count}")
+    if sm_count % cluster_size != 0:
+        raise RuntimeError(f"[MegaKittens] sm_count must be a multiple of {cluster_size}, got {sm_count}")
     max_per_sm_insts = -(-len(instructions) // sm_count) if len(instructions) > 0 else 1
     buf = [0] * (max_per_sm_insts * sm_count * 64)
     for i, inst in enumerate(instructions):
@@ -123,7 +123,6 @@ class Dispatcher:
 
     # Must match default_config in csrc/schema.cuh
     INSTRUCTION_PIPE_STAGES = 2
-    CLUSTER_SIZE = 2
     NUM_CONSUMER_WARPS = 8
     NUM_WARPS = 4 + NUM_CONSUMER_WARPS
     NUM_THREADS = NUM_WARPS * 32
@@ -145,7 +144,12 @@ class Dispatcher:
         use_jit_cache: bool = True,
         verbose: bool = True,
         global_work_queue: bool = False,
+        cluster_size: int = 2,
     ) -> None:
+        if cluster_size not in (1, 2):
+            raise RuntimeError(
+                f"[MegaKittens] 'cluster_size' must be 1 or 2, got {cluster_size}"
+            )
         if not tensor_metas:
             raise RuntimeError("[MegaKittens] 'tensor_metas' must not be empty")
         if not isinstance(tensor_metas, list) or not all(isinstance(t, TensorMeta) for t in tensor_metas):
@@ -204,6 +208,7 @@ class Dispatcher:
         self.use_jit_cache = use_jit_cache
         self.verbose = verbose
         self.global_work_queue = global_work_queue
+        self.cluster_size = cluster_size
 
     def __del__(self) -> None:
         if self._cubin_module is not None:
@@ -252,7 +257,7 @@ class Dispatcher:
         if self.global_work_queue:
             self.instruction_tensor = _pack_instructions_global(self.instructions, device=str(self.device))
         else:
-            self.instruction_tensor = _pack_instructions_per_sm(self.instructions, get_sm_count(device_index), device=str(self.device))
+            self.instruction_tensor = _pack_instructions_per_sm(self.instructions, get_sm_count(device_index), self.cluster_size, device=str(self.device))
         self.barrier_tensor = torch.zeros(
             max(self.num_barriers, 1), dtype=torch.int32, device=str(self.device),
         )
@@ -315,7 +320,9 @@ class Dispatcher:
             op = template.format(tensors=tensor_args)
             dispatch_cases.append(f"case {inst_meta.icode}: return dispatch_instruction<{op}, worker_type, T>(args...);")
         dispatch_cases = "\n".join(dispatch_cases)
-        config_struct = "static constexpr bool GLOBAL_WORK_QUEUE = true;" if self.global_work_queue else ""
+        config_struct = f"static constexpr int CLUSTER_SIZE = {self.cluster_size};"
+        if self.global_work_queue:
+            config_struct += "static constexpr bool GLOBAL_WORK_QUEUE = true;"
         source = f"""
             #include "megakittens.cuh"
             {itype_includes}
@@ -354,7 +361,7 @@ class Dispatcher:
         fields = [(g.tensor_to_gl(t), g.size, g.align) for g, t in zip(self.gls, self.all_tensors)]
         _globals_holder, globals_packed = pack_args(fields)
         if self.global_work_queue:
-            grid_size = -(-len(self.instructions) // self.CLUSTER_SIZE) * self.CLUSTER_SIZE  # round up
+            grid_size = -(-len(self.instructions) // self.cluster_size) * self.cluster_size  # round up
         else:
             grid_size = get_sm_count(device_index)
         stream = torch.cuda.current_stream(device_index).cuda_stream
@@ -365,5 +372,5 @@ class Dispatcher:
             block=(self.NUM_THREADS,),
             dynamic_smem_bytes=self.DYNAMIC_SHARED_MEMORY,
             stream=stream,
-            cluster=(self.CLUSTER_SIZE,),
+            cluster=(self.cluster_size,) if self.cluster_size > 1 else None,
         )

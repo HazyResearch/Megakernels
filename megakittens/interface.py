@@ -20,6 +20,7 @@ def compile(
     use_jit_cache: bool = True,
     verbose: bool = True,
     global_work_queue: bool = False,
+    cluster_size: int = 2,
 ) -> Callable[..., Any]:
     """Compile a PyTorch function into a MegaKernel."""
     def _compile(_fn: Callable[..., Any]) -> Callable[..., Any]:
@@ -34,6 +35,7 @@ def compile(
                 use_jit_cache=use_jit_cache,
                 verbose=verbose,
                 global_work_queue=global_work_queue,
+                cluster_size=cluster_size,
             ),
             nopython=True, # graph breaks currently not supported (TODO: support it)
             disable=not enable,

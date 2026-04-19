@@ -6,7 +6,6 @@ from functools import reduce
 from math import gcd
 from typing import Dict, List, Tuple
 
-from .dispatcher import Dispatcher
 from .utils import timed
 from .itypes.noop import Noop
 from .jit.cuda_utils import get_sm_count
@@ -26,6 +25,7 @@ MAX_TENSOR_ALLOCATIONS = 256
 
 def get_instruction_count_and_offset(
     dag: DAG,
+    cluster_size: int,
 ) -> Tuple[Dict[int, int], Dict[int, int]]:
     """Phase 1: Count instructions per node and compute cluster-aligned offsets.
 
@@ -55,12 +55,13 @@ def get_instruction_count_and_offset(
         count = node.itype.num_instructions(src_metas, node.out_tensors, src_ranges=node.in_ranges, dst_ranges=node.out_ranges)
         node_inst_count[node.id] = count
         node_inst_offset[node.id] = cumulative_offset
-        cumulative_offset += count + (-count) % Dispatcher.CLUSTER_SIZE  # CTA pairs must get same instruction type
+        cumulative_offset += count + (-count) % cluster_size  # CTA pairs must get same instruction type
     return node_inst_count, node_inst_offset
 
 
 def assign_tensors(
     dag: DAG,
+    cluster_size: int,
     node_inst_count: Dict[int, int],
     node_inst_offset: Dict[int, int],
 ) -> Tuple[List[TensorMeta], Dict[Tuple[int, int], int], List[int], List[int], List[Tuple[List[int], int, int]]]:
@@ -134,7 +135,7 @@ def assign_tensors(
                 continue
             consumer_node_ids = [c.id for c in consumer_nodes]
             num_consumer_insts = sum(node_inst_count[cid] for cid in consumer_node_ids)
-            last_consumer_inst = max(node_inst_offset[c.id] + node_inst_count[c.id] + (-node_inst_count[c.id]) % Dispatcher.CLUSTER_SIZE for c in consumer_nodes)
+            last_consumer_inst = max(node_inst_offset[c.id] + node_inst_count[c.id] + (-node_inst_count[c.id]) % cluster_size for c in consumer_nodes)
             tensor_pool.setdefault(tensor_meta, []).append((consumer_node_ids, last_consumer_inst, num_consumer_insts, tensor_index[(node.id, out_idx)]))
 
         if node.is_input:
@@ -289,6 +290,7 @@ def assign_barriers(
 
 def generate_instructions(
     dag: DAG,
+    cluster_size: int,
     tensor_index: Dict[Tuple[int, int], int],
     node_block_indices: Dict[int, list],
     inst_dst_barriers: Dict[Tuple[int, int], List[int]],
@@ -371,8 +373,8 @@ def generate_instructions(
                 dst_barriers=tuple(dst_bariers),
             ))
 
-        # Pad to CLUSTER_SIZE with noops so op boundaries are cluster-aligned
-        while len(instructions) % Dispatcher.CLUSTER_SIZE != 0:
+        # Pad to cluster_size with noops so op boundaries are cluster-aligned
+        while len(instructions) % cluster_size != 0:
             instructions.append(noop)
 
     return instruction_metas, instructions
@@ -380,6 +382,7 @@ def generate_instructions(
 
 def schedule(
     dag: DAG,
+    cluster_size: int = 2,
     verbose: bool = True,
 ) -> Tuple[List[InstructionMeta], List[TensorMeta], List[Instruction], int, Tuple[int, ...], Tuple[int, ...]]:
     """Convert a validated DAG into a minimal set of tensors, barriers, and a flat per-SM instruction list.
@@ -397,13 +400,13 @@ def schedule(
         - output_tensor_indices: Tuple[int, ...], tensor_metas indices for graph outputs, in order.
     """
     with timed("[Scheduler] Counted instructions and offsets", verbose):
-        node_inst_count, node_inst_offset = get_instruction_count_and_offset(dag)
+        node_inst_count, node_inst_offset = get_instruction_count_and_offset(dag, cluster_size)
     with timed("[Scheduler] Assigned tensors", verbose):
-        tensor_metas, tensor_index, input_tensor_indices, output_tensor_indices, release_barriers = assign_tensors(dag, node_inst_count, node_inst_offset)
+        tensor_metas, tensor_index, input_tensor_indices, output_tensor_indices, release_barriers = assign_tensors(dag, cluster_size, node_inst_count, node_inst_offset)
     with timed("[Scheduler] Assigned barriers", verbose):
         node_block_indices, inst_dst_barriers, inst_src_barriers, inst_num_src_input_barriers, inst_num_src_reuse_barriers, inst_num_dst_input_barriers, inst_num_dst_reuse_barriers, barrier_counter = assign_barriers(dag, node_inst_count, release_barriers)
     with timed("[Scheduler] Generated instructions", verbose):
-        instruction_metas, instructions = generate_instructions(dag, tensor_index, node_block_indices, inst_dst_barriers, inst_src_barriers, inst_num_src_input_barriers, inst_num_src_reuse_barriers, inst_num_dst_input_barriers, inst_num_dst_reuse_barriers)
+        instruction_metas, instructions = generate_instructions(dag, cluster_size, tensor_index, node_block_indices, inst_dst_barriers, inst_src_barriers, inst_num_src_input_barriers, inst_num_src_reuse_barriers, inst_num_dst_input_barriers, inst_num_dst_reuse_barriers)
 
     return (
         instruction_metas,
