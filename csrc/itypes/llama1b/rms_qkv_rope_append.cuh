@@ -18,14 +18,13 @@ struct RmsQkvRopeAppend {
     static constexpr int BLOCK_SIZE = 16;
     static constexpr int K_BLK_START = N / BLOCK_SIZE;
     static constexpr int V_BLK_START = (N + NUM_KV_HEADS * HEAD_DIM) / BLOCK_SIZE;
-    static constexpr int BPH = HEAD_DIM / BLOCK_SIZE;              // blocks per single head
+    static constexpr int BPH = HEAD_DIM / BLOCK_SIZE;
     static constexpr int GQA_RATIO = (N / HEAD_DIM) / NUM_KV_HEADS;
-    static constexpr int BPG = BPH * GQA_RATIO;                    // Q blocks per kv_head_group
+    static constexpr int BPG = BPH * GQA_RATIO;
 
     using rope_t = kittens::sv_fl<HEAD_DIM>;
 
-    // Global subregion index for a block: Q kv_head_groups 0..NUM_KV_HEADS-1,
-    // then K kv_heads NUM_KV_HEADS..2*NUM_KV_HEADS-1, then V 2*NUM_KV_HEADS..3*NUM_KV_HEADS-1.
+    // Q groups 0..NUM_KV_HEADS-1 | K heads NUM_KV_HEADS..2N-1 | V heads 2N..3N-1
     __device__ __host__ static inline int subregion_offset(int block_idx) {
         if (block_idx < K_BLK_START) return block_idx / BPG;
         if (block_idx < V_BLK_START) return NUM_KV_HEADS + (block_idx - K_BLK_START) / BPH;
@@ -116,8 +115,7 @@ struct RmsQkvRopeAppend {
                         {inst.layer_idx, static_cast<int>(g.template gls<SCALAR_POS_ID>().raw_ptr[0]), head_idx, dim_idx});
                 }
                 kittens::tma::store_async_wait();
-                // Arrive once per dst_barriers entry per instruction: only on the
-                // last block of each sub-region within the chunk.
+                // one arrive per dst_barriers entry: fire on the last block of each sub-region
                 int curr_sub = subregion_offset(block_idx);
                 bool last_of_sub = (output_idx + 1 == inst.iters) ||
                                    (subregion_offset(block_idx + 1) != curr_sub);

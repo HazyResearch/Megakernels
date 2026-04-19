@@ -81,9 +81,8 @@ BLOCKS_PER_HEAD = HEAD_DIM // MATVEC_BLOCK_SIZE   # 4
 NUM_BARRIER_SLOTS = 6   # qkv, attn, attn_red, oproj, upgate, downproj
 MAX_SUB_BARRIERS = 48   # largest: QKV with 32 Q + 8 K + 8 V = 48
 
-# Sub-barrier counts per opcode slot.
-# QKV: Q per kv_head_group, K per kv_head, V per kv_head (matches the kernel's
-# subregion_offset layout in rms_qkv_rope_append.cuh).
+# Sub-barrier counts per opcode slot
+# QKV layout matches rms_qkv_rope_append.cuh::subregion_offset: Q per kv_head_group, K/V per kv_head
 QKV_SUB_BARRIERS = 3 * NUM_KV_HEADS                         # 24
 ATTN_SUB_BARRIERS = NUM_ATTENTION_HEADS                     # 32
 ATTN_RED_SUB_BARRIERS = 1
@@ -98,8 +97,8 @@ OPROJ_TARGET = HIDDEN_DIM // MATVEC_BLOCK_SIZE                          # 128
 DOWNPROJ_TARGET = INTERMEDIATE_DIM // MATVEC_BLOCK_SIZE  # 512
 
 
+# mirror of rms_qkv_rope_append.cuh::subregion_offset
 def _qkv_subregion(block_idx: int) -> int:
-    """Mirror of rms_qkv_rope_append.cuh::subregion_offset (Python side)."""
     k_blk_start = Q_DIM // MATVEC_BLOCK_SIZE
     v_blk_start = (Q_DIM + NUM_KV_HEADS * HEAD_DIM) // MATVEC_BLOCK_SIZE
     blocks_per_head = HEAD_DIM // MATVEC_BLOCK_SIZE
@@ -172,9 +171,7 @@ def _schedule_qkv(
     prev_barrier: int | None,
     prev_barrier_target: int,
 ) -> tuple[list[Instruction], list[int]]:
-    """Returns (instructions, target_per_sub) where target_per_sub[s] is the
-    number of chunks that arrive on sub-barrier s (kernel arrives once per
-    sub-region per instruction)."""
+    # target_per_sub[s] = number of chunks that arrive on sub-barrier s
     num_blocks = QKV_DIM // MATVEC_BLOCK_SIZE  # 192
     chunks = []
     for sm in range(sm_count):

@@ -157,7 +157,8 @@ class RmsQkvRopeAppend(IType):
         src_ranges: Tuple[TensorRange, ...],
         dst_ranges: Tuple[TensorRange, ...],
     ) -> int:
-        return get_sm_count()
+        qkv_w_range = src_ranges[2]
+        return qkv_w_range[-2].size // 16
 
     def block_indices(
         self,
@@ -170,14 +171,7 @@ class RmsQkvRopeAppend(IType):
         layer_idx = qkv_w_range[-3].start
         block_start = qkv_w_range[-2].start // 16
         block_stop = qkv_w_range[-2].stop // 16
-        num_blocks = block_stop - block_start
-        sm_count = get_sm_count()
-        return [
-            (layer_idx,
-             block_start + round(sm * num_blocks / sm_count),
-             block_start + round((sm + 1) * num_blocks / sm_count))
-            for sm in range(sm_count)
-        ]
+        return [(layer_idx, b, b + 1) for b in range(block_start, block_stop)]
 
     def test_args(self, case):
         pos_id_val, max_seq_len = case
@@ -219,8 +213,8 @@ class RmsQkvRopeAppend(IType):
         empty_q = ((0, 0),)
         empty_kv = ((0, 0), (0, 0), (0, 0), (0, 0))
 
-        # Output boxes must be emitted in block-index order so the kernel's k-th
-        # store maps to dst_barriers[k] (see subregion_offset in the .cuh).
+        # one box per sub-region touched, in block-index order so the kernel's
+        # k-th sub-region store maps to dst_barriers[k]
         q_regions = []
         q_lo = start_block
         q_hi = min(end_block, k_blk_start)
