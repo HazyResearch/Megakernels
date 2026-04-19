@@ -192,8 +192,7 @@ struct AttentionReduction {
             kittens::warp::sync();
             if (kittens::warp::elect_leader()) {
                 s.page_finish(data_pid(s));
-                barrier_arrive<Config>(&g.barriers.raw_ptr[inst.barrier_base],
-                                       Q_HEADS_PER_INSTRUCTION);
+                barrier_arrive<Config>(&g.barriers.raw_ptr[inst.barrier_base], 1);
             }
         }
     };
