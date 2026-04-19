@@ -114,7 +114,7 @@ class AttentionReduction(IType):
         lse_region = ((q_start, q_end), (0, lse_cols))
         o_region = ((q_start, q_end), (0, num_partials), (0, head_dim))
         out_region = ((q_start * head_dim, q_end * head_dim),)
-        return [lse_region, o_region], [out_region]
+        return [[lse_region], [o_region]], [[out_region]]
 
     def validate(
         self,

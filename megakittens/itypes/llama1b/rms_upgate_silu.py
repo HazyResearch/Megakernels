@@ -139,7 +139,7 @@ class RmsUpgateSilu(IType):
         eps_region = ((0, 1),)
         # one block per inst under auto: tight out region for fine-grained barriers
         out_region = ((sm_idx * 16, (sm_idx + 1) * 16),)
-        return [x_region, norm_region, up_region, gate_region, eps_region], [out_region]
+        return [[x_region], [norm_region], [up_region], [gate_region], [eps_region]], [[out_region]]
 
     def validate(
         self,

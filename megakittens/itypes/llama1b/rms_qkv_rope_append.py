@@ -227,9 +227,9 @@ class RmsQkvRopeAppend(IType):
             dst_v_region = ((layer_idx, layer_idx + 1), (0, max_seq_len), (kv_head, kv_head + 1), (0, head_dim))
         # k/v cache are write-only here; empty src regions keep cross-layer
         # reads (forced by mutates_args) from creating false dependencies.
-        return [hidden_region, norm_region, qkv_w_region, rope_cos_region, rope_sin_region,
-                empty_kv, empty_kv, pos_region, eps_region], \
-               [q_region, dst_k_region, dst_v_region]
+        return [[hidden_region], [norm_region], [qkv_w_region], [rope_cos_region], [rope_sin_region],
+                [empty_kv], [empty_kv], [pos_region], [eps_region]], \
+               [[q_region], [dst_k_region], [dst_v_region]]
 
     def validate(
         self,

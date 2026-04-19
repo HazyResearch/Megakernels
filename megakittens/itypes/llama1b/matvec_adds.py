@@ -130,7 +130,7 @@ class MatVecAdds(IType):
         x_region = ((col_offset, col_offset + n),)
         w_region = ((layer_idx, layer_idx + 1), (start_block * BLOCK_SIZE, end_block * BLOCK_SIZE), (col_offset, col_offset + n))
         out_region = ((start_block * BLOCK_SIZE, end_block * BLOCK_SIZE),)
-        return [residual_region, x_region, w_region], [out_region]
+        return [[residual_region], [x_region], [w_region]], [[out_region]]
 
     def validate(
         self,

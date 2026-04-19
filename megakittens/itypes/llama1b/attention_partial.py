@@ -130,7 +130,7 @@ class AttentionPartial(IType):
         pos_region = ((0, 1),)
         scale_region = ((0, 1),)
         out_region = ((q_start, q_end),)
-        return [q_region, kv_region, kv_region, pos_region, scale_region], [out_region]
+        return [[q_region], [kv_region], [kv_region], [pos_region], [scale_region]], [[out_region]]
 
     def validate(
         self,
@@ -274,7 +274,7 @@ class AttentionPartialMulti(IType):
         o_head_end = o_head_start + gqa_ratio
         o_region = ((o_head_start, o_head_end), (0, num_partials), (0, head_dim))
         l_region = ((o_head_start, o_head_end), (0, num_partials))
-        return [q_region, kv_region, kv_region, pos_region, scale_region], [o_region, l_region]
+        return [[q_region], [kv_region], [kv_region], [pos_region], [scale_region]], [[o_region], [l_region]]
 
     def validate(
         self,

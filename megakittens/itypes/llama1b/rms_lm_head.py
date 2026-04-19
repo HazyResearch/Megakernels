@@ -140,7 +140,7 @@ class RmsLmHead(IType):
         lm_head_region = ((start_block * 16, end_block * 16), (0, n))
         eps_region = ((0, 1),)
         out_region = ((start_block * 16, end_block * 16),)
-        return [x_region, norm_region, lm_head_region, eps_region], [out_region]
+        return [[x_region], [norm_region], [lm_head_region], [eps_region]], [[out_region]]
 
     def validate(
         self,
