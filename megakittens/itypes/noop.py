@@ -21,7 +21,7 @@ class Noop(IType):
     test_cases: list[tuple] = []
     bench_cases: list[tuple] = []
 
-    def test_args(self, case):
+    def test_args(self, case: tuple) -> tuple:
         return ()
 
     @property
@@ -45,7 +45,12 @@ class Noop(IType):
     ) -> List[Tuple[int, ...]]:
         return [()]
 
-    def access_regions(self, block_index, src_metas, dst_metas):
+    def access_regions(
+        self,
+        block_index: Tuple[int, ...],
+        src_metas: Tuple[TensorMeta, ...],
+        dst_metas: Tuple[TensorMeta, ...],
+    ) -> tuple[list[list[tuple[tuple[int, int], ...]]], list[list[tuple[tuple[int, int], ...]]]]:
         return [], []
 
     def validate(

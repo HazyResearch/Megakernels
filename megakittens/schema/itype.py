@@ -197,9 +197,11 @@ class IType(ABC):
         block_index: Tuple[int, ...],
         src_metas: Tuple[TensorMeta, ...],
         dst_metas: Tuple[TensorMeta, ...],
-    ) -> tuple[list[tuple[tuple[int, int], ...]], list[tuple[tuple[int, int], ...]]]:
+    ) -> tuple[list[list[tuple[tuple[int, int], ...]]], list[list[tuple[tuple[int, int], ...]]]]:
         """Per-instruction tile regions for fine-grained barriers.
-        Returns (src_regions, dst_regions); one tuple of (start, end) ranges per tensor."""
+        Returns (src_regions, dst_regions); one list of boxes per tensor, where
+        each box is a tuple of (start, end) ranges per dim. Boxes for the
+        same tensor must not overlap and must all share the same ndim."""
         ...
 
     @property

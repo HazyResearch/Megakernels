@@ -189,23 +189,28 @@ class ElementwiseBinary(IType):
         dst_range = dst_ranges[0]
         return dst_range[0].size * dst_range[1].size * (dst_range[2].size // self.TILE_SIZE) * ((dst_range[3].size // self.TILE_SIZE + self.tiles_per_inst - 1) // self.tiles_per_inst)
 
-    def access_regions(self, block_index, src_metas, dst_metas):
+    def access_regions(
+        self,
+        block_index: Tuple[int, ...],
+        src_metas: Tuple[TensorMeta, ...],
+        dst_metas: Tuple[TensorMeta, ...],
+    ) -> tuple[list[list[tuple[tuple[int, int], ...]]], list[list[tuple[tuple[int, int], ...]]]]:
         n = block_index[-1]
         src_regions = []
         for i in range(self.num_inputs):
             b_src, d_src, r_src, c_src = block_index[i * 4: i * 4 + 4]
-            src_regions.append((
+            src_regions.append([(
                 (b_src, b_src + 1), (d_src, d_src + 1),
                 (r_src * self.TILE_SIZE, (r_src + 1) * self.TILE_SIZE),
                 (c_src * self.TILE_SIZE, (c_src + n) * self.TILE_SIZE),
-            ))
+            )])
         b_dst, d_dst, r_dst, c_dst = block_index[self.num_inputs * 4: self.num_inputs * 4 + 4]
         dst_region = (
             (b_dst, b_dst + 1), (d_dst, d_dst + 1),
             (r_dst * self.TILE_SIZE, (r_dst + 1) * self.TILE_SIZE),
             (c_dst * self.TILE_SIZE, (c_dst + n) * self.TILE_SIZE),
         )
-        return src_regions, [dst_region]
+        return src_regions, [[dst_region]]
 
     def validate(
         self,

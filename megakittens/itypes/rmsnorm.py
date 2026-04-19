@@ -136,13 +136,18 @@ class RMSNorm(IType):
         x_range = src_ranges[0]
         return x_range[0].size * x_range[1].size * math.ceil(x_range[2].size / _rows_per_inst(x_range[3].size))
 
-    def access_regions(self, block_index, src_metas, dst_metas):
+    def access_regions(
+        self,
+        block_index: Tuple[int, ...],
+        src_metas: Tuple[TensorMeta, ...],
+        dst_metas: Tuple[TensorMeta, ...],
+    ) -> tuple[list[list[tuple[tuple[int, int], ...]]], list[list[tuple[tuple[int, int], ...]]]]:
         b_x, d_x, r_x, b_y, d_y, r_y, n = block_index
         C = src_metas[0].shape[-1]
         x_region = ((b_x, b_x + 1), (d_x, d_x + 1), (r_x, r_x + n), (0, C))
         w_region = ((0, C),)
         y_region = ((b_y, b_y + 1), (d_y, d_y + 1), (r_y, r_y + n), (0, C))
-        return [x_region, w_region], [y_region]
+        return [[x_region], [w_region]], [[y_region]]
 
     def validate(
         self,
