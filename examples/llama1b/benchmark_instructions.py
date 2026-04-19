@@ -827,6 +827,7 @@ def benchmark_tok_per_sec(prompt="Hello, my name is", max_new_tokens=200, num_sa
         instruction_metas, tensor_metas, instructions, num_barriers,
         input_indices, output_indices,
         use_jit_cache=False,
+        cluster_size=1,
     )
 
     # Pre-generate instruction tensors for each unique num_partitions
@@ -836,7 +837,7 @@ def benchmark_tok_per_sec(prompt="Hello, my name is", max_new_tokens=200, num_sa
         for np_val in range(1, max_np + 1):
             _, _, insts, _, _, _ = schedule_decode(
                 sm_count=sm_count, num_partitions=np_val, max_partitions=max_np)
-            instruction_tensors[np_val] = _pack_instructions_per_sm(insts, sm_count, device=D)
+            instruction_tensors[np_val] = _pack_instructions_per_sm(insts, sm_count, cluster_size=1, device=D)
         label = f"chunk_size={chunk_size}, max_partitions={max_np}"
     else:
         label = "no reduction"

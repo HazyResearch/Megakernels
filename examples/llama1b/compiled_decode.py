@@ -133,7 +133,6 @@ def benchmark_tok_per_sec(prompt="Hello, my name is", max_new_tokens=200, num_sa
     attn_scale_tensor = torch.tensor([ATTN_SCALE], dtype=torch.float32, device=D)
     rms_norm_eps_tensor = torch.tensor([RMS_NORM_EPS], dtype=torch.float32, device=D)
 
-    # same order as decode() signature
     decode_args = (
         hidden_states,
         weights["qkv_weights"], weights["o_weights"],
@@ -144,7 +143,7 @@ def benchmark_tok_per_sec(prompt="Hello, my name is", max_new_tokens=200, num_sa
         pos_id_tensor, attn_scale_tensor, rms_norm_eps_tensor,
     )
 
-    compiled = megakittens.compile(decode, use_jit_cache=False, verbose=False, save_schedule=True)
+    compiled = megakittens.compile(decode, use_jit_cache=False, verbose=False, save_schedule=False, cluster_size=1)
 
     # Pre-allocate CPU-side buffer and cache GPU address for fast pos_id updates
     _pos_id_buf = (ctypes.c_int * 1)(0)
