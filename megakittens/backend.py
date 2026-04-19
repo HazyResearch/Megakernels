@@ -23,6 +23,7 @@ def megakittens_backend(
     use_jit_cache: bool = True,
     verbose: bool = True,
     global_work_queue: bool = False,
+    cluster_size: int = 2,
 ) -> Callable[[torch.fx.GraphModule, List[Any]], Callable[..., Any]]:
     def _megakittens_backend(gm: torch.fx.GraphModule, example_inputs: List[Any]) -> Callable[..., Any]:
         if verbose:
@@ -55,7 +56,7 @@ def megakittens_backend(
                 num_barriers,
                 input_tensor_indices,
                 output_tensor_indices,
-            ) = schedule(dag, verbose=verbose)
+            ) = schedule(dag, cluster_size=cluster_size, verbose=verbose)
 
         if save_schedule:
             with timed("Saved schedule as TXT", verbose):
@@ -74,6 +75,7 @@ def megakittens_backend(
                 use_jit_cache=use_jit_cache,
                 verbose=verbose,
                 global_work_queue=global_work_queue,
+                cluster_size=cluster_size,
             )
 
         return make_boxed_func(dispatcher)

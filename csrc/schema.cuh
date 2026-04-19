@@ -49,7 +49,8 @@ struct default_config {
     static constexpr int INSTRUCTION_PIPE_STAGES = 2;
     static constexpr int CLUSTER_SIZE = 2;
     static constexpr int MIN_BLOCKS_PER_SM = 1;
-    static_assert(INSTRUCTION_PIPE_STAGES == 2 && CLUSTER_SIZE == 2 && MIN_BLOCKS_PER_SM == 1); // should not change
+    static_assert(INSTRUCTION_PIPE_STAGES == 2 && MIN_BLOCKS_PER_SM == 1);
+    static_assert(CLUSTER_SIZE == 1 || CLUSTER_SIZE == 2);
 
     static constexpr int NUM_CONSUMER_WARPS = 8;
     static constexpr int NUM_WARPS = 4 + NUM_CONSUMER_WARPS;

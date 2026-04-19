@@ -6,6 +6,8 @@ namespace megakittens {
 
 template <typename Config, typename Globals, int SRC_A, int SRC_B, int DST_D>
 struct Gemm {
+    static_assert(Config::CLUSTER_SIZE == 2, "Gemm requires CLUSTER_SIZE == 2");
+
     static constexpr int Mb = 256;
     static constexpr int Nb = 256;
     static constexpr int Kb = 64;

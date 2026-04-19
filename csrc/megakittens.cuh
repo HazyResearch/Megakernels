@@ -46,7 +46,8 @@ void kernel(const __grid_constant__ Globals g) {
         init_semaphore(tensor_finished, 1);
         arrive(tensor_finished, 1);
     }
-    kittens::everyone::tma::cluster::sync();
+    if constexpr (Config::CLUSTER_SIZE > 1) kittens::everyone::tma::cluster::sync();
+    else __syncthreads();
     kittens::pdl::wait();
 
     // Initiate the main loops
@@ -74,7 +75,8 @@ void kernel(const __grid_constant__ Globals g) {
     }
 
     // Sync all threads in the cluster before exiting
-    kittens::everyone::tma::cluster::sync();
+    if constexpr (Config::CLUSTER_SIZE > 1) kittens::everyone::tma::cluster::sync();
+    else __syncthreads();
 }
 
 } // namespace megakittens
