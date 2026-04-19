@@ -221,7 +221,7 @@ struct AttentionPartial {
                     if (local_i == num_local_blocks - 1) {
                         // K, V are the last 2 src_barriers in both hand and auto schedules
                         const auto &raw = s.instruction();
-                        int total = raw.num_input_barriers + raw.num_reuse_barriers;
+                        int total = raw.num_src_input_barriers + raw.num_src_reuse_barriers;
                         for (int i = total - 2; i < total; i++)
                             barrier_wait<Config>(&g.barriers.raw_ptr[raw.src_barriers[i]],
                                                  raw.src_barrier_targets[i]);
@@ -295,7 +295,7 @@ struct AttentionPartial {
 
             if (kittens::warp::elect_leader()) {
                 const auto &raw = s.instruction();
-                int num_q = raw.num_input_barriers - 2;
+                int num_q = raw.num_src_input_barriers - 2;
                 for (int i = 0; i < num_q; i++)
                     barrier_wait<Config>(&g.barriers.raw_ptr[raw.src_barriers[i]],
                                          raw.src_barrier_targets[i]);
@@ -438,7 +438,7 @@ struct AttentionPartial {
                     s.page_finish(qol_pid(s));
                     const auto &dst_inst = s.instruction();
                     barrier_arrive<Config>(&g.barriers.raw_ptr[dst_inst.dst_barriers[0]], 1);
-                    for (int i = 1; i < dst_inst.num_dst_barriers; i++)
+                    for (int i = 1; i < dst_inst.num_dst_input_barriers + dst_inst.num_dst_reuse_barriers; i++)
                         barrier_arrive<Config>(&g.barriers.raw_ptr[dst_inst.dst_barriers[i]], 1);
                 }
             }

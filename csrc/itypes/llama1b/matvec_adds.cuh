@@ -112,15 +112,14 @@ struct MatVecAdds {
 
     struct storer {
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
-            // dst_barriers[0] in store() with count=iters; auto-scheduler extras below
+            // storer_loop fires dst_barriers[0] with count=iters;
+            // fire any remaining dst_barriers (extra inputs + reuse) added by the auto-scheduler.
             pipeline::storer_loop(s, g);
-            const auto &inst = s.instruction();
-            if (inst.num_dst_barriers > 1) {
-                kittens::warp::sync();
-                if (kittens::warp::elect_leader()) {
-                    for (int i = 1; i < inst.num_dst_barriers; i++)
-                        barrier_arrive<Config>(&g.barriers.raw_ptr[inst.dst_barriers[i]], 1);
-                }
+            if (kittens::warp::elect_leader()) {
+                const auto &inst = s.instruction();
+                int total = inst.num_dst_input_barriers + inst.num_dst_reuse_barriers;
+                for (int i = 1; i < total; i++)
+                    barrier_arrive<Config>(&g.barriers.raw_ptr[inst.dst_barriers[i]], 1);
             }
         }
     };

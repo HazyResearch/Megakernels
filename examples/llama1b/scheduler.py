@@ -106,7 +106,7 @@ _noop_inst_meta = InstructionMeta(icode=0, itype=Noop(), src_tensors=(), dst_ten
 _noop = Instruction(
     icode=0, src_tensors=(), dst_tensors=(), indices=(),
     src_barriers=(), src_barrier_targets=(),
-    num_input_barriers=0, num_reuse_barriers=0, num_dst_barriers=0,
+    num_src_input_barriers=0, num_src_reuse_barriers=0, num_dst_input_barriers=0, num_dst_reuse_barriers=0,
     dst_barriers=(),
 )
 
@@ -178,9 +178,10 @@ def _schedule_qkv(
             indices=(layer_idx, start, end),
             src_barriers=src_barriers,
             src_barrier_targets=src_targets,
-            num_input_barriers=len(src_barriers),
-            num_reuse_barriers=0,
-            num_dst_barriers=len(dst_barriers),
+            num_src_input_barriers=len(src_barriers),
+            num_src_reuse_barriers=0,
+            num_dst_input_barriers=len(dst_barriers),
+            num_dst_reuse_barriers=0,
             dst_barriers=dst_barriers,
         ))
     _pad_to_cluster(instructions)
@@ -213,9 +214,10 @@ def _schedule_attention(
             indices=(layer_idx, kv_head),
             src_barriers=src_barriers,
             src_barrier_targets=src_targets,
-            num_input_barriers=len(src_barriers),
-            num_reuse_barriers=0,
-            num_dst_barriers=1,
+            num_src_input_barriers=len(src_barriers),
+            num_src_reuse_barriers=0,
+            num_dst_input_barriers=1,
+            num_dst_reuse_barriers=0,
             dst_barriers=(attn_red_barrier,),
         ))
     _pad_to_cluster(instructions)
@@ -247,9 +249,10 @@ def _schedule_attention_multi(
                 indices=(layer_idx, kv_head, partial_idx, num_partitions, attn_barrier),
                 src_barriers=src_barriers,
                 src_barrier_targets=src_targets,
-                num_input_barriers=len(src_barriers),
-                num_reuse_barriers=0,
-                num_dst_barriers=0,
+                num_src_input_barriers=len(src_barriers),
+                num_src_reuse_barriers=0,
+                num_dst_input_barriers=0,
+                num_dst_reuse_barriers=0,
                 dst_barriers=(),
             ))
     _pad_to_cluster(instructions)
@@ -273,9 +276,10 @@ def _schedule_attention_reduction(
             indices=(layer_idx, q_head_start, num_partitions, attn_red_barrier),
             src_barriers=(attn_barrier,),
             src_barrier_targets=(num_partitions * GQA_RATIO,),
-            num_input_barriers=1,
-            num_reuse_barriers=0,
-            num_dst_barriers=0,
+            num_src_input_barriers=1,
+            num_src_reuse_barriers=0,
+            num_dst_input_barriers=0,
+            num_dst_reuse_barriers=0,
             dst_barriers=(),
         ))
     _pad_to_cluster(instructions)
@@ -307,9 +311,10 @@ def _schedule_o_proj(
             indices=(layer_idx, start, end, 0),
             src_barriers=(attn_red_barrier,),
             src_barrier_targets=(ATTN_RED_TARGET,),
-            num_input_barriers=1,
-            num_reuse_barriers=0,
-            num_dst_barriers=1,
+            num_src_input_barriers=1,
+            num_src_reuse_barriers=0,
+            num_dst_input_barriers=1,
+            num_dst_reuse_barriers=0,
             dst_barriers=(oproj_barrier,),
         ))
     _pad_to_cluster(instructions)
@@ -338,9 +343,10 @@ def _schedule_upgate(
             indices=(layer_idx, sm, sm_count, num_blocks),
             src_barriers=(oproj_barrier,),
             src_barrier_targets=(OPROJ_TARGET,),
-            num_input_barriers=1,
-            num_reuse_barriers=0,
-            num_dst_barriers=len(dst_barriers),
+            num_src_input_barriers=1,
+            num_src_reuse_barriers=0,
+            num_dst_input_barriers=len(dst_barriers),
+            num_dst_reuse_barriers=0,
             dst_barriers=dst_barriers,
         ))
     _pad_to_cluster(instructions)
@@ -374,9 +380,10 @@ def _schedule_downproj(
                 indices=(layer_idx, start, end, col_offset),
                 src_barriers=(upgate_sub,),
                 src_barrier_targets=(UPGATE_TARGET_PER_SUB,),
-                num_input_barriers=1,
-                num_reuse_barriers=0,
-                num_dst_barriers=1,
+                num_src_input_barriers=1,
+                num_src_reuse_barriers=0,
+                num_dst_input_barriers=1,
+                num_dst_reuse_barriers=0,
                 dst_barriers=(downproj_barrier,),
             ))
 
@@ -406,9 +413,10 @@ def _schedule_lm_head(
             indices=(start, end),
             src_barriers=(prev_barrier,),
             src_barrier_targets=(prev_barrier_target,),
-            num_input_barriers=1,
-            num_reuse_barriers=0,
-            num_dst_barriers=0,
+            num_src_input_barriers=1,
+            num_src_reuse_barriers=0,
+            num_dst_input_barriers=0,
+            num_dst_reuse_barriers=0,
             dst_barriers=(),
         ))
     _pad_to_cluster(instructions)

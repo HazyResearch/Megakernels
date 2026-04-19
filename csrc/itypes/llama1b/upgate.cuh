@@ -142,16 +142,7 @@ struct RmsUpgateSilu {
             if (kittens::warp::elect_leader()) {
                 kittens::tma::store_async_wait();
                 s.page_finish(pipeline::get_activation_page(s));
-            }
-            // per-chunk sub-barriers in gate iter; auto-scheduler reuse below
-            const auto &instr = s.instruction();
-            int num_handled = inst.iters / 2;
-            if (instr.num_dst_barriers > num_handled) {
-                kittens::warp::sync();
-                if (kittens::warp::elect_leader()) {
-                    for (int i = num_handled; i < instr.num_dst_barriers; i++)
-                        barrier_arrive<Config>(&g.barriers.raw_ptr[instr.dst_barriers[i]], 1);
-                }
+                all_reuse_barrier_arrive<Config>(g, s.instruction());
             }
         }
     };

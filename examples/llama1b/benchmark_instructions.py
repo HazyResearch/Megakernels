@@ -49,7 +49,7 @@ _NOOP_META = InstructionMeta(icode=0, itype=Noop(), src_tensors=(), dst_tensors=
 _NOOP_INST = Instruction(
     icode=0, src_tensors=(), dst_tensors=(), indices=(),
     src_barriers=(), src_barrier_targets=(),
-    num_input_barriers=0, num_reuse_barriers=0, num_dst_barriers=0,
+    num_src_input_barriers=0, num_src_reuse_barriers=0, num_dst_input_barriers=0, num_dst_reuse_barriers=0,
     dst_barriers=(),
 )
 
@@ -189,7 +189,7 @@ def _setup_rms_qkv_rope_append(sm_count):
         instructions.append(Instruction(
             icode=1, src_tensors=(0, 1, 2, 3, 4, 5, 6), dst_tensors=(7,), indices=(0, s, e),
             src_barriers=(), src_barrier_targets=(),
-            num_input_barriers=0, num_reuse_barriers=0, num_dst_barriers=0,
+            num_src_input_barriers=0, num_src_reuse_barriers=0, num_dst_input_barriers=0, num_dst_reuse_barriers=0,
             dst_barriers=(),
         ))
 
@@ -245,7 +245,7 @@ def _setup_attention_partial(sm_count):
         instructions.append(Instruction(
             icode=1, src_tensors=(0, 1, 2), dst_tensors=(3,), indices=(layer_idx, kv_head),
             src_barriers=(), src_barrier_targets=(),
-            num_input_barriers=0, num_reuse_barriers=0, num_dst_barriers=0,
+            num_src_input_barriers=0, num_src_reuse_barriers=0, num_dst_input_barriers=0, num_dst_reuse_barriers=0,
             dst_barriers=(),
         ))
 
@@ -289,7 +289,7 @@ def _setup_o_proj_residual(sm_count):
         instructions.append(Instruction(
             icode=1, src_tensors=src, dst_tensors=dst, indices=(layer_idx, b, b + 1, 0),
             src_barriers=(), src_barrier_targets=(),
-            num_input_barriers=0, num_reuse_barriers=0, num_dst_barriers=0,
+            num_src_input_barriers=0, num_src_reuse_barriers=0, num_dst_input_barriers=0, num_dst_reuse_barriers=0,
             dst_barriers=(),
         ))
 
@@ -332,7 +332,7 @@ def _setup_rms_upgate_silu(sm_count):
             icode=1, src_tensors=(0, 1, 2, 3), dst_tensors=(4,),
             indices=(layer_idx, sm, sm_count, num_blocks, 0),
             src_barriers=(), src_barrier_targets=(),
-            num_input_barriers=0, num_reuse_barriers=0, num_dst_barriers=0,
+            num_src_input_barriers=0, num_src_reuse_barriers=0, num_dst_input_barriers=0, num_dst_reuse_barriers=0,
             dst_barriers=(),
         ))
 
@@ -386,7 +386,7 @@ def _setup_down_proj_residual(sm_count):
                 icode=1, src_tensors=src, dst_tensors=dst,
                 indices=(layer_idx, block, block + 1, reduction_col_offset),
                 src_barriers=(), src_barrier_targets=(),
-                num_input_barriers=0, num_reuse_barriers=0, num_dst_barriers=0,
+                num_src_input_barriers=0, num_src_reuse_barriers=0, num_dst_input_barriers=0, num_dst_reuse_barriers=0,
                 dst_barriers=(),
             ))
 
@@ -430,7 +430,7 @@ def _setup_rms_lm_head(sm_count):
         instructions.append(Instruction(
             icode=1, src_tensors=(0, 1, 2), dst_tensors=(3,), indices=(s, e),
             src_barriers=(), src_barrier_targets=(),
-            num_input_barriers=0, num_reuse_barriers=0, num_dst_barriers=0,
+            num_src_input_barriers=0, num_src_reuse_barriers=0, num_dst_input_barriers=0, num_dst_reuse_barriers=0,
             dst_barriers=(),
         ))
 

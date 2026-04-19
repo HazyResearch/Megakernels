@@ -176,18 +176,17 @@ struct RmsQkvRopeAppend {
 
     struct storer {
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
-            // per-head sub-barriers in store(); auto-scheduler reuse barriers below
+            // storer_loop fires per-head sub-barriers dst_barriers[0 .. num_handled);
+            // fire any remaining dst_barriers (extra inputs + reuse) added by the auto-scheduler.
             pipeline::storer_loop(s, g);
-            const auto &inst = s.instruction();
-            parsed_instruction pinst{inst};
-            constexpr int BPH = HEAD_DIM / BLOCK_SIZE;
-            int num_handled = (pinst.end_block_idx - 1) / BPH - pinst.start_block_idx / BPH + 1;
-            if (inst.num_dst_barriers > num_handled) {
-                kittens::warp::sync();
-                if (kittens::warp::elect_leader()) {
-                    for (int i = num_handled; i < inst.num_dst_barriers; i++)
-                        barrier_arrive<Config>(&g.barriers.raw_ptr[inst.dst_barriers[i]], 1);
-                }
+            if (kittens::warp::elect_leader()) {
+                const auto &inst = s.instruction();
+                parsed_instruction pinst{inst};
+                constexpr int BPH = HEAD_DIM / BLOCK_SIZE;
+                int num_handled = (pinst.end_block_idx - 1) / BPH - pinst.start_block_idx / BPH + 1;
+                int total = inst.num_dst_input_barriers + inst.num_dst_reuse_barriers;
+                for (int i = num_handled; i < total; i++)
+                    barrier_arrive<Config>(&g.barriers.raw_ptr[inst.dst_barriers[i]], 1);
             }
         }
     };
