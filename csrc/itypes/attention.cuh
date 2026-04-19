@@ -6,6 +6,8 @@ namespace megakittens {
 
 template <typename Config, typename Globals, int SRC_Q, int SRC_K, int SRC_V, int DST_O, bool CAUSAL = false>
 struct Attention {
+    static_assert(Config::CLUSTER_SIZE == 2, "Attention requires CLUSTER_SIZE == 2");
+
     static constexpr int Mb = 128;
     static constexpr int Nb = 128;
     static constexpr int Db = 128;
