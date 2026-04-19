@@ -93,8 +93,7 @@ DOWNPROJ_SUB_BARRIERS = 1
 # Target counts for fine-grained barriers
 UPGATE_TARGET_PER_SUB = HIDDEN_DIM // MATVEC_BLOCK_SIZE                 # 128
 ATTN_RED_TARGET = NUM_KV_HEADS                                          # 8 (one arrive per attention inst)
-OPROJ_TARGET = HIDDEN_DIM // MATVEC_BLOCK_SIZE                          # 128
-DOWNPROJ_TARGET = INTERMEDIATE_DIM // MATVEC_BLOCK_SIZE  # 512
+# OPROJ/DOWNPROJ targets = number of aggregated instructions (one arrive per instance).
 
 
 # mirror of rms_qkv_rope_append.cuh::subregion_offset
@@ -328,7 +327,7 @@ def _schedule_o_proj(
     layer_idx: int,
     icode: int,
     max_instructions: int | None = None,
-) -> list[Instruction]:
+) -> tuple[list[Instruction], int]:
     attn_red_barrier = _barrier_index(layer_idx, 2, 0)
     oproj_barrier = _barrier_index(layer_idx, 3, 0)
     num_blocks = HIDDEN_DIM // MATVEC_BLOCK_SIZE  # 128
@@ -354,14 +353,16 @@ def _schedule_o_proj(
             num_dst_reuse_barriers=0,
             dst_barriers=(oproj_barrier,),
         ))
+    target = len(instructions)
     _pad_to_cluster(instructions)
-    return instructions
+    return instructions, target
 
 
 def _schedule_upgate(
     sm_count: int,
     layer_idx: int,
     icode: int,
+    oproj_target: int,
 ) -> list[Instruction]:
     oproj_barrier = _barrier_index(layer_idx, 3, 0)
     num_blocks = INTERMEDIATE_DIM // MATVEC_BLOCK_SIZE  # 512
@@ -379,7 +380,7 @@ def _schedule_upgate(
             dst_tensors=(T.SILU_OUT,),
             indices=(layer_idx, sm, sm_count, num_blocks),
             src_barriers=(oproj_barrier,),
-            src_barrier_targets=(OPROJ_TARGET,),
+            src_barrier_targets=(oproj_target,),
             num_src_input_barriers=1,
             num_src_reuse_barriers=0,
             num_dst_input_barriers=len(dst_barriers),
@@ -394,7 +395,7 @@ def _schedule_downproj(
     sm_count: int,
     layer_idx: int,
     icode: int,
-) -> list[Instruction]:
+) -> tuple[list[Instruction], int]:
     downproj_barrier = _barrier_index(layer_idx, 5, 0)
     num_blocks = HIDDEN_DIM // MATVEC_BLOCK_SIZE  # 128
     num_chunks = INTERMEDIATE_DIM // HIDDEN_DIM   # 4 reduction chunks
@@ -424,17 +425,18 @@ def _schedule_downproj(
                 dst_barriers=(downproj_barrier,),
             ))
 
+    target = len(instructions)
     _pad_to_cluster(instructions)
-    return instructions
+    return instructions, target
 
 
 def _schedule_lm_head(
     sm_count: int,
     num_layers: int,
     icode: int,
+    prev_barrier_target: int,
 ) -> list[Instruction]:
     prev_barrier = _barrier_index(num_layers - 1, 5, 0)
-    prev_barrier_target = DOWNPROJ_TARGET
     num_blocks = VOCAB_SIZE // MATVEC_BLOCK_SIZE
     # round up for non-divisible vocab
     if VOCAB_SIZE % MATVEC_BLOCK_SIZE != 0:
@@ -564,13 +566,13 @@ def schedule_decode(
     instructions: list[Instruction] = []
     num_barriers = num_layers * NUM_BARRIER_SLOTS * MAX_SUB_BARRIERS
 
-    for layer_idx in range(num_layers):
-        prev_layer_barrier = _barrier_index(layer_idx - 1, 5, 0) if layer_idx > 0 else None
-        prev_layer_target = DOWNPROJ_TARGET if layer_idx > 0 else 0
+    prev_downproj_target = 0
+    prev_layer_barrier = None
 
+    for layer_idx in range(num_layers):
         qkv_insts, qkv_target_per_sub = _schedule_qkv(
             sm_count, layer_idx, icode_qkv,
-            prev_layer_barrier, prev_layer_target,
+            prev_layer_barrier, prev_downproj_target,
         )
 
         if use_multi_partition:
@@ -582,10 +584,14 @@ def schedule_decode(
             attn_insts = _schedule_attention(layer_idx, icode_attn, qkv_target_per_sub)
             attn_red_insts = []
 
-        oproj_insts = _schedule_o_proj(sm_count, layer_idx, icode_oproj,
-                                       max_instructions=oproj_max_instructions)
-        upgate_insts = _schedule_upgate(sm_count, layer_idx, icode_upgate)
-        downproj_insts = _schedule_downproj(sm_count, layer_idx, icode_downproj)
+        oproj_insts, oproj_target = _schedule_o_proj(
+            sm_count, layer_idx, icode_oproj,
+            max_instructions=oproj_max_instructions,
+        )
+        upgate_insts = _schedule_upgate(sm_count, layer_idx, icode_upgate, oproj_target)
+        downproj_insts, downproj_target = _schedule_downproj(
+            sm_count, layer_idx, icode_downproj,
+        )
 
         instructions.extend(qkv_insts)
         instructions.extend(attn_insts)
@@ -594,8 +600,11 @@ def schedule_decode(
         instructions.extend(upgate_insts)
         instructions.extend(downproj_insts)
 
+        prev_layer_barrier = _barrier_index(layer_idx, 5, 0)
+        prev_downproj_target = downproj_target
+
     # LM head
-    lmhead_insts = _schedule_lm_head(sm_count, num_layers, icode_lmhead)
+    lmhead_insts = _schedule_lm_head(sm_count, num_layers, icode_lmhead, prev_downproj_target)
     instructions.extend(lmhead_insts)
 
     # All tensors are inputs (caller pre-allocates everything)

@@ -52,7 +52,7 @@ struct MatVecAdds {
 
                 if (output_idx == inst.iters - 1) {
                     const auto &instr = s.instruction();
-                    barrier_arrive<Config>(&g.barriers.raw_ptr[instr.dst_barriers[0]], inst.iters);
+                    barrier_arrive<Config>(&g.barriers.raw_ptr[instr.dst_barriers[0]], 1);
                 }
             }
             kittens::warp::sync();
@@ -112,7 +112,7 @@ struct MatVecAdds {
 
     struct storer {
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
-            // store() fires dst_barriers[0] with count=iters, auto-scheduler inplace waw extras + reuse below
+            // store() fires dst_barriers[0] with count=1, auto-scheduler inplace waw extras + reuse below
             pipeline::storer_loop(s, g);
             if (kittens::warp::elect_leader()) {
                 const auto &inst = s.instruction();

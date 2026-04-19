@@ -6,6 +6,7 @@ from ...schema.dtype import DType
 from ...schema.itype import IType
 from ...schema.tensor import TensorMeta, TensorRange, TensorSpec
 from ...jit.pykittens import sv, st
+from ...jit.cuda_utils import get_sm_count
 
 
 @torch.library.custom_op("megakittens::mat_vec_adds", mutates_args=("residual",))
@@ -101,7 +102,9 @@ class MatVecAdds(IType):
     ) -> int:
         num_blocks = dst_ranges[0][-1].size // BLOCK_SIZE
         num_chunks = src_ranges[1][-1].size // self._n
-        return num_blocks * num_chunks
+        sms_per_chunk = max(get_sm_count() // num_chunks, 1)
+        insts_per_chunk = min(sms_per_chunk, num_blocks)
+        return insts_per_chunk * num_chunks
 
     def block_indices(
         self,
@@ -115,11 +118,17 @@ class MatVecAdds(IType):
         layer_idx = src_ranges[2][-3].start
         block_start = out_range[-1].start // BLOCK_SIZE
         block_stop = out_range[-1].stop // BLOCK_SIZE
+        num_blocks = block_stop - block_start
         num_chunks = x_range[-1].size // self._n
+        sms_per_chunk = max(get_sm_count() // num_chunks, 1)
+        insts_per_chunk = min(sms_per_chunk, num_blocks)
         return [
-            (layer_idx, b, b + 1, x_range[-1].start + chunk * self._n)
+            (layer_idx,
+             block_start + round(i * num_blocks / insts_per_chunk),
+             block_start + round((i + 1) * num_blocks / insts_per_chunk),
+             x_range[-1].start + chunk * self._n)
             for chunk in range(num_chunks)
-            for b in range(block_start, block_stop)
+            for i in range(insts_per_chunk)
         ]
 
     def test_args(self, case):
