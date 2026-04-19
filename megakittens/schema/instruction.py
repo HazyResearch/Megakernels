@@ -24,10 +24,10 @@ class Instruction(BaseModel):
       - indices: 64B (16-array of int32)
       - src_barriers: 64B (16-array of uint32)
       - src_barrier_targets: 64B (16-array of int32)
-      - num_input_barriers: 1B (uint8)
-      - num_reuse_barriers: 1B (uint8)
-      - num_dst_barriers: 1B (uint8)
-      - _pad: 1B
+      - num_src_input_barriers: 1B (uint8)
+      - num_src_reuse_barriers: 1B (uint8)
+      - num_dst_input_barriers: 1B (uint8)
+      - num_dst_reuse_barriers: 1B (uint8)
       - dst_barriers: 32B (8-array of uint32)
     """
     MAX_SRC_TENSORS: ClassVar[int] = 16
@@ -43,7 +43,8 @@ class Instruction(BaseModel):
     indices: Tuple[conint(ge=-(2**31), le=2**31 - 1), ...] = Field(..., max_length=MAX_INDICES)
     src_barriers: Tuple[conint(ge=0, le=2**32-1), ...] = Field(..., max_length=MAX_SRC_BARRIERS)
     src_barrier_targets: Tuple[conint(ge=-(2**31), le=2**31 - 1), ...] = Field(..., max_length=MAX_SRC_BARRIER_TARGETS)
-    num_input_barriers: conint(ge=0, le=255)
-    num_reuse_barriers: conint(ge=0, le=255)
-    num_dst_barriers: conint(ge=0, le=255)
+    num_src_input_barriers: conint(ge=0, le=255)
+    num_src_reuse_barriers: conint(ge=0, le=255)
+    num_dst_input_barriers: conint(ge=0, le=255)
+    num_dst_reuse_barriers: conint(ge=0, le=255)
     dst_barriers: Tuple[conint(ge=0, le=2**32-1), ...] = Field(..., max_length=MAX_DST_BARRIERS)

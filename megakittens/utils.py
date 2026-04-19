@@ -205,7 +205,9 @@ def save_schedule_as_txt(
         idx_strs = [f"idx={list(inst.indices)}" for inst in instructions]
         src_bar_strs = [f"src_bar={list(inst.src_barriers)}" for inst in instructions]
         src_bar_tgt_strs = [f"src_bar_tgt={list(inst.src_barrier_targets)}" for inst in instructions]
+        src_bar_split_strs = [f"src_bar_split=[I{inst.num_src_input_barriers},R{inst.num_src_reuse_barriers}]" for inst in instructions]
         dst_bar_strs = [f"dst_bar={list(inst.dst_barriers)}" for inst in instructions]
+        dst_bar_split_strs = [f"dst_bar_split=[I{inst.num_dst_input_barriers},R{inst.num_dst_reuse_barriers}]" for inst in instructions]
 
         w_id = max(len(s) for s in id_strs)
         w_itype = max(len(s) for s in itype_strs)
@@ -214,6 +216,8 @@ def save_schedule_as_txt(
         w_idx = max(len(s) for s in idx_strs)
         w_src_bar = max(len(s) for s in src_bar_strs)
         w_src_bar_tgt = max(len(s) for s in src_bar_tgt_strs)
+        w_src_bar_split = max(len(s) for s in src_bar_split_strs)
+        w_dst_bar = max(len(s) for s in dst_bar_strs)
 
         for i in range(len(instructions)):
             lines.append(
@@ -224,7 +228,9 @@ def save_schedule_as_txt(
                 f"  {idx_strs[i]:<{w_idx}}"
                 f"  {src_bar_strs[i]:<{w_src_bar}}"
                 f"  {src_bar_tgt_strs[i]:<{w_src_bar_tgt}}"
-                f"  {dst_bar_strs[i]}"
+                f"  {src_bar_split_strs[i]:<{w_src_bar_split}}"
+                f"  {dst_bar_strs[i]:<{w_dst_bar}}"
+                f"  {dst_bar_split_strs[i]}"
             )
 
     txt_path = base_path.parent / (base_path.name + ".schedule.txt")

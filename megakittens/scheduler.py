@@ -163,12 +163,14 @@ def assign_barriers(
         release_barriers: List[Tuple[List[int], int, int]], each is (consumer_node_ids, num_consumer_insts, reuser_node_id) for tensor reuse.
 
     Returns:
-        (node_block_indices, inst_dst_barriers, inst_src_barriers, inst_num_input_barriers, inst_num_reuse_barriers, barrier_counter) where:
+        (node_block_indices, inst_dst_barriers, inst_src_barriers, inst_num_src_input_barriers, inst_num_src_reuse_barriers, inst_num_dst_input_barriers, inst_num_dst_reuse_barriers, barrier_counter) where:
         - node_block_indices: Dict[int, list], node_id -> list of per-instruction tile coordinate tuples from block_indices().
         - inst_dst_barriers: Dict[Tuple[int, int], List[int]], (node_id, local_inst_idx) -> barrier IDs this instruction arrives on after completion.
         - inst_src_barriers: Dict[Tuple[int, int], List[Tuple[int, int]]], (node_id, local_inst_idx) -> (barrier_id, target_count) pairs to wait on before starting.
-        - inst_num_input_barriers: Dict[Tuple[int, int], int], (node_id, local_inst_idx) -> how many of src_barriers are data dependency barriers.
-        - inst_num_reuse_barriers: Dict[Tuple[int, int], int], (node_id, local_inst_idx) -> how many of src_barriers are tensor reuse barriers.
+        - inst_num_src_input_barriers: Dict[Tuple[int, int], int], (node_id, local_inst_idx) -> how many of src_barriers are data dependency barriers.
+        - inst_num_src_reuse_barriers: Dict[Tuple[int, int], int], (node_id, local_inst_idx) -> how many of src_barriers are tensor reuse barriers.
+        - inst_num_dst_input_barriers: Dict[Tuple[int, int], int], (node_id, local_inst_idx) -> how many of dst_barriers are data dependency barriers.
+        - inst_num_dst_reuse_barriers: Dict[Tuple[int, int], int], (node_id, local_inst_idx) -> how many of dst_barriers are tensor reuse barriers.
         - barrier_counter: int, total number of barriers allocated.
     """
     barrier_counter = 0
@@ -176,8 +178,10 @@ def assign_barriers(
     # Per-instruction barriers, keyed by (node_id, local_inst_idx)
     inst_src_barriers: Dict[Tuple[int, int], List[Tuple[int, int]]] = {}
     inst_dst_barriers: Dict[Tuple[int, int], List[int]] = {}
-    inst_num_input_barriers: Dict[Tuple[int, int], int] = {}
-    inst_num_reuse_barriers: Dict[Tuple[int, int], int] = {}
+    inst_num_src_input_barriers: Dict[Tuple[int, int], int] = {}
+    inst_num_src_reuse_barriers: Dict[Tuple[int, int], int] = {}
+    inst_num_dst_input_barriers: Dict[Tuple[int, int], int] = {}
+    inst_num_dst_reuse_barriers: Dict[Tuple[int, int], int] = {}
 
     # Step 1. Collect per-instruction tile regions for each compute node
     node_regions: Dict[int, list] = {}  # node_id -> list of (src_regions, dst_regions) per instruction
@@ -245,10 +249,11 @@ def assign_barriers(
         target = len(dependent_p_local_indices_set)
         for p_local_index in dependent_p_local_indices_set:
             inst_dst_barriers.setdefault((producer_id, p_local_index), []).append(bid)
+            inst_num_dst_input_barriers[(producer_id, p_local_index)] = inst_num_dst_input_barriers.get((producer_id, p_local_index), 0) + 1
         for consumer_id, c_local_indices in consumers_by_node.items():
             for c_local_index in c_local_indices:
                 inst_src_barriers.setdefault((consumer_id, c_local_index), []).append((bid, target))
-                inst_num_input_barriers[(consumer_id, c_local_index)] = inst_num_input_barriers.get((consumer_id, c_local_index), 0) + 1
+                inst_num_src_input_barriers[(consumer_id, c_local_index)] = inst_num_src_input_barriers.get((consumer_id, c_local_index), 0) + 1
 
     # Step 3. Tensor reuse barriers
     for consumer_node_ids, num_consumer_insts, reuser_id in release_barriers:
@@ -259,9 +264,10 @@ def assign_barriers(
         for nid in consumer_node_ids:
             for local_index in range(node_inst_count[nid]):
                 inst_dst_barriers.setdefault((nid, local_index), []).append(bid)
+                inst_num_dst_reuse_barriers[(nid, local_index)] = inst_num_dst_reuse_barriers.get((nid, local_index), 0) + 1
         for local_index in range(node_inst_count[reuser_id]):
             inst_src_barriers.setdefault((reuser_id, local_index), []).append((bid, num_consumer_insts))
-            inst_num_reuse_barriers[(reuser_id, local_index)] = inst_num_reuse_barriers.get((reuser_id, local_index), 0) + 1
+            inst_num_src_reuse_barriers[(reuser_id, local_index)] = inst_num_src_reuse_barriers.get((reuser_id, local_index), 0) + 1
 
     # Step 4. Validate per-instruction barrier limits
     for key, barriers in inst_dst_barriers.items():
@@ -275,7 +281,7 @@ def assign_barriers(
                 f"[MegaKittens] Instruction {key} has {len(barriers)} src barriers (max {Instruction.MAX_SRC_BARRIERS})"
             )
 
-    return node_block_indices, inst_dst_barriers, inst_src_barriers, inst_num_input_barriers, inst_num_reuse_barriers, barrier_counter
+    return node_block_indices, inst_dst_barriers, inst_src_barriers, inst_num_src_input_barriers, inst_num_src_reuse_barriers, inst_num_dst_input_barriers, inst_num_dst_reuse_barriers, barrier_counter
 
 
 def generate_instructions(
@@ -284,8 +290,10 @@ def generate_instructions(
     node_block_indices: Dict[int, list],
     inst_dst_barriers: Dict[Tuple[int, int], List[int]],
     inst_src_barriers: Dict[Tuple[int, int], List[Tuple[int, int]]],
-    inst_num_input_barriers: Dict[Tuple[int, int], int],
-    inst_num_reuse_barriers: Dict[Tuple[int, int], int],
+    inst_num_src_input_barriers: Dict[Tuple[int, int], int],
+    inst_num_src_reuse_barriers: Dict[Tuple[int, int], int],
+    inst_num_dst_input_barriers: Dict[Tuple[int, int], int],
+    inst_num_dst_reuse_barriers: Dict[Tuple[int, int], int],
 ) -> Tuple[List[InstructionMeta], List[Instruction]]:
     """Phase 4: Build flat instruction list with icodes, barriers, and cluster-aligned padding.
 
@@ -295,8 +303,10 @@ def generate_instructions(
         node_block_indices: Dict[int, list], node_id -> list of per-instruction tile coordinate tuples from block_indices().
         inst_dst_barriers: Dict[Tuple[int, int], List[int]], (node_id, local_inst_idx) -> barrier IDs this instruction arrives on after completion.
         inst_src_barriers: Dict[Tuple[int, int], List[Tuple[int, int]]], (node_id, local_inst_idx) -> (barrier_id, target_count) pairs to wait on before starting.
-        inst_num_input_barriers: Dict[Tuple[int, int], int], (node_id, local_inst_idx) -> how many of src_barriers are data dependency barriers.
-        inst_num_reuse_barriers: Dict[Tuple[int, int], int], (node_id, local_inst_idx) -> how many of src_barriers are tensor reuse barriers.
+        inst_num_src_input_barriers: Dict[Tuple[int, int], int], (node_id, local_inst_idx) -> how many of src_barriers are data dependency barriers.
+        inst_num_src_reuse_barriers: Dict[Tuple[int, int], int], (node_id, local_inst_idx) -> how many of src_barriers are tensor reuse barriers.
+        inst_num_dst_input_barriers: Dict[Tuple[int, int], int], (node_id, local_inst_idx) -> how many of dst_barriers are data dependency barriers.
+        inst_num_dst_reuse_barriers: Dict[Tuple[int, int], int], (node_id, local_inst_idx) -> how many of dst_barriers are tensor reuse barriers.
 
     Returns:
         (instruction_metas, instructions) where:
@@ -307,7 +317,7 @@ def generate_instructions(
     icode_counter = 1  # icode 0 is reserved for noop
     instruction_metas: List[InstructionMeta] = [InstructionMeta(icode=0, itype=Noop(), src_tensors=(), dst_tensors=())]
     icode_map: Dict[Tuple[IType, Tuple[int, ...], Tuple[int, ...]], int] = {}
-    noop = Instruction(icode=0, src_tensors=(), dst_tensors=(), indices=(), src_barriers=(), src_barrier_targets=(), num_input_barriers=0, num_reuse_barriers=0, num_dst_barriers=0, dst_barriers=())
+    noop = Instruction(icode=0, src_tensors=(), dst_tensors=(), indices=(), src_barriers=(), src_barrier_targets=(), num_src_input_barriers=0, num_src_reuse_barriers=0, num_dst_input_barriers=0, num_dst_reuse_barriers=0, dst_barriers=())
 
     for node in dag.nodes:
         if node.is_input or node.is_output:
@@ -339,8 +349,10 @@ def generate_instructions(
         for local_idx, block_index in enumerate(node_block_indices[node.id]):
             src_bar_list = inst_src_barriers.get((node.id, local_idx), [])
             dst_bariers = inst_dst_barriers.get((node.id, local_idx), [])
-            num_input_barriers = inst_num_input_barriers.get((node.id, local_idx), 0)
-            num_reuse_barriers = inst_num_reuse_barriers.get((node.id, local_idx), 0)
+            num_src_input_barriers = inst_num_src_input_barriers.get((node.id, local_idx), 0)
+            num_src_reuse_barriers = inst_num_src_reuse_barriers.get((node.id, local_idx), 0)
+            num_dst_input_barriers = inst_num_dst_input_barriers.get((node.id, local_idx), 0)
+            num_dst_reuse_barriers = inst_num_dst_reuse_barriers.get((node.id, local_idx), 0)
 
             instructions.append(Instruction(
                 icode=icode,
@@ -349,9 +361,10 @@ def generate_instructions(
                 indices=block_index,
                 src_barriers=tuple(bid for bid, _ in src_bar_list),
                 src_barrier_targets=tuple(tgt for _, tgt in src_bar_list),
-                num_input_barriers=num_input_barriers,
-                num_reuse_barriers=num_reuse_barriers,
-                num_dst_barriers=len(dst_bariers),
+                num_src_input_barriers=num_src_input_barriers,
+                num_src_reuse_barriers=num_src_reuse_barriers,
+                num_dst_input_barriers=num_dst_input_barriers,
+                num_dst_reuse_barriers=num_dst_reuse_barriers,
                 dst_barriers=tuple(dst_bariers),
             ))
 
@@ -385,9 +398,9 @@ def schedule(
     with timed("[Scheduler] Assigned tensors", verbose):
         tensor_metas, tensor_index, input_tensor_indices, output_tensor_indices, release_barriers = assign_tensors(dag, node_inst_count, node_inst_offset)
     with timed("[Scheduler] Assigned barriers", verbose):
-        node_block_indices, inst_dst_barriers, inst_src_barriers, inst_num_input_barriers, inst_num_reuse_barriers, barrier_counter = assign_barriers(dag, node_inst_count, release_barriers)
+        node_block_indices, inst_dst_barriers, inst_src_barriers, inst_num_src_input_barriers, inst_num_src_reuse_barriers, inst_num_dst_input_barriers, inst_num_dst_reuse_barriers, barrier_counter = assign_barriers(dag, node_inst_count, release_barriers)
     with timed("[Scheduler] Generated instructions", verbose):
-        instruction_metas, instructions = generate_instructions(dag, tensor_index, node_block_indices, inst_dst_barriers, inst_src_barriers, inst_num_input_barriers, inst_num_reuse_barriers)
+        instruction_metas, instructions = generate_instructions(dag, tensor_index, node_block_indices, inst_dst_barriers, inst_src_barriers, inst_num_src_input_barriers, inst_num_src_reuse_barriers, inst_num_dst_input_barriers, inst_num_dst_reuse_barriers)
 
     return (
         instruction_metas,
