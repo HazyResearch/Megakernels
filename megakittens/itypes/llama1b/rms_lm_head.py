@@ -6,9 +6,7 @@ from ...schema.dtype import DType
 from ...schema.itype import IType
 from ...schema.tensor import TensorMeta, TensorRange, TensorSpec
 from ...jit.pykittens import sv, st
-
-
-SM_COUNT = 148
+from ...jit.cuda_utils import get_sm_count
 
 
 @torch.library.custom_op("megakittens::rms_lm_head", mutates_args=())
@@ -103,7 +101,7 @@ class RmsLmHead(IType):
         dst_ranges: Tuple[TensorRange, ...],
     ) -> int:
         num_blocks = dst_ranges[0][-1].size // 16
-        return min(SM_COUNT, num_blocks)
+        return min(get_sm_count(), num_blocks)
 
     def block_indices(
         self,
@@ -116,7 +114,7 @@ class RmsLmHead(IType):
         block_start = out_range[-1].start // 16
         block_stop = out_range[-1].stop // 16
         num_blocks = block_stop - block_start
-        num_insts = min(SM_COUNT, num_blocks)
+        num_insts = min(get_sm_count(), num_blocks)
         return [
             (block_start + round(i * num_blocks / num_insts),
              block_start + round((i + 1) * num_blocks / num_insts))

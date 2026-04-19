@@ -26,8 +26,9 @@ BLOCK_SIZE = 16
 
 
 def _resolve_mat_vec_adds(args, kwargs):
-    x = args[1].meta['val']
-    return MatVecAdds(n=x.shape[-1]), [1]
+    # n = per-chunk reduction size; wider x (e.g. down_proj's silu_out) is handled via multiple col_offsets
+    residual = args[0].meta['val']
+    return MatVecAdds(n=residual.shape[-1]), [1]
 
 
 class MatVecAdds(IType):
@@ -98,8 +99,9 @@ class MatVecAdds(IType):
         src_ranges: Tuple[TensorRange, ...],
         dst_ranges: Tuple[TensorRange, ...],
     ) -> int:
-        out_range = dst_ranges[0]
-        return out_range[-1].size // BLOCK_SIZE
+        num_blocks = dst_ranges[0][-1].size // BLOCK_SIZE
+        num_chunks = src_ranges[1][-1].size // self._n
+        return num_blocks * num_chunks
 
     def block_indices(
         self,
@@ -109,11 +111,16 @@ class MatVecAdds(IType):
         dst_ranges: Tuple[TensorRange, ...],
     ) -> List[Tuple[int, ...]]:
         out_range = dst_ranges[0]
-        col_offset = src_ranges[1][-1].start
+        x_range = src_ranges[1]
         layer_idx = src_ranges[2][-3].start
         block_start = out_range[-1].start // BLOCK_SIZE
         block_stop = out_range[-1].stop // BLOCK_SIZE
-        return [(layer_idx, b, b + 1, col_offset) for b in range(block_start, block_stop)]
+        num_chunks = x_range[-1].size // self._n
+        return [
+            (layer_idx, b, b + 1, x_range[-1].start + chunk * self._n)
+            for chunk in range(num_chunks)
+            for b in range(block_start, block_stop)
+        ]
 
     def test_args(self, case):
         out_dim, = case
@@ -141,7 +148,7 @@ class MatVecAdds(IType):
     ) -> None:
         super().validate(src_metas, dst_metas, src_ranges, dst_ranges)
         n = src_ranges[1].effective_shape[-1]
-        if n != self._n:
+        if n % self._n != 0:
             raise RuntimeError(
-                f"[MegaKittens] {self.name}: expected n={self._n}, got {n}"
+                f"[MegaKittens] {self.name}: expected x last dim multiple of {self._n}, got {n}"
             )
