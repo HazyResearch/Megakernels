@@ -423,23 +423,17 @@ struct AttentionPartial {
                     kittens::warp::store(smem_bf, O_bf);
                     kittens::warp::sync();
                 }
-                if (kittens::warp::elect_leader()) {
+                if (kittens::warp::elect_leader()) {                                                                                                                               
                     all_reuse_barrier_wait<Config>(g, s.instruction());
                     for (int head_offset = 0; head_offset < GQA_RATIO; head_offset++) {
-                        auto &smem_bf = *reinterpret_cast<o_sv_bf *>(&O_smem[head_offset]);
-                        kittens::tma::store_async<kittens::cache_policy::EVICT_LAST>(
-                            g.template gls<DST>(), smem_bf,
-                            {0, q_head_start_idx + head_offset});
-                    }
-                }
-                kittens::warp::sync();
-                kittens::tma::store_async_wait();
-                if (kittens::warp::elect_leader()) {
-                    s.page_finish(qol_pid(s));
-                    const auto &dst_inst = s.instruction();
-                    barrier_arrive<Config>(&g.barriers.raw_ptr[dst_inst.dst_barriers[0]], 1);
-                    for (int i = 1; i < dst_inst.num_dst_input_barriers + dst_inst.num_dst_reuse_barriers; i++)
-                        barrier_arrive<Config>(&g.barriers.raw_ptr[dst_inst.dst_barriers[i]], 1);
+                        auto &smem_bf = *reinterpret_cast<o_sv_bf *>(&O_smem[head_offset]);                                                                                        
+                        kittens::tma::store_async<kittens::cache_policy::EVICT_LAST>(                                                                                              
+                            g.template gls<DST>(), smem_bf,                                                                                                                        
+                            {0, q_head_start_idx + head_offset});                                                                                                                  
+                    }                                                                                                                                                              
+                    kittens::tma::store_async_wait();
+                    s.page_finish(qol_pid(s));                                                                                                                                     
+                    all_barrier_arrive<Config>(g, s.instruction());
                 }
             }
         }
