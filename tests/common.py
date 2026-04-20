@@ -2,6 +2,7 @@ from collections.abc import Callable
 
 import torch
 torch.manual_seed(42)
+torch.backends.cuda.matmul.allow_tf32 = False
 
 import megakittens
 
