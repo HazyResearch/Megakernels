@@ -91,9 +91,7 @@ class Rms70b(IType):
         src_ranges: Tuple[TensorRange, ...],
         dst_ranges: Tuple[TensorRange, ...],
     ) -> int:
-        B = src_ranges[0][2].size
-        rows_per_inst = max(1, math.ceil(B / get_sm_count()))
-        return math.ceil(B / rows_per_inst)
+        return min(src_ranges[0][2].size, get_sm_count())
 
     def block_indices(
         self,
@@ -104,14 +102,14 @@ class Rms70b(IType):
     ) -> List[Tuple[int, ...]]:
         x_range = src_ranges[0]
         B = x_range[2].size
-        rows_per_inst = max(1, math.ceil(B / get_sm_count()))
-        indices = []
-        r = 0
-        while r < B:
-            n = min(rows_per_inst, B - r)
-            indices.append((0, 0, x_range[2].start + r, n))
-            r += n
-        return indices
+        sm_count = get_sm_count()
+        n_inst = min(B, sm_count)
+        return [
+            (0, 0,
+             x_range[2].start + round(i * B / n_inst),
+             round((i + 1) * B / n_inst) - round(i * B / n_inst))
+            for i in range(n_inst)
+        ]
 
     def access_regions(
         self,
