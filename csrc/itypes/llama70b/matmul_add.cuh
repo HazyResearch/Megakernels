@@ -4,6 +4,8 @@
 
 namespace megakittens {
 
+// STATUS: working — generic (non-reference) matmul+residual itype, single-device.
+//
 // Fused matmul + residual add: D = A @ B + C
 //
 // Structure mirrors the reference LLaMA megakernel's matmul_adds.cu

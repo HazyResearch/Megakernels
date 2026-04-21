@@ -22,12 +22,10 @@ namespace megakittens {
 //   position_ids    : gl<int, 1, 1, 1, -1>  — per-token RoPE angle index
 //   append_indices  : gl<int, 1, 1, 1, -1>  — per-token KV cache slot
 //
-// STATUS: BLOCKED on the int32 gl read crash. Any read of an int32 gl's
-// raw_ptr from the consumer crashes with CUDA_ERROR_LAUNCH_FAILED on
-// Blackwell, even under a single-thread `for (i=0..127) dst[i] = src[i]`.
-// The bf16-only `Rope` itype (rope.cuh) ports the RoPE math on
-// pre-gathered cos/sin; once the int32 blocker lifts, this itype fuses
-// matmul + RoPE + KV-append around that.
+// STATUS: stub — int32 gl read fix pattern known (use `warp::load` into a sv<int, N> scratch,
+//         as rope_gather.cuh does; verified working on 8×B200). The bf16-only `Rope` itype
+//         (rope.cuh) ports the RoPE math on pre-gathered cos/sin; this itype fuses
+//         matmul + RoPE + KV-append around that and still needs its kernel body written.
 //
 // See PORT_STATUS.md section "The int32 blocker" and the reference at
 // csrc/itypes/reference/qkv_rope_append.cu.

@@ -4,6 +4,8 @@
 
 namespace megakittens {
 
+// STATUS: working — tested via `modal run scripts/modal_8gpu.py --which downproj-residual`.
+//
 // Fused matmul + reduce-scatter onto PGL output (faithful LLaMA-70B
 // DownProjResidual, matching reference `matmul_adds.cu` with
 // `reduce_scatter=true`).

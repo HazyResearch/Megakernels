@@ -4,6 +4,9 @@
 
 namespace megakittens {
 
+// STATUS: working — verified via `pytest tests/test_itypes.py` (8×B200, `-k RopeGather`).
+//         int32 pos_gl loaded via `warp::load` (reference pattern) — avoids the raw_ptr crash.
+//
 // Rotary positional embedding with per-token cos/sin gather from a full table.
 //
 // Inputs:
@@ -41,7 +44,8 @@ struct RopeGather {
     // Pages used: 0 = x/y (reused), 1 = cos scratch, 2 = sin scratch.
     static constexpr int NUM_USED_PAGES = 3;
 
-    using tile_t = kittens::st<kittens::bf16, TOKENS_PER_INST, HEAD_DIM>;
+    using tile_t  = kittens::st<kittens::bf16, TOKENS_PER_INST, HEAD_DIM>;
+    using int_vec = kittens::sv<int, TOKENS_PER_INST>;
 
     __device__ static __forceinline__ kittens::semaphore &x_arrived(state_t<Config> &s) { return s.semaphores()[0]; }
 
@@ -76,6 +80,7 @@ struct RopeGather {
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
             const auto &instruction = s.instruction();
             const auto &x_gl   = g.template gls<SRC_X>();
+            const auto &pos_gl = g.template gls<SRC_POS>();
             const int tile_row = instruction.indices[0];
             const int tile_col = instruction.indices[1];
 
@@ -93,6 +98,14 @@ struct RopeGather {
                     s.page_finish(s.lid_to_pid(i));
                 }
             }
+            kittens::warp::sync();
+
+            // Warp-collective cp.async load of int32 pos_ids into scratch,
+            // matching reference/qkv_rope_append.cu:103. `raw_ptr[i]` bulk
+            // reads on int32 gl crash on Blackwell; `warp::load` works.
+            auto &pos_smem = *reinterpret_cast<int_vec *>(s.scratch());
+            kittens::warp::load(pos_smem, pos_gl, {tile_row});
+            kittens::load_async_wait();
         }
     };
 
@@ -110,7 +123,6 @@ struct RopeGather {
             const auto &instruction = s.instruction();
             const auto &cos_gl = g.template gls<SRC_COS>();
             const auto &sin_gl = g.template gls<SRC_SIN>();
-            const auto &pos_gl = g.template gls<SRC_POS>();
             auto &y_gl = g.template gls<DST_Y>();
             const int tile_row = instruction.indices[0];
             const int tile_col = instruction.indices[1];
@@ -121,39 +133,14 @@ struct RopeGather {
             kittens::bf16 *cos_rows = cos_scratch(s);  // flat (TOKENS_PER_INST * HEAD_DIM) bf16
             kittens::bf16 *sin_rows = sin_scratch(s);
 
-#define ROPE_GATHER_STAGE 1  // 1 = pos only, 2 = pos+gather, 3 = full
-
+            // pos_ids are already in s.scratch() from the loader's warp::load.
+            // Publish loader's smem writes to every consumer warp.
+            consumer_group::sync(1);
 
             constexpr int ROWS_PER_WARP = TOKENS_PER_INST / Config::NUM_CONSUMER_WARPS;
             static_assert(ROWS_PER_WARP > 0, "Not enough rows for the consumer warps");
             static_assert(HEAD_DIM % 32 == 0, "head_dim must be divisible by warp size");
             constexpr int ELTS_PER_LANE = HEAD_DIM / 32;
-
-#if ROPE_GATHER_STAGE >= 1
-            // Diagnostic: single-thread read of pos_ids.
-            if (consumer_group::elect_leader()) {
-                const int *pos_ptr = reinterpret_cast<const int *>(pos_gl.raw_ptr);
-                int *pos_dst = pos_scratch(s);
-                for (int i = 0; i < TOKENS_PER_INST; i++) {
-                    pos_dst[i] = pos_ptr[i];
-                }
-            }
-            consumer_group::sync(1);
-#endif
-
-#if ROPE_GATHER_STAGE <= 1
-            // Early exit — store x unchanged.
-            if (consumer_group::elect_leader()) {
-                all_reuse_barrier_wait<Config>(g, instruction);
-                kittens::tma::store_async(y_gl, x_st, {tile_row, tile_col});
-                kittens::tma::store_async_wait();
-                s.page_finish(s.lid_to_pid(0));
-                s.page_finish(s.lid_to_pid(1));
-                s.page_finish(s.lid_to_pid(2));
-                all_barrier_arrive<Config>(g, instruction);
-            }
-            return;
-#endif
 
             // Phase 1: each warp gathers its tokens' cos/sin vectors from global memory
             // into the shared scratch pages. Use direct pointer arithmetic — each lane

@@ -4,6 +4,8 @@
 
 namespace megakittens {
 
+// STATUS: working — subset (pre-gathered cos/sin). RopeGather variant is the full-fusion form.
+//
 // Rotary positional embedding on bf16 activations.
 //
 // Inputs:

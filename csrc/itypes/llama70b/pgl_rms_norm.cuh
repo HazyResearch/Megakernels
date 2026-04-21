@@ -4,6 +4,8 @@
 
 namespace megakittens {
 
+// STATUS: working — tested via `modal run scripts/modal_8gpu.py --which pgl-rms-norm`.
+//
 // PGL-aware RMSNorm. Mirrors the reference `batched_rms_norm.cu::rms_op<>`
 // template: input and output are PGL-sharded across devices (typically
 // `hidden_states` replicated layout — each device owns an M/num_devices

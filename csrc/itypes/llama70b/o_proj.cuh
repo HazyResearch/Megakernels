@@ -4,6 +4,8 @@
 
 namespace megakittens {
 
+// STATUS: working — tested via `modal run scripts/modal_8gpu.py --which o-proj`.
+//
 // Fused local matmul + in-place PGL residual accumulate: D_local += A @ B.
 //
 // Faithful port of reference `matmul_adds.cu` with `reduce_scatter=false`

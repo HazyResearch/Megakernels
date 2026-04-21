@@ -27,7 +27,9 @@ namespace megakittens {
 //   num_pages    = decode_kv_indptr[global_seq_idx+1] - indptr_start;
 //   kv_page      = decode_kv_indices[indptr_start + i/iters_per_page];
 //
-// STATUS: BLOCKED on int32 gl read (see PORT_STATUS.md). Same as prefill.
+// STATUS: stub — int32 gl read fix pattern known (use `warp::load` into a sv<int, N> scratch,
+//         as rope_gather.cuh does; reference pattern at reference/qkv_rope_append.cu:103).
+//         Kernel body still needs porting. Same as attention_prefill.
 //
 // See csrc/itypes/reference/attention_decode.cu for the reference.
 

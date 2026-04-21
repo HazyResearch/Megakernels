@@ -28,10 +28,10 @@ namespace megakittens {
 //   kv_page         = prefill_kv_indices[kv_indptr_start + block_idx];
 //   tma::load_async(K/V, {num_pages*layer + kv_page, 0, kv_head, 0}, ...)
 //
-// STATUS: BLOCKED on int32 gl read (see PORT_STATUS.md). The framework's
-// generic `Attention` in csrc/itypes/attention.cuh is NOT a faithful
-// substitute — it lacks paged KV, indptr indirection, and prefill-offset
-// causal masking.
+// STATUS: stub — int32 gl read fix pattern known (use `warp::load` into a sv<int, N> scratch,
+//         as rope_gather.cuh does). Kernel body still needs porting. The framework's
+//         generic `Attention` in csrc/itypes/attention.cuh is NOT a faithful substitute — it
+//         lacks paged KV, indptr indirection, and prefill-offset causal masking.
 //
 // See csrc/itypes/reference/attention_prefill.cu for the reference.
 

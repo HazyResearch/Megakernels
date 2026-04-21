@@ -4,6 +4,8 @@
 
 namespace megakittens {
 
+// STATUS: working — single-device itype exercised via `pytest tests/`.
+//
 // Fused matmul + elementwise multiply: D = C * (A @ B)
 //
 // Mirrors the reference LLaMA megakernel's up_matmul.cu, which computes

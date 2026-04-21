@@ -5,6 +5,8 @@
 
 namespace megakittens {
 
+// STATUS: working — tested via `modal run scripts/modal_8gpu.py --which all-device-barrier`.
+//
 // AllDeviceBarrier — LLaMA-70B cross-device global sync (reference opcode
 // 13, matching `csrc/itypes/reference/all_device_barrier.cu`).
 //

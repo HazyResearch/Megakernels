@@ -4,6 +4,8 @@
 
 namespace megakittens {
 
+// STATUS: working — single-device itype exercised via `pytest tests/`.
+//
 // Fused matmul + SiLU: D = silu(A @ B), where silu(x) = x / (1 + exp(-x)).
 //
 // Pipeline mirrors Gemm / MatmulAdd: 2-CTA-cluster, 2-consumer-warpgroup GEMM

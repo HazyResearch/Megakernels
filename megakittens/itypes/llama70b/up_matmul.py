@@ -1,0 +1,137 @@
+from typing import List, Tuple
+
+import torch
+
+from ...schema.dtype import DType
+from ...schema.itype import IType
+from ...schema.tensor import TensorMeta, TensorSpec
+from ...jit.pykittens import st
+
+
+@torch.library.custom_op("megakittens::up_matmul", mutates_args=())
+def up_matmul_op(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor) -> torch.Tensor:
+    return c * (a @ b)
+
+
+@up_matmul_op.register_fake
+def _up_matmul_fake(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor) -> torch.Tensor:
+    return torch.empty_like(c)
+
+
+class UpMatmul(IType):
+    TILE_M = 512   # 2 * Mb (cluster-wide)
+    TILE_N = 256   # Nb
+    TILE_K = 64    # Kb
+    SUPERGROUP_SIZE = 8
+
+    A_TMA = st(dtype=DType.bf16, rows=128, cols=64)  # st_bf<Mb/2, Kb>
+    B_TMA = st(dtype=DType.bf16, rows=64, cols=128)  # st_bf<Kb, Nb/2>
+    C_TMA = st(dtype=DType.bf16, rows=128, cols=32)  # st_bf<Mb/2, Nb/EPI_PIPE_DEPTH>
+    D_TMA = st(dtype=DType.bf16, rows=128, cols=32)  # st_bf<Mb/2, Nb/EPI_PIPE_DEPTH>
+
+    test_cases = [
+        ((), (512, 256, 64)),
+        ((), (512, 256, 256)),
+        ((), (512, 512, 256)),
+        ((), (1024, 1024, 512)),
+        ((), (2560, 2560, 64)),
+    ]
+    bench_cases = [
+        ((), (16384, 16384, 16384)),
+        ((), (16384, 32768, 16384)),
+        ((), (32768, 16384, 16384)),
+        ((), (32768, 32768, 16384)),
+    ]
+    test_atol = 1e-2
+    test_rtol = 1e-2
+
+    def test_args(self, case: tuple) -> tuple[torch.Tensor, ...]:
+        M, N, K = case
+        return (
+            torch.randn(M, K, dtype=torch.bfloat16, device="cuda"),
+            torch.randn(K, N, dtype=torch.bfloat16, device="cuda"),
+            torch.randn(M, N, dtype=torch.bfloat16, device="cuda"),
+        )
+
+    def bench_flops(self, case: tuple) -> float:
+        M, N, K = case
+        return 2.0 * M * N * K  # add is negligible vs matmul
+
+    @property
+    def inputs(self) -> list[TensorSpec]:
+        return [
+            TensorSpec(dtype=DType.bf16, granularity=(self.TILE_M, self.TILE_K), tma_types=[self.A_TMA]),
+            TensorSpec(dtype=DType.bf16, granularity=(self.TILE_K, self.TILE_N), tma_types=[self.B_TMA]),
+            TensorSpec(dtype=DType.bf16, granularity=(self.TILE_M, self.TILE_N), tma_types=[self.C_TMA]),
+        ]
+
+    @property
+    def outputs(self) -> list[TensorSpec]:
+        return [
+            TensorSpec(dtype=DType.bf16, granularity=(self.TILE_M, self.TILE_N), tma_types=[self.D_TMA]),
+        ]
+
+    @staticmethod
+    def _swizzled_tile_order(num_rows: int, num_cols: int, SUPERGROUP_SIZE: int) -> List[Tuple[int, int]]:
+        supergroup_numel = num_rows * SUPERGROUP_SIZE
+        supersection_cols = (num_cols // SUPERGROUP_SIZE) * SUPERGROUP_SIZE
+        supersection_numel = num_rows * supersection_cols
+        finalsection_cols = num_cols - supersection_cols
+        tiles: List[Tuple[int, int]] = []
+        for linear_idx in range(num_rows * num_cols):
+            supergroup_idx = linear_idx // supergroup_numel
+            if linear_idx < supersection_numel:
+                row_idx = (linear_idx % supergroup_numel) // SUPERGROUP_SIZE
+                col_idx = supergroup_idx * SUPERGROUP_SIZE + linear_idx % SUPERGROUP_SIZE
+            else:
+                remainder_task_id = linear_idx - supersection_numel
+                row_idx = remainder_task_id // finalsection_cols
+                col_idx = supersection_cols + remainder_task_id % finalsection_cols
+            if supergroup_idx & 1:
+                row_idx = num_rows - row_idx - 1
+            tiles.append((row_idx, col_idx))
+        return tiles
+
+    def block_indices(self, src_metas, dst_metas, src_ranges, dst_ranges) -> List[Tuple[int, ...]]:
+        M, K = src_metas[0].shape
+        N = src_metas[1].shape[1]
+        m_tiles = M // self.TILE_M
+        n_tiles = N // self.TILE_N
+        indices = []
+        for tile_row, tile_col in self._swizzled_tile_order(m_tiles, n_tiles, self.SUPERGROUP_SIZE):
+            indices.append((tile_row, tile_col))
+            indices.append((tile_row, tile_col))  # duplicate for CTA 1 in the cluster
+        return indices
+
+    def num_instructions(self, src_metas, dst_metas, src_ranges, dst_ranges) -> int:
+        M, K = src_metas[0].shape
+        N = src_metas[1].shape[1]
+        return (M // self.TILE_M) * (N // self.TILE_N) * 2  # x2 for cluster
+
+    def access_regions(self, block_index, src_metas, dst_metas):
+        src_regions = [[tuple((0, s) for s in m.shape)] for m in src_metas]
+        dst_regions = [[tuple((0, s) for s in m.shape)] for m in dst_metas]
+        return src_regions, dst_regions
+
+    def validate(self, src_metas, dst_metas, src_ranges, dst_ranges) -> None:
+        super().validate(src_metas, dst_metas, src_ranges, dst_ranges)
+        A_shape = src_metas[0].shape
+        B_shape = src_metas[1].shape
+        C_shape = src_metas[2].shape
+        D_shape = dst_metas[0].shape
+        if A_shape[1] != B_shape[0]:
+            raise RuntimeError(
+                f"[MegaKittens] UpMatmul K-dim mismatch: A has K={A_shape[1]}, B has K={B_shape[0]}"
+            )
+        if A_shape[1] % self.TILE_K != 0:
+            raise RuntimeError(
+                f"[MegaKittens] UpMatmul requires K ({A_shape[1]}) to be a multiple of {self.TILE_K}"
+            )
+        if D_shape != (A_shape[0], B_shape[1]):
+            raise RuntimeError(
+                f"[MegaKittens] UpMatmul output shape mismatch: expected ({A_shape[0]}, {B_shape[1]}), got {D_shape}"
+            )
+        if C_shape != D_shape:
+            raise RuntimeError(
+                f"[MegaKittens] UpMatmul gate shape must match output: gate={C_shape}, output={D_shape}"
+            )
