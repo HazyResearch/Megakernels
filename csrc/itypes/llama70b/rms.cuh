@@ -19,38 +19,46 @@ struct RMS {
             : parsed_instruction(s.instruction()) {}
     };
 
+    struct pipeline_specifics {
+        __device__ static inline void store(state_t<Config> &s, const Globals &g,
+                                            parsed_instruction &inst, int row_idx) {
+        }
+    };
+
+    using pipeline = rms_pipeline<Config, Globals, N, parsed_instruction, pipeline_specifics,
+                                  SRC0, SRC1, DST>;
+
     struct controller {
         __device__ __forceinline__ static int lid_release_order(const Globals &g, state_t<Config> &s, int query) {
-            return query;
+            return pipeline::lid_release_order(g, s, query);
         }
         __device__ __forceinline__ static int init_semaphores(const Globals &g, state_t<Config> &s) {
-            return 0;
+            return pipeline::init_semaphores(g, s);
         }
     };
 
     struct loader {
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
-            if (kittens::laneid() < Config::NUM_PAGES) {
-                int pid = s.lid_to_pid(kittens::laneid());
-                s.page_wait(pid);
-                s.page_finish(pid);
-            }
+            pipeline::loader_loop(g, s);
         }
     };
 
     struct launcher {
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
-            s.tensor_wait();
-            if (kittens::warp::elect_leader()) s.tensor_finish();
+            pipeline::launcher_run(g, s);
         }
     };
 
     struct consumer {
-        __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {}
+        __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
+            pipeline::consumer_loop(g, s);
+        }
     };
 
     struct storer {
-        __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {}
+        __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
+            pipeline::storer_loop(g, s);
+        }
     };
 };
 

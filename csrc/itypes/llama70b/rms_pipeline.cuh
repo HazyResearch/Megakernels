@@ -7,7 +7,8 @@ namespace megakittens {
 namespace llama70b {
 
 template <typename Config, typename Globals, int N,
-          typename parsed_instruction, typename pipeline_specifics>
+          typename parsed_instruction, typename pipeline_specifics,
+          int SRC0, int SRC1, int DST>
 struct rms_pipeline {
 
     __device__ static inline int lid_release_order(const Globals &g, state_t<Config> &s, int query) {
