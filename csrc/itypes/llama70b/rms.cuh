@@ -21,7 +21,10 @@ struct RMS {
 
     struct pipeline_specifics {
         __device__ static inline void store(state_t<Config> &s, const Globals &g,
-                                            parsed_instruction &inst, int row_idx) {
+                                            parsed_instruction &inst, int row_idx,
+                                            kittens::sv_bf<N> &row_smem) {
+            auto &y_gl = g.template gls<DST>();
+            kittens::tma::store_async(y_gl, row_smem, {0, 0, inst.row_start + row_idx, 0});
         }
     };
 
