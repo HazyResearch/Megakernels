@@ -217,10 +217,7 @@ class gl(BaseModel):
         return struct.pack('<16Q', *(int(x) for x in tmap.opaque))
 
     def tensor_to_gl_bytes(self, data_ptr: int, shape: tuple[int, int, int, int]) -> bytes:
-        """Pack a gl with an explicit device pointer and shape (no torch.Tensor required).
-
-        Used by `pgl.tensors_to_pgl` to build each per-device gl header.
-        """
+        """Pack a gl from a device pointer + 4D shape (no tensor required)."""
         assert self.b == -1 or shape[0] == self.b, f"Batch mismatch: expected {self.b}, got {shape[0]}"
         assert self.d == -1 or shape[1] == self.d, f"Depth mismatch: expected {self.d}, got {shape[1]}"
         assert self.r == -1 or shape[2] == self.r, f"Row mismatch: expected {self.r}, got {shape[2]}"
@@ -232,8 +229,8 @@ class gl(BaseModel):
                            ('rows',  self.r, shape[2]), ('cols',  self.c, shape[3])]:
             if s == -1:
                 struct.pack_into('<Q', buf, layout["field_offsets"][name], v)
-        tma_descs = [self.create_tma_descriptor(data_ptr, *shape, tma_type) for tma_type in self.tma_types]
-        for i, desc in enumerate(tma_descs):
+        for i, tma_type in enumerate(self.tma_types):
+            desc = self.create_tma_descriptor(data_ptr, *shape, tma_type)
             offset = layout["field_offsets"][f'tma_desc_{i}']
             buf[offset:offset+128] = desc
         return bytes(buf)
@@ -243,120 +240,39 @@ class gl(BaseModel):
         assert t.is_contiguous(), "Tensor must be contiguous"
         assert t.ndim <= 4, "Expected tensor.ndim <= 4"
         assert t.dtype == self.dtype.torch_dtype, f"dtype mismatch: expected {self.dtype}, got {t.dtype}"
-
         shape = [1, 1, 1, 1]
         for i in range(t.ndim):
             shape[4 - t.ndim + i] = t.shape[i]
-
-        assert self.b == -1 or shape[0] == self.b, f"Batch mismatch: expected {self.b}, got {shape[0]}"
-        assert self.d == -1 or shape[1] == self.d, f"Depth mismatch: expected {self.d}, got {shape[1]}"
-        assert self.r == -1 or shape[2] == self.r, f"Row mismatch: expected {self.r}, got {shape[2]}"
-        assert self.c == -1 or shape[3] == self.c, f"Col mismatch: expected {self.c}, got {shape[3]}"
-
-        # Pack into C++ struct layout
-        layout = self.memory_layout
-        buf = bytearray(layout["total_size"])
-        struct.pack_into('<Q', buf, layout["field_offsets"]['raw_ptr'], t.data_ptr())
-        for name, s, v in [('batch', self.b, shape[0]), ('depth', self.d, shape[1]),
-                           ('rows',  self.r, shape[2]), ('cols',  self.c, shape[3])]:
-            if s == -1:
-                struct.pack_into('<Q', buf, layout["field_offsets"][name], v)
-        tma_descs = [self.create_tma_descriptor(t.data_ptr(), *shape, tma_type) for tma_type in self.tma_types]
-        for i, desc in enumerate(tma_descs):
-            offset = layout["field_offsets"][f'tma_desc_{i}']
-            buf[offset:offset+128] = desc
-        return bytes(buf)
+        return self.tensor_to_gl_bytes(t.data_ptr(), tuple(shape))
 
 
 class pgl(BaseModel):
-    """Python mirror of ThunderKittens `pgl` — a parallel global layout spread across
-    ``num_devices`` peer GPUs.
-
-    Packs the same bytes the kernel expects for a
-    ``kittens::pgl<GL, NUM_DEVICES, INIT_MC=false, INIT_TMA=false, TMA_Types...>`` struct.
-
-    We deliberately default ``INIT_MC=false`` and ``INIT_TMA=false`` because the runtime
-    kernel we're building doesn't use collective multicast ops — every TMA reference is
-    via the per-device ``gls[dev_idx]``. This lets us skip the ``cuMulticastCreate`` /
-    ``cuMulticastBind`` dance entirely; the kernel-visible state we populate is
-    ``gls[N]`` + ``device_ids[N]`` + zero-padded multicast/TMA-dict slots.
-
-    The owning ``gl`` configuration is specified via ``inner`` and is shared across all
-    N devices (all slices have identical shape/dtype/TMA descriptor types).
-    """
+    """Python mirror of kittens::pgl<GL, N, MULTICAST=false>."""
 
     inner: gl
     num_devices: int = Field(gt=1)
 
     @property
     def cpp_type(self) -> str:
-        # megakittens::pgl_simple<GL, NUM_DEVICES> — see csrc/pgl.cuh
-        gl_base = (
-            f"kittens::gl<{self.inner.dtype.cpp_dtype}, {self.inner.b}, {self.inner.d}, "
-            f"{self.inner.r}, {self.inner.c}"
-        )
-        if self.inner.tma_types:
-            inner_tma = ", ".join(t.cpp_type for t in self.inner.tma_types)
-            gl_base = f"{gl_base}, {inner_tma}>"
-        else:
-            gl_base = f"{gl_base}>"
-        return f"megakittens::pgl_simple<{gl_base}, {self.num_devices}>"
+        return f"kittens::pgl<{self.inner.cpp_type}, {self.num_devices}, false>"
 
     @property
     def align(self) -> int:
-        # The GL's own alignment dominates (TMA descriptors inside GL are 64-byte aligned).
-        return self.inner.align
+        return max(8, self.inner.align)
 
     @property
     def memory_layout(self):
-        """Byte layout of ``megakittens::pgl_simple<GL, N>`` (see csrc/pgl.cuh).
-
-        Layout:
-            GL gls[N];
-            unsigned long long mc_size;    // unused, zero-padded
-            unsigned long long mc_handle;  // unused, zero-padded
-            T *mc_vas[N];                  // unused, zero-padded
-            int device_ids[N];
-        """
         N = self.num_devices
-        gl_layout = self.inner.memory_layout
-        gl_size = gl_layout["total_size"]
-
-        field_offsets = {}
-        offset = 0
-
-        # gls[N]
+        gl_size = self.inner.memory_layout["total_size"]
+        gl_align = self.inner.align
+        field_offsets = {'mc_ptr': 0}
+        offset = align_up(8, gl_align)
         field_offsets['gls'] = offset
         offset += N * gl_size
-
-        # mc_size (unsigned long long, 8B)
-        offset = align_up(offset, 8)
-        field_offsets['mc_size'] = offset
-        offset += 8
-
-        # mc_handle (unsigned long long, 8B)
-        offset = align_up(offset, 8)
-        field_offsets['mc_handle'] = offset
-        offset += 8
-
-        # mc_vas[N] (T*)
-        offset = align_up(offset, 8)
-        field_offsets['mc_vas'] = offset
-        offset += 8 * N
-
-        # device_ids[N] (int)
-        offset = align_up(offset, 4)
-        field_offsets['device_ids'] = offset
-        offset += 4 * N
-
-        # Align total size to the GL's own alignment.
-        total_size = align_up(offset, self.inner.align)
-
-        return {
-            "total_size": total_size,
-            "field_offsets": field_offsets,
-            "gl_size": gl_size,
-        }
+        field_offsets['tma_descs'] = offset
+        offset += 1  # empty descriptor_dict<> tail
+        total_size = align_up(offset, max(8, gl_align))
+        return {"total_size": total_size, "field_offsets": field_offsets, "gl_size": gl_size}
 
     @property
     def size(self) -> int:
@@ -366,48 +282,17 @@ class pgl(BaseModel):
         self,
         per_device_data_ptrs: list[int],
         per_device_shapes: list[tuple[int, int, int, int]],
-        device_ids: list[int],
     ) -> bytes:
-        """Build the byte-packed ``kittens::pgl<...>`` from explicit device pointers.
-
-        Caller is responsible for:
-        - allocating per-device tensors
-        - enabling P2P access across all pairs (so peer pointers are dereferenceable)
-        - passing ``per_device_data_ptrs[i]`` == ``tensors[i].data_ptr()`` on device ``device_ids[i]``
-
-        All gls share the ``inner`` layout (dtype, shape, tma_types), so each slice must
-        have the same shape. Per-device TMA descriptors are built with that device's own
-        pointer — cross-device TMA access is via ``pgl.gls[peer_idx].tma_desc_0`` which
-        references ``per_device_data_ptrs[peer_idx]``.
-
-        Returns the bytes corresponding to one ``pgl`` struct ready to be copied into
-        a device-global ``MKGlobals`` buffer.
-        """
+        """Pack per-device pointers into a kittens::pgl. Caller must have enabled P2P
+        across all pairs so peer pointers are dereferenceable."""
         N = self.num_devices
-        if len(per_device_data_ptrs) != N:
-            raise ValueError(f"expected {N} data pointers, got {len(per_device_data_ptrs)}")
-        if len(per_device_shapes) != N:
-            raise ValueError(f"expected {N} shapes, got {len(per_device_shapes)}")
-        if len(device_ids) != N:
-            raise ValueError(f"expected {N} device ids, got {len(device_ids)}")
-
+        assert len(per_device_data_ptrs) == N and len(per_device_shapes) == N
         layout = self.memory_layout
         buf = bytearray(layout["total_size"])
-
-        # gls[i] — delegate to inner.tensor_to_gl_bytes for each
+        # mc_ptr = nullptr (leave zero-initialized)
         gl_size = layout["gl_size"]
         gls_offset = layout["field_offsets"]['gls']
         for i in range(N):
-            gl_bytes = self.inner.tensor_to_gl_bytes(per_device_data_ptrs[i], per_device_shapes[i])
-            if len(gl_bytes) != gl_size:
-                raise RuntimeError(f"gl bytes size mismatch: expected {gl_size}, got {len(gl_bytes)}")
-            buf[gls_offset + i * gl_size : gls_offset + (i + 1) * gl_size] = gl_bytes
-
-        # mc_size = 0, mc_handle = 0 (we use INIT_MC=false), mc_vas[i] = 0 — leave zero-initialized
-
-        # device_ids[N]
-        dids_offset = layout["field_offsets"]['device_ids']
-        for i in range(N):
-            struct.pack_into('<i', buf, dids_offset + i * 4, int(device_ids[i]))
-
+            buf[gls_offset + i * gl_size : gls_offset + (i + 1) * gl_size] = \
+                self.inner.tensor_to_gl_bytes(per_device_data_ptrs[i], per_device_shapes[i])
         return bytes(buf)
