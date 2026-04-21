@@ -216,83 +216,31 @@ class gl(BaseModel):
         check_cuda(err)
         return struct.pack('<16Q', *(int(x) for x in tmap.opaque))
 
-    def tensor_to_gl_bytes(self, data_ptr: int, shape: tuple[int, int, int, int]) -> bytes:
-        """Pack a gl from a device pointer + 4D shape (no tensor required)."""
-        assert self.b == -1 or shape[0] == self.b, f"Batch mismatch: expected {self.b}, got {shape[0]}"
-        assert self.d == -1 or shape[1] == self.d, f"Depth mismatch: expected {self.d}, got {shape[1]}"
-        assert self.r == -1 or shape[2] == self.r, f"Row mismatch: expected {self.r}, got {shape[2]}"
-        assert self.c == -1 or shape[3] == self.c, f"Col mismatch: expected {self.c}, got {shape[3]}"
-        layout = self.memory_layout
-        buf = bytearray(layout["total_size"])
-        struct.pack_into('<Q', buf, layout["field_offsets"]['raw_ptr'], data_ptr)
-        for name, s, v in [('batch', self.b, shape[0]), ('depth', self.d, shape[1]),
-                           ('rows',  self.r, shape[2]), ('cols',  self.c, shape[3])]:
-            if s == -1:
-                struct.pack_into('<Q', buf, layout["field_offsets"][name], v)
-        for i, tma_type in enumerate(self.tma_types):
-            desc = self.create_tma_descriptor(data_ptr, *shape, tma_type)
-            offset = layout["field_offsets"][f'tma_desc_{i}']
-            buf[offset:offset+128] = desc
-        return bytes(buf)
-
     def tensor_to_gl(self, t: torch.Tensor) -> bytes:
         assert t.is_cuda, "Tensor must be on CUDA device"
         assert t.is_contiguous(), "Tensor must be contiguous"
         assert t.ndim <= 4, "Expected tensor.ndim <= 4"
         assert t.dtype == self.dtype.torch_dtype, f"dtype mismatch: expected {self.dtype}, got {t.dtype}"
+
         shape = [1, 1, 1, 1]
         for i in range(t.ndim):
             shape[4 - t.ndim + i] = t.shape[i]
-        return self.tensor_to_gl_bytes(t.data_ptr(), tuple(shape))
 
+        assert self.b == -1 or shape[0] == self.b, f"Batch mismatch: expected {self.b}, got {shape[0]}"
+        assert self.d == -1 or shape[1] == self.d, f"Depth mismatch: expected {self.d}, got {shape[1]}"
+        assert self.r == -1 or shape[2] == self.r, f"Row mismatch: expected {self.r}, got {shape[2]}"
+        assert self.c == -1 or shape[3] == self.c, f"Col mismatch: expected {self.c}, got {shape[3]}"
 
-class pgl(BaseModel):
-    """Python mirror of kittens::pgl<GL, N, MULTICAST=false>."""
-
-    inner: gl
-    num_devices: int = Field(gt=1)
-
-    @property
-    def cpp_type(self) -> str:
-        return f"kittens::pgl<{self.inner.cpp_type}, {self.num_devices}, false>"
-
-    @property
-    def align(self) -> int:
-        return max(8, self.inner.align)
-
-    @property
-    def memory_layout(self):
-        N = self.num_devices
-        gl_size = self.inner.memory_layout["total_size"]
-        gl_align = self.inner.align
-        field_offsets = {'mc_ptr': 0}
-        offset = align_up(8, gl_align)
-        field_offsets['gls'] = offset
-        offset += N * gl_size
-        field_offsets['tma_descs'] = offset
-        offset += 1  # empty descriptor_dict<> tail
-        total_size = align_up(offset, max(8, gl_align))
-        return {"total_size": total_size, "field_offsets": field_offsets, "gl_size": gl_size}
-
-    @property
-    def size(self) -> int:
-        return self.memory_layout["total_size"]
-
-    def tensors_to_pgl(
-        self,
-        per_device_data_ptrs: list[int],
-        per_device_shapes: list[tuple[int, int, int, int]],
-    ) -> bytes:
-        """Pack per-device pointers into a kittens::pgl. Caller must have enabled P2P
-        across all pairs so peer pointers are dereferenceable."""
-        N = self.num_devices
-        assert len(per_device_data_ptrs) == N and len(per_device_shapes) == N
+        # Pack into C++ struct layout
         layout = self.memory_layout
         buf = bytearray(layout["total_size"])
-        # mc_ptr = nullptr (leave zero-initialized)
-        gl_size = layout["gl_size"]
-        gls_offset = layout["field_offsets"]['gls']
-        for i in range(N):
-            buf[gls_offset + i * gl_size : gls_offset + (i + 1) * gl_size] = \
-                self.inner.tensor_to_gl_bytes(per_device_data_ptrs[i], per_device_shapes[i])
+        struct.pack_into('<Q', buf, layout["field_offsets"]['raw_ptr'], t.data_ptr())
+        for name, s, v in [('batch', self.b, shape[0]), ('depth', self.d, shape[1]),
+                           ('rows',  self.r, shape[2]), ('cols',  self.c, shape[3])]:
+            if s == -1:
+                struct.pack_into('<Q', buf, layout["field_offsets"][name], v)
+        tma_descs = [self.create_tma_descriptor(t.data_ptr(), *shape, tma_type) for tma_type in self.tma_types]
+        for i, desc in enumerate(tma_descs):
+            offset = layout["field_offsets"][f'tma_desc_{i}']
+            buf[offset:offset+128] = desc
         return bytes(buf)
