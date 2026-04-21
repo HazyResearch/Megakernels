@@ -2,11 +2,15 @@ from typing import List, Tuple
 
 import torch
 
+from ...dispatcher import Dispatcher
 from ...schema.dtype import DType
 from ...schema.itype import IType
 from ...schema.tensor import TensorMeta, TensorRange, TensorSpec
 from ...jit.pykittens import sv
 from ...jit.cuda_utils import get_sm_count
+
+
+MAX_ROWS_PER_INST = 2 * (Dispatcher.NUM_PAGES - 1)  # page 0 holds weight; remaining pages hold 2 rows each
 
 
 @torch.library.custom_op("megakittens::rms70b", mutates_args=())
@@ -135,4 +139,15 @@ class Rms70b(IType):
         if C != self.col_dim:
             raise RuntimeError(
                 f"[MegaKittens] Rms70b expected col_dim={self.col_dim}, got {C}"
+            )
+
+        B = src_ranges[0][2].size
+        sm_count = get_sm_count()
+        n_inst = min(B, sm_count)
+        rows_per_inst = (B + n_inst - 1) // n_inst if n_inst > 0 else 0
+        if rows_per_inst > MAX_ROWS_PER_INST:
+            raise RuntimeError(
+                f"[MegaKittens] Rms70b batch size B={B} gives rows_per_inst={rows_per_inst}, "
+                f"exceeds MAX_ROWS_PER_INST={MAX_ROWS_PER_INST}. "
+                f"Max supported B for this layout is {MAX_ROWS_PER_INST * sm_count}."
             )
