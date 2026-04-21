@@ -85,7 +85,7 @@ class AttentionPartial(IType):
                        tma_types=[sv(dtype=DType.bf16, length=self._head_dim)]),
         ]
 
-    def num_instructions(xf
+    def num_instructions(
         self,
         src_metas: Tuple[TensorMeta, ...],
         dst_metas: Tuple[TensorMeta, ...],
