@@ -2,16 +2,20 @@
 
 #include "kittens.cuh"
 #include "schema.cuh"
+#include "itypes/llama70b/utils.cuh"
 
 namespace megakittens {
 namespace llama70b {
 
 template <typename Config, typename Globals, int N,
           typename parsed_instruction, typename pipeline_specifics,
-          int SRC0, int SRC1, int DST>
+          int SRC0, int SRC1, int SCALAR_EPS, int DST>
 struct rms_pipeline {
     static constexpr int WEIGHTS_PAGE = 0;
+    static constexpr int ELEMS_PER_WARP = N / Config::NUM_CONSUMER_WARPS;
+    static constexpr int RMS_SCRATCH_OFFSET = sizeof(kittens::sv_bf<N>);
     using row_vec = kittens::sv_bf<N>;
+    using sv_slice_t = kittens::sv_bf<ELEMS_PER_WARP>;
 
     __device__ static inline kittens::semaphore &weights_arrived(state_t<Config> &s)        { return s.semaphores()[0]; }
     __device__ static inline kittens::semaphore &activations_arrived(state_t<Config> &s, int i) { return s.semaphores()[2 * i + 1]; }
@@ -42,7 +46,7 @@ struct rms_pipeline {
         int pos_in_page = row_idx % 2;
         int pid = s.lid_to_pid(page_idx);
         return *reinterpret_cast<row_vec*>(
-            static_cast<uint8_t*>(s.pages[pid].data) + pos_in_page * sizeof(row_vec));
+            static_cast<uint8_t*>(s.pages[pid].ptr(pos_in_page * sizeof(row_vec))));
     }
 
     __device__ static inline void loader_loop(const Globals &g, state_t<Config> &s) {
@@ -53,7 +57,7 @@ struct rms_pipeline {
         if (lane == 0) {
             int weight_pid = s.lid_to_pid(WEIGHTS_PAGE);
             s.page_wait(weight_pid);
-            row_vec &weight_smem = *reinterpret_cast<row_vec*>(s.pages[weight_pid].data);
+            row_vec &weight_smem = *reinterpret_cast<row_vec*>(s.pages[weight_pid].ptr());
             auto &w_gl = g.template gls<SRC1>();
             kittens::tma::expect_bytes(weights_arrived(s), sizeof(row_vec));
             kittens::tma::load_async(weight_smem, w_gl, {0, 0, 0, 0}, weights_arrived(s));
@@ -84,8 +88,25 @@ struct rms_pipeline {
     __device__ static inline void consumer_loop(const Globals &g, state_t<Config> &s) {
         parsed_instruction inst{s};
         kittens::wait(weights_arrived(s), 0);
+
+        int weight_pid = s.lid_to_pid(WEIGHTS_PAGE);
+        row_vec &weight_smem_full = *reinterpret_cast<row_vec*>(s.pages[weight_pid].ptr());
+        sv_slice_t &weight_slice =
+            reinterpret_cast<sv_slice_t *>(&weight_smem_full)[kittens::warpid()];
+        float *rms_scratch = static_cast<float *>(s.pages[weight_pid].ptr(RMS_SCRATCH_OFFSET));
+        float eps = g.template gls<SCALAR_EPS>().raw_ptr[0];
+
         for (int i = 0; i < inst.num_rows; i++) {
             kittens::wait(activations_arrived(s, i), 0);
+
+            row_vec &row_smem = row_at(s, i);
+            sv_slice_t &row_slice = reinterpret_cast<sv_slice_t *>(&row_smem)[kittens::warpid()];
+
+            kittens::rv_fl<ELEMS_PER_WARP> act_vec;
+            kittens::warp::load(act_vec, row_slice);
+            act_vec = rms_norm<Config, N>(act_vec, weight_slice, eps, rms_scratch);
+            kittens::warp::store(row_slice, act_vec);
+            kittens::warp::sync();
             kittens::warp::arrive(outputs_arrived(s, i));
         }
     }

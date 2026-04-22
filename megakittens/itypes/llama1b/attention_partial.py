@@ -183,6 +183,7 @@ class AttentionPartialMulti(IType):
     test_cases = []  # TODO: re-enable — kernel produces inf in l_inter under global_work_queue
     test_atol = 1e-2
     test_rtol = 1e-2
+    bench_cases = []
 
     def __init__(self, head_dim=64, kv_block_size=16, gqa_ratio=4):
         self._head_dim = head_dim

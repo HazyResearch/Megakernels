@@ -14,12 +14,12 @@ MAX_ROWS_PER_INST = 2 * (Dispatcher.NUM_PAGES - 1)  # page 0 holds weight; remai
 
 
 @torch.library.custom_op("megakittens::rms70b", mutates_args=())
-def rms70b_op(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
-    return torch.rms_norm(x, [x.shape[-1]], weight, eps)
+def rms70b_op(x: torch.Tensor, weight: torch.Tensor, eps: torch.Tensor) -> torch.Tensor:
+    return torch.rms_norm(x, [x.shape[-1]], weight, eps.item())
 
 
 @rms70b_op.register_fake
-def _rms70b_fake(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
+def _rms70b_fake(x: torch.Tensor, weight: torch.Tensor, eps: torch.Tensor) -> torch.Tensor:
     return torch.empty_like(x)
 
 
@@ -43,6 +43,9 @@ class Rms70b(IType):
     ]
     test_atol = 1e-2
     test_rtol = 1e-2
+    bench_cases = [
+        ((8192,), (1024, 8192)),
+    ]
 
     def __init__(self, col_dim: int = 0):
         self.col_dim = col_dim
@@ -60,7 +63,7 @@ class Rms70b(IType):
         return (
             torch.randn(*case, dtype=torch.bfloat16, device="cuda"),
             torch.randn(C, dtype=torch.bfloat16, device="cuda"),
-            1e-6,
+            torch.tensor([1e-6], dtype=torch.float32, device="cuda"),
         )
 
     @property
@@ -69,11 +72,14 @@ class Rms70b(IType):
             return [
                 TensorSpec(dtype=DType.bf16, granularity=(1, 64),
                            tma_types=[sv(dtype=DType.bf16, length=self.col_dim)]),
-                TensorSpec(dtype=DType.bf16, granularity=(64,)),
+                TensorSpec(dtype=DType.bf16, granularity=(64,),
+                           tma_types=[sv(dtype=DType.bf16, length=self.col_dim)]),
+                TensorSpec(dtype=DType.fp32, granularity=(1,)),
             ]
         return [
             TensorSpec(dtype=DType.bf16, granularity=(1, 64)),
             TensorSpec(dtype=DType.bf16, granularity=(64,)),
+            TensorSpec(dtype=DType.fp32, granularity=(1,)),
         ]
 
     @property
@@ -124,8 +130,9 @@ class Rms70b(IType):
         C = src_metas[0].shape[-1]
         x_region = ((0, 1), (0, 1), (row_start, row_start + num_rows), (0, C))
         w_region = ((0, C),)
+        eps_region = ((0, 1),)
         y_region = ((0, 1), (0, 1), (row_start, row_start + num_rows), (0, C))
-        return [[x_region], [w_region]], [[y_region]]
+        return [[x_region], [w_region], [eps_region]], [[y_region]]
 
     def validate(
         self,

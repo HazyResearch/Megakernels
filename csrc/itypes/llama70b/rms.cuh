@@ -7,7 +7,7 @@
 namespace megakittens {
 namespace llama70b {
 
-template <typename Config, typename Globals, int N, int SRC0, int SRC1, int DST>
+template <typename Config, typename Globals, int N, int SRC0, int SRC1, int SCALAR_EPS, int DST>
 struct RMS {
     struct parsed_instruction {
         int row_start, num_rows;
@@ -29,7 +29,7 @@ struct RMS {
     };
 
     using pipeline = rms_pipeline<Config, Globals, N, parsed_instruction, pipeline_specifics,
-                                  SRC0, SRC1, DST>;
+                                  SRC0, SRC1, SCALAR_EPS, DST>;
 
     struct controller {
         __device__ __forceinline__ static int lid_release_order(const Globals &g, state_t<Config> &s, int query) {

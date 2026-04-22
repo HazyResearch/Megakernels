@@ -38,6 +38,7 @@ class AttentionReduction(IType):
     ]
     test_atol = 1e-2
     test_rtol = 1e-2
+    bench_cases = []
 
     def __init__(self, head_dim=64, q_heads_per_instruction=4, max_partials=16):
         self._head_dim = head_dim
