@@ -56,7 +56,7 @@ class UpMatmul70b(IType):
     A_TMA = st(dtype=DType.bf16, rows=Mb // 2, cols=Kb)
     B_TMA = st(dtype=DType.bf16, rows=Nb // 2, cols=Kb)
     D_TMA = st(dtype=DType.bf16, rows=Mb // 2, cols=Nb // EPI_PIPE_DEPTH)
-    GATE_TMA = st(dtype=DType.bf16, rows=Mb // 2, cols=Nb // EPI_PIPE_DEPTH)
+    GATE_TMA = st(dtype=DType.bf16, rows=Mb // 2, cols=Nb // 2)
 
     torch_functions_map = {
         torch.ops.megakittens.up_matmul70b: _resolve_up_matmul70b,

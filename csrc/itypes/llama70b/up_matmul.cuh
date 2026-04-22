@@ -23,9 +23,11 @@ struct UpMatmul {
     using b_st_t = kittens::st_bf<Nb / 2, Kb>;
     using d_st_t = kittens::st_bf<Mb / 2, Nb / EPI_PIPE_DEPTH>;
     using d_tt_t = kittens::tt<float, Mb / 2, Nb>;
+    using gate_st_t = kittens::st_bf<Mb / 2, Nb / 2>;
 
-    static constexpr int A_LIDS[LOAD_PIPE_DEPTH]     = {0, 2, 3, 5};
-    static constexpr int B_LIDS[LOAD_PIPE_DEPTH / 2] = {1, 4};
+    static constexpr int A_LIDS[LOAD_PIPE_DEPTH]         = {0, 2, 3, 5};
+    static constexpr int B_LIDS[LOAD_PIPE_DEPTH / 2]     = {1, 4};
+    static constexpr int GATE_LIDS[NUM_CONSUMERS][2]     = {{1, 2}, {3, 4}};
 
     __device__ static inline kittens::semaphore &inputs_arrived (state_t<Config> &s, int stage) {
         return s.semaphores()[stage];
@@ -36,6 +38,9 @@ struct UpMatmul {
     __device__ static inline kittens::semaphore &outputs_arrived(state_t<Config> &s) {
         return s.semaphores()[2 * LOAD_PIPE_DEPTH];
     }
+    __device__ static inline kittens::semaphore &gate_arrived(state_t<Config> &s, int cid) {
+        return s.semaphores()[2 * LOAD_PIPE_DEPTH + 1 + cid];
+    }
 
     __device__ static inline a_st_t &a_st(state_t<Config> &s, int stage, int cid) {
         return s.pages[s.lid_to_pid(A_LIDS[stage])].template as<a_st_t>(cid * sizeof(a_st_t));
@@ -45,6 +50,9 @@ struct UpMatmul {
     }
     __device__ static inline d_st_t &d_st(state_t<Config> &s, int cid, int slot) {
         return s.pages[s.lid_to_pid(A_LIDS[0])].template as<d_st_t>((cid * NUM_D_TILES + slot) * sizeof(d_st_t));
+    }
+    __device__ static inline gate_st_t &gate_st(state_t<Config> &s, int cid, int half) {
+        return s.pages[s.lid_to_pid(GATE_LIDS[cid][half])].template as<gate_st_t>();
     }
 
     struct parsed_instruction {
@@ -61,13 +69,8 @@ struct UpMatmul {
     struct controller {
         __device__ __forceinline__ static int lid_release_order(const Globals &g, state_t<Config> &s, int query) {
             static_assert(Config::NUM_PAGES == 7 && LOAD_PIPE_DEPTH == 4);
-            const int num_iters = g.template gls<SRC_X>().cols() / Kb;
-            switch (num_iters % LOAD_PIPE_DEPTH) {
-                case 0: case 1: { constexpr int order[] = {6, 2, 1, 3, 5, 4, 0}; return order[query]; }
-                case 2:         { constexpr int order[] = {6, 3, 5, 4, 2, 1, 0}; return order[query]; }
-                case 3:         { constexpr int order[] = {6, 5, 4, 2, 1, 3, 0}; return order[query]; }
-            }
-            return 0;
+            constexpr int order[] = {6, 5, 1, 2, 3, 4, 0};
+            return order[query];
         }
 
         __device__ __forceinline__ static int init_semaphores(const Globals &g, state_t<Config> &s) {
@@ -77,8 +80,10 @@ struct UpMatmul {
                 kittens::init_semaphore(inputs_finished(s, lane_id), NUM_CONSUMERS);
             } else if (lane_id == LOAD_PIPE_DEPTH) {
                 kittens::init_semaphore(outputs_arrived(s), 1);
+            } else if (lane_id < LOAD_PIPE_DEPTH + 1 + NUM_CONSUMERS) {
+                kittens::init_semaphore(gate_arrived(s, lane_id - LOAD_PIPE_DEPTH - 1), 1);
             }
-            return 2 * LOAD_PIPE_DEPTH + 1;
+            return 2 * LOAD_PIPE_DEPTH + 1 + NUM_CONSUMERS;
         }
     };
 
@@ -88,6 +93,7 @@ struct UpMatmul {
             const int cta_rank = kittens::cluster_ctarank();
             auto &a_gl = g.template gls<SRC_X>();
             auto &b_gl = g.template gls<SRC_W>();
+            auto &gate_gl = g.template gls<SRC_GATE>();
             const int num_iters = a_gl.cols() / Kb;
 
             if (kittens::warp::elect_leader()) {
@@ -114,8 +120,21 @@ struct UpMatmul {
                             {0, pi.layer_idx, 2 * pi.n + cta_rank, i},
                             inputs_arrived(s, stage), (uint16_t)(1 << cta_rank), 0);
                     } else {
-                        if (stage != 0) s.page_finish(s.lid_to_pid(A_LIDS[stage]));
-                        if (stage % 2 == 1) s.page_finish(s.lid_to_pid(B_LIDS[(stage - 1) / 2]));
+                        // LIDs 1,2,3,4 are reused for gate tiles and finished by the consumer.
+                        // Only LID 5 (A_LIDS[3]) is released here in the drain phase.
+                        if (stage == 3) s.page_finish(s.lid_to_pid(A_LIDS[3]));
+                    }
+                }
+
+                #pragma unroll
+                for (int cid = 0; cid < NUM_CONSUMERS; cid++) {
+                    kittens::tma::expect_bytes(gate_arrived(s, cid), 2 * sizeof(gate_st_t));
+                    #pragma unroll
+                    for (int half = 0; half < 2; half++) {
+                        kittens::tma::load_async(
+                            gate_st(s, cid, half), gate_gl,
+                            {0, 0, (2 * pi.m + cta_rank) * NUM_CONSUMERS + cid, 2 * pi.n + half},
+                            gate_arrived(s, cid));
                     }
                 }
             } else if (kittens::warp::elect_leader_from_active()) {
@@ -172,9 +191,15 @@ struct UpMatmul {
             if (consumer_group::elect_leader()) all_reuse_barrier_wait<Config>(g, s.instruction());
             consumer_group::sync(4);
 
+            kittens::wait(gate_arrived(s, cid), 0);
+
+            constexpr int CHUNKS_PER_HALF = EPI_PIPE_DEPTH / 2;
+
             #pragma unroll
             for (int i = 0; i < EPI_PIPE_DEPTH; i++) {
                 const int slot = i % NUM_D_TILES;
+                const int half = i / CHUNKS_PER_HALF;
+                const int col_chunk = i % CHUNKS_PER_HALF;
 
                 kittens::rt_fl<Mb / 8, Nb / EPI_PIPE_DEPTH> d_reg;
                 kittens::warpgroup::load_async(
@@ -182,11 +207,12 @@ struct UpMatmul {
                     d_tt.template subtile<kittens::tt<float, Mb / 2, Nb / EPI_PIPE_DEPTH>>(0, (Nb / EPI_PIPE_DEPTH) * i));
                 kittens::tensor_load_wait();
 
-                kittens::rt_fl<Mb / 8, Nb / EPI_PIPE_DEPTH> silu_buf;
-                kittens::warp::mul(silu_buf, d_reg, -1.f);
-                kittens::warp::exp(silu_buf, silu_buf);
-                kittens::warp::add(silu_buf, silu_buf, 1.f);
-                kittens::warp::div(d_reg, d_reg, silu_buf);
+                kittens::rt_fl<Mb / 8, Nb / EPI_PIPE_DEPTH> gate_reg;
+                kittens::warpgroup::load(
+                    gate_reg,
+                    gate_st(s, cid, half).template subtile<Mb / 2, Nb / EPI_PIPE_DEPTH>({0, col_chunk}));
+
+                kittens::warp::mul(d_reg, d_reg, gate_reg);
 
                 kittens::warpgroup::tma::store_async_read_wait<NUM_D_TILES - 1>();
                 kittens::warpgroup::sync(cid + 1);
@@ -203,6 +229,13 @@ struct UpMatmul {
             consumer_group::sync(4);
             if (consumer_group::elect_leader()) {
                 s.page_finish(s.lid_to_pid(A_LIDS[0]));
+                #pragma unroll
+                for (int cid_i = 0; cid_i < NUM_CONSUMERS; cid_i++) {
+                    #pragma unroll
+                    for (int half_i = 0; half_i < 2; half_i++) {
+                        s.page_finish(s.lid_to_pid(GATE_LIDS[cid_i][half_i]));
+                    }
+                }
                 all_barrier_arrive<Config>(g, s.instruction());
             }
         }
