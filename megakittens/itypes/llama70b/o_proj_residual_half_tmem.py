@@ -14,7 +14,7 @@ Kb = 64
 EPI_PIPE_DEPTH = 8
 
 
-@torch.library.custom_op("megakittens::oproj_residual_half_tmem", mutates_args=("hidden",))
+@torch.library.custom_op("megakittens::oproj_residual_half_tmem70b", mutates_args=("hidden",))
 def o_proj_residual_half_tmem_op(
     hidden: torch.Tensor,
     attn_out: torch.Tensor,
@@ -38,10 +38,10 @@ def _resolve_o_proj_residual_half_tmem(args, kwargs):
     m = hidden_node.meta['val'].shape[-2]
     n = hidden_node.meta['val'].shape[-1]
     k = attn_node.meta['val'].shape[-1]
-    return OProjResidualHalfTmem(m=m, n=n, k=k), [1]
+    return OProjResidualHalfTmem70b(m=m, n=n, k=k), [1]
 
 
-class OProjResidualHalfTmem(IType):
+class OProjResidualHalfTmem70b(IType):
 
     Mb = Mb
     Nb = Nb
@@ -53,8 +53,8 @@ class OProjResidualHalfTmem(IType):
     D_TMA = st(dtype=DType.bf16, rows=Mb // 2, cols=Nb // EPI_PIPE_DEPTH)
 
     torch_functions_map = {
-        torch.ops.megakittens.oproj_residual_half_tmem: _resolve_o_proj_residual_half_tmem,
-        torch.ops.megakittens.oproj_residual_half_tmem.default: _resolve_o_proj_residual_half_tmem,
+        torch.ops.megakittens.oproj_residual_half_tmem70b: _resolve_o_proj_residual_half_tmem,
+        torch.ops.megakittens.oproj_residual_half_tmem70b.default: _resolve_o_proj_residual_half_tmem,
     }
 
     test_cases = [
@@ -70,7 +70,7 @@ class OProjResidualHalfTmem(IType):
 
     @staticmethod
     def test_fn(hidden, attn_out, o_weights):
-        torch.ops.megakittens.oproj_residual_half_tmem(hidden, attn_out, o_weights)
+        torch.ops.megakittens.oproj_residual_half_tmem70b(hidden, attn_out, o_weights)
         return hidden
 
     def __init__(self, m: int = 0, n: int = 0, k: int = 0):
@@ -202,39 +202,39 @@ class OProjResidualHalfTmem(IType):
 
         if a_shape[-2] != M:
             raise RuntimeError(
-                f"[MegaKittens] OProjResidualHalfTmem M mismatch: hidden M={M} vs attn_out M={a_shape[-2]}"
+                f"[MegaKittens] OProjResidualHalfTmem70b M mismatch: hidden M={M} vs attn_out M={a_shape[-2]}"
             )
         if w_shape[-2] != N:
             raise RuntimeError(
-                f"[MegaKittens] OProjResidualHalfTmem N mismatch: hidden N={N} vs o_weights N={w_shape[-2]}"
+                f"[MegaKittens] OProjResidualHalfTmem70b N mismatch: hidden N={N} vs o_weights N={w_shape[-2]}"
             )
         if w_shape[-1] != K:
             raise RuntimeError(
-                f"[MegaKittens] OProjResidualHalfTmem K mismatch: attn_out K={K} vs o_weights K={w_shape[-1]}"
+                f"[MegaKittens] OProjResidualHalfTmem70b K mismatch: attn_out K={K} vs o_weights K={w_shape[-1]}"
             )
 
         if M % self.Mb != 0:
             raise RuntimeError(
-                f"[MegaKittens] OProjResidualHalfTmem requires M divisible by {self.Mb}, got M={M}"
+                f"[MegaKittens] OProjResidualHalfTmem70b requires M divisible by {self.Mb}, got M={M}"
             )
         if N % self.Nb != 0:
             raise RuntimeError(
-                f"[MegaKittens] OProjResidualHalfTmem requires N divisible by {self.Nb}, got N={N}"
+                f"[MegaKittens] OProjResidualHalfTmem70b requires N divisible by {self.Nb}, got N={N}"
             )
         if K % self.Kb != 0:
             raise RuntimeError(
-                f"[MegaKittens] OProjResidualHalfTmem requires K divisible by {self.Kb}, got K={K}"
+                f"[MegaKittens] OProjResidualHalfTmem70b requires K divisible by {self.Kb}, got K={K}"
             )
 
         if self.m and M != self.m:
             raise RuntimeError(
-                f"[MegaKittens] OProjResidualHalfTmem expected M={self.m}, got {M}"
+                f"[MegaKittens] OProjResidualHalfTmem70b expected M={self.m}, got {M}"
             )
         if self.n and N != self.n:
             raise RuntimeError(
-                f"[MegaKittens] OProjResidualHalfTmem expected N={self.n}, got {N}"
+                f"[MegaKittens] OProjResidualHalfTmem70b expected N={self.n}, got {N}"
             )
         if self.k and K != self.k:
             raise RuntimeError(
-                f"[MegaKittens] OProjResidualHalfTmem expected K={self.k}, got {K}"
+                f"[MegaKittens] OProjResidualHalfTmem70b expected K={self.k}, got {K}"
             )
