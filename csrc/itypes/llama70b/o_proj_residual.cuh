@@ -2,34 +2,33 @@
 
 #include "kittens.cuh"
 #include "schema.cuh"
-#include "itypes/llama70b/rms_pipeline.cuh"
+#include "itypes/llama70b/matmul_pipeline.cuh"
 
 namespace megakittens {
 namespace llama70b {
 
-template <typename Config, typename Globals, int N, int SRC_X, int SRC_WEIGHT, int SCALAR_EPS, int DST_Y>
-struct RMS {
+template <typename Config, typename Globals,
+          int M, int N, int K,
+          int Mb, int Nb, int Kb, int EPI_PIPE_DEPTH,
+          int SRC_HIDDEN, int SRC_ATTN_OUT, int SRC_O_WEIGHTS, int DST_HIDDEN>
+struct OProjResidual {
     struct parsed_instruction {
-        int row_start, num_rows;
+        int layer_idx, m, n;
         __device__ inline parsed_instruction(const instruction_t &instruction) {
-            row_start = instruction.indices[2];
-            num_rows  = instruction.indices[3];
+            layer_idx = instruction.indices[0];
+            m = instruction.indices[1];
+            n = instruction.indices[2];
         }
         __device__ inline parsed_instruction(state_t<Config> &s)
             : parsed_instruction(s.instruction()) {}
     };
 
-    struct pipeline_specifics {
-        __device__ static inline void store(state_t<Config> &s, const Globals &g,
-                                            parsed_instruction &inst, int row_idx,
-                                            kittens::sv_bf<N> &row_smem) {
-            auto &y_gl = g.template gls<DST_Y>();
-            kittens::tma::store_async(y_gl, row_smem, {0, 0, inst.row_start + row_idx, 0});
-        }
-    };
+    struct pipeline_specifics {};
 
-    using pipeline = rms_pipeline<Config, Globals, N, parsed_instruction, pipeline_specifics,
-                                  SRC_X, SRC_WEIGHT, SCALAR_EPS, DST_Y>;
+    using pipeline = matmul_pipeline<Config, Globals, M, N, K,
+                                     Mb, Nb, Kb, EPI_PIPE_DEPTH,
+                                     parsed_instruction, pipeline_specifics,
+                                     SRC_ATTN_OUT, SRC_O_WEIGHTS>;
 
     struct controller {
         __device__ __forceinline__ static int lid_release_order(const Globals &g, state_t<Config> &s, int query) {

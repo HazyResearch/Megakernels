@@ -9,7 +9,7 @@ namespace llama70b {
 
 template <typename Config, typename Globals, int N,
           typename parsed_instruction, typename pipeline_specifics,
-          int SRC0, int SRC1, int SCALAR_EPS, int DST>
+          int SRC_X, int SRC_WEIGHT, int SCALAR_EPS, int DST_Y>
 struct rms_pipeline {
     static constexpr int WEIGHTS_PAGE = 0;
     static constexpr int ELEMS_PER_WARP = N / Config::NUM_CONSUMER_WARPS;
@@ -58,11 +58,11 @@ struct rms_pipeline {
             int weight_pid = s.lid_to_pid(WEIGHTS_PAGE);
             s.page_wait(weight_pid);
             row_vec &weight_smem = *reinterpret_cast<row_vec*>(s.pages[weight_pid].ptr());
-            auto &w_gl = g.template gls<SRC1>();
+            auto &w_gl = g.template gls<SRC_WEIGHT>();
             kittens::tma::expect_bytes(weights_arrived(s), sizeof(row_vec));
             kittens::tma::load_async(weight_smem, w_gl, {0, 0, 0, 0}, weights_arrived(s));
 
-            auto &x_gl = g.template gls<SRC0>();
+            auto &x_gl = g.template gls<SRC_X>();
             for (int i = 0; i < inst.num_rows; i++) {
                 int page_idx = 1 + i / 2;
                 int pos_in_page = i % 2;
