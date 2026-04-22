@@ -2,6 +2,7 @@
 
 #include "kittens.cuh"
 #include "schema.cuh"
+#include "utils.cuh"
 #include "itypes/llama70b/utils.cuh"
 
 namespace megakittens {
@@ -79,6 +80,7 @@ struct matmul_pipeline {
         const int num_iters = a_gl.cols() / Kb;
 
         if (kittens::warp::elect_leader()) {
+            all_input_barrier_wait<Config>(g, s.instruction());
             s.page_wait(s.lid_to_pid(D_LID));
             for (int i = 0; i < num_iters + LOAD_PIPE_DEPTH; i++) {
                 const int stage = i % LOAD_PIPE_DEPTH;

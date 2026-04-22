@@ -46,6 +46,7 @@ struct OProjResidual {
                     d_tt.template subtile<kittens::tt<float, Mb / 2, Nb / EPI_PIPE_DEPTH>>(0, (Nb / EPI_PIPE_DEPTH) * chunk));
             }
             kittens::tensor_load_wait();
+            if (consumer_group::elect_leader()) all_reuse_barrier_wait<Config>(g, s.instruction());
             consumer_group::sync(4);
             if (consumer_group::elect_leader()) s.tensor_finish();
 
@@ -66,6 +67,7 @@ struct OProjResidual {
             consumer_group::sync(4);
             if (consumer_group::elect_leader()) {
                 s.page_finish(s.lid_to_pid(Pipeline::D_LID));
+                all_barrier_arrive<Config>(g, s.instruction());
             }
         }
     };
