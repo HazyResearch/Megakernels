@@ -14,7 +14,7 @@ Kb = 64
 EPI_PIPE_DEPTH = 8
 
 
-@torch.library.custom_op("megakittens::o_proj_residual", mutates_args=("hidden",))
+@torch.library.custom_op("megakittens::oproj_residual", mutates_args=("hidden",))
 def o_proj_residual_op(
     hidden: torch.Tensor,
     attn_out: torch.Tensor,
@@ -53,8 +53,8 @@ class OProjResidual(IType):
     D_TMA = st(dtype=DType.bf16, rows=Mb // 2, cols=Nb // EPI_PIPE_DEPTH)
 
     torch_functions_map = {
-        torch.ops.megakittens.o_proj_residual: _resolve_o_proj_residual,
-        torch.ops.megakittens.o_proj_residual.default: _resolve_o_proj_residual,
+        torch.ops.megakittens.oproj_residual: _resolve_o_proj_residual,
+        torch.ops.megakittens.oproj_residual.default: _resolve_o_proj_residual,
     }
 
     test_cases = [
@@ -70,7 +70,7 @@ class OProjResidual(IType):
 
     @staticmethod
     def test_fn(hidden, attn_out, o_weights):
-        torch.ops.megakittens.o_proj_residual(hidden, attn_out, o_weights)
+        torch.ops.megakittens.oproj_residual(hidden, attn_out, o_weights)
         return hidden
 
     def __init__(self, m: int = 0, n: int = 0, k: int = 0):

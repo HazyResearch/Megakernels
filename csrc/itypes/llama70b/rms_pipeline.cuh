@@ -2,6 +2,7 @@
 
 #include "kittens.cuh"
 #include "schema.cuh"
+#include "utils.cuh"
 #include "itypes/llama70b/utils.cuh"
 
 namespace megakittens {
@@ -55,6 +56,7 @@ struct rms_pipeline {
         int num_used_pages = 1 + (inst.num_rows + 1) / 2;
 
         if (lane == 0) {
+            all_input_barrier_wait<Config>(g, s.instruction());
             int weight_pid = s.lid_to_pid(WEIGHTS_PAGE);
             s.page_wait(weight_pid);
             row_vec &weight_smem = *reinterpret_cast<row_vec*>(s.pages[weight_pid].ptr());
@@ -114,6 +116,7 @@ struct rms_pipeline {
     __device__ static inline void storer_loop(const Globals &g, state_t<Config> &s) {
         parsed_instruction inst{s};
         if (kittens::warp::elect_leader()) {
+            all_reuse_barrier_wait<Config>(g, s.instruction());
             for (int i = 0; i < inst.num_rows; i++) {
                 kittens::wait(outputs_arrived(s, i), 0);
                 row_vec &row_smem = row_at(s, i);
@@ -127,6 +130,8 @@ struct rms_pipeline {
             }
             kittens::tma::store_async_wait();
             s.page_finish(s.lid_to_pid(WEIGHTS_PAGE));
+            // TODO multi-gpu??: barrier scope needs to be `sys` for cross-GPU all-gather
+            all_barrier_arrive<Config>(g, s.instruction());
         }
     }
 };
