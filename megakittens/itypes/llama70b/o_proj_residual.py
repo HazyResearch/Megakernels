@@ -12,6 +12,7 @@ Mb = 256
 Nb = 256
 Kb = 64
 EPI_PIPE_DEPTH = 8
+NUM_CONSUMERS = 2
 
 
 @torch.library.custom_op("megakittens::oproj_residual", mutates_args=("hidden",))
@@ -47,6 +48,8 @@ class OProjResidual(IType):
     Nb = Nb
     Kb = Kb
     EPI_PIPE_DEPTH = EPI_PIPE_DEPTH
+    NUM_CONSUMERS = NUM_CONSUMERS
+    M_INST = NUM_CONSUMERS * Mb
 
     A_TMA = st(dtype=DType.bf16, rows=Mb // 2, cols=Kb)
     B_TMA = st(dtype=DType.bf16, rows=Nb // 2, cols=Kb)
@@ -58,9 +61,9 @@ class OProjResidual(IType):
     }
 
     test_cases = [
-        ((256, 8192, 8192), (256, 8192, 8192)),
         ((512, 8192, 8192), (512, 8192, 8192)),
         ((1024, 8192, 8192), (1024, 8192, 8192)),
+        ((2048, 8192, 8192), (2048, 8192, 8192)),
     ]
     test_atol = 1e-5
     test_rtol = 1e-5
@@ -105,9 +108,9 @@ class OProjResidual(IType):
     @property
     def inputs(self) -> list[TensorSpec]:
         return [
-            TensorSpec(dtype=DType.bf16, granularity=(self.Mb, self.Nb),
+            TensorSpec(dtype=DType.bf16, granularity=(self.M_INST, self.Nb),
                        tma_types=[self.D_TMA]),
-            TensorSpec(dtype=DType.bf16, granularity=(self.Mb, self.Kb),
+            TensorSpec(dtype=DType.bf16, granularity=(self.M_INST, self.Kb),
                        tma_types=[self.A_TMA]),
             TensorSpec(dtype=DType.bf16, granularity=(1, self.Nb, self.Kb),
                        tma_types=[self.B_TMA]),
@@ -116,7 +119,7 @@ class OProjResidual(IType):
     @property
     def outputs(self) -> list[TensorSpec]:
         return [
-            TensorSpec(dtype=DType.bf16, granularity=(self.Mb, self.Nb),
+            TensorSpec(dtype=DType.bf16, granularity=(self.M_INST, self.Nb),
                        tma_types=[self.D_TMA]),
         ]
 
@@ -134,7 +137,7 @@ class OProjResidual(IType):
         out_range = dst_ranges[0]
         M = out_range[-2].size
         N = out_range[-1].size
-        return 2 * (M // self.Mb) * (N // self.Nb)
+        return 2 * (M // self.M_INST) * (N // self.Nb)
 
     def block_indices(
         self,
@@ -146,8 +149,8 @@ class OProjResidual(IType):
         out_range = dst_ranges[0]
         w_range = src_ranges[2]
         layer_idx = w_range[-3].start
-        m_start = out_range[-2].start // self.Mb
-        m_stop = out_range[-2].stop // self.Mb
+        m_start = out_range[-2].start // self.M_INST
+        m_stop = out_range[-2].stop // self.M_INST
         n_start = out_range[-1].start // self.Nb
         n_stop = out_range[-1].stop // self.Nb
         indices = []
@@ -167,11 +170,11 @@ class OProjResidual(IType):
         layer_idx, m, n = block_index
         K = src_metas[1].shape[-1]
         hidden_region = (
-            (m * self.Mb, (m + 1) * self.Mb),
+            (m * self.M_INST, (m + 1) * self.M_INST),
             (n * self.Nb, (n + 1) * self.Nb),
         )
         attn_out_region = (
-            (m * self.Mb, (m + 1) * self.Mb),
+            (m * self.M_INST, (m + 1) * self.M_INST),
             (0, K),
         )
         o_weights_region = (
@@ -213,9 +216,9 @@ class OProjResidual(IType):
                 f"[MegaKittens] OProjResidual K mismatch: attn_out K={K} vs o_weights K={w_shape[-1]}"
             )
 
-        if M % self.Mb != 0:
+        if M % self.M_INST != 0:
             raise RuntimeError(
-                f"[MegaKittens] OProjResidual requires M divisible by {self.Mb}, got M={M}"
+                f"[MegaKittens] OProjResidual requires M divisible by {self.M_INST}, got M={M}"
             )
         if N % self.Nb != 0:
             raise RuntimeError(

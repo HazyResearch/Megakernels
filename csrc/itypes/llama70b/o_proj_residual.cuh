@@ -28,22 +28,20 @@ struct OProjResidual {
         __device__ static inline void consumer_loop(const Globals &g, state_t<Config> &s) {
             parsed_instruction pi{s};
             const int cta_rank = kittens::cluster_ctarank();
-            const int wg_id = kittens::warpgroup::groupid();
-            using consumer_group = kittens::group<Config::NUM_CONSUMER_WARPS>;
-            constexpr int CHUNKS_PER_WG = EPI_PIPE_DEPTH / 2;
+            const int cid = kittens::warpgroup::groupid();
+            using consumer_group = kittens::group<kittens::WARPGROUP_WARPS * Pipeline::NUM_CONSUMERS>;
 
             auto &hidden_gl = g.template gls<DST_HIDDEN>();
 
-            typename Pipeline::d_tt_t d_tt = s.tensor_alloc.template allocate<typename Pipeline::d_tt_t>(0);
+            typename Pipeline::d_tt_t d_tt = s.tensor_alloc.template allocate<typename Pipeline::d_tt_t>(cid * Nb);
             kittens::wait(Pipeline::outputs_arrived(s), 0);
 
-            kittens::rt_bf<Mb / 8, Nb / EPI_PIPE_DEPTH> d_reg[CHUNKS_PER_WG];
+            kittens::rt_bf<Mb / 8, Nb / EPI_PIPE_DEPTH> d_reg[EPI_PIPE_DEPTH];
             #pragma unroll
-            for (int j = 0; j < CHUNKS_PER_WG; j++) {
-                const int chunk = 2 * j + wg_id;
+            for (int i = 0; i < EPI_PIPE_DEPTH; i++) {
                 kittens::warpgroup::load_async(
-                    d_reg[j],
-                    d_tt.template subtile<kittens::tt<float, Mb / 2, Nb / EPI_PIPE_DEPTH>>(0, (Nb / EPI_PIPE_DEPTH) * chunk));
+                    d_reg[i],
+                    d_tt.template subtile<kittens::tt<float, Mb / 2, Nb / EPI_PIPE_DEPTH>>(0, (Nb / EPI_PIPE_DEPTH) * i));
             }
             kittens::tensor_load_wait();
             if (consumer_group::elect_leader()) all_reuse_barrier_wait<Config>(g, s.instruction());
@@ -51,22 +49,21 @@ struct OProjResidual {
             if (consumer_group::elect_leader()) s.tensor_finish();
 
             #pragma unroll
-            for (int j = 0; j < CHUNKS_PER_WG; j++) {
-                const int chunk = 2 * j + wg_id;
-                const int slot  = j % Pipeline::NUM_D_TILES;
+            for (int i = 0; i < EPI_PIPE_DEPTH; i++) {
+                const int slot = i % Pipeline::NUM_D_TILES;
                 kittens::warpgroup::tma::store_async_read_wait<Pipeline::NUM_D_TILES - 1>();
-                kittens::warpgroup::sync(wg_id + 1);
-                kittens::warpgroup::store(Pipeline::d_st(s, wg_id, slot), d_reg[j]);
-                kittens::warpgroup::sync(wg_id + 1);
+                kittens::warpgroup::sync(cid + 1);
+                kittens::warpgroup::store(Pipeline::d_st(s, cid, slot), d_reg[i]);
+                kittens::warpgroup::sync(cid + 1);
                 kittens::warpgroup::tma::store_add_async(
-                    hidden_gl, Pipeline::d_st(s, wg_id, slot),
-                    {0, 0, 2 * pi.m + cta_rank, EPI_PIPE_DEPTH * pi.n + chunk});
+                    hidden_gl, Pipeline::d_st(s, cid, slot),
+                    {0, 0, (2 * pi.m + cta_rank) * Pipeline::NUM_CONSUMERS + cid, EPI_PIPE_DEPTH * pi.n + i});
             }
 
             kittens::warpgroup::tma::store_async_wait();
             consumer_group::sync(4);
             if (consumer_group::elect_leader()) {
-                s.page_finish(s.lid_to_pid(Pipeline::D_LID));
+                s.page_finish(s.lid_to_pid(Pipeline::A_LIDS[0]));
                 all_barrier_arrive<Config>(g, s.instruction());
             }
         }
