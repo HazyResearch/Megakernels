@@ -106,7 +106,8 @@ struct rms_pipeline {
 
             kittens::rv_fl<ELEMS_PER_WARP> act_vec;
             kittens::warp::load(act_vec, row_slice);
-            act_vec = rms_norm<Config, N>(act_vec, weight_slice, eps, rms_scratch);
+            float *row_scratch = rms_scratch + i * Config::NUM_CONSUMER_WARPS;
+            act_vec = rms_norm<Config, N>(act_vec, weight_slice, eps, row_scratch);
             kittens::warp::store(row_slice, act_vec);
             kittens::warp::sync();
             kittens::warp::arrive(outputs_arrived(s, i));
