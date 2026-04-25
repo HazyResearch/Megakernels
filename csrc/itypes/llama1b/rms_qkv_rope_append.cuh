@@ -117,7 +117,7 @@ struct RmsQkvRopeAppend {
                 kittens::tma::store_async_wait();
                 if constexpr (Config::COARSE_GRAINED_BARRIERS) {
                     if (output_idx + 1 == inst.iters && s.instruction().num_dst_input_barriers > 0)
-                        barrier_arrive<Config>(&g.barriers.raw_ptr[s.instruction().dst_barriers[0]], 1);
+                        input_barrier_arrive<Config>(&g.barriers.raw_ptr[s.instruction().dst_barriers[0]], 1);
                 } else {
                     // one arrive per dst_barriers entry: fire on the last block of each sub-region
                     int curr_sub = subregion_offset(block_idx);
@@ -125,7 +125,7 @@ struct RmsQkvRopeAppend {
                                        (subregion_offset(block_idx + 1) != curr_sub);
                     if (last_of_sub) {
                         int k = curr_sub - inst.start_sub;
-                        barrier_arrive<Config>(&g.barriers.raw_ptr[s.instruction().dst_barriers[k]], 1);
+                        input_barrier_arrive<Config>(&g.barriers.raw_ptr[s.instruction().dst_barriers[k]], 1);
                     }
                 }
             }

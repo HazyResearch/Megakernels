@@ -147,6 +147,8 @@ class Dispatcher:
         cluster_size: int = 2,
         instruction_pipeline_stages: int = 2,
         coarse_grained_barriers: bool = False,
+        no_input_barriers: bool = False,
+        no_reuse_barriers: bool = False,
         no_inst_overlap: bool = False,
         no_inter_op_inst_overlap: bool = False,
     ) -> None:
@@ -219,6 +221,8 @@ class Dispatcher:
         self.cluster_size = cluster_size
         self.instruction_pipeline_stages = instruction_pipeline_stages
         self.coarse_grained_barriers = coarse_grained_barriers
+        self.no_input_barriers = no_input_barriers
+        self.no_reuse_barriers = no_reuse_barriers
         self.no_inst_overlap = no_inst_overlap
         self.no_inter_op_inst_overlap = no_inter_op_inst_overlap
 
@@ -340,6 +344,10 @@ class Dispatcher:
             config_struct += "static constexpr bool GLOBAL_WORK_QUEUE = true;"
         if self.coarse_grained_barriers:
             config_struct += "static constexpr bool COARSE_GRAINED_BARRIERS = true;"
+        if self.no_input_barriers:
+            config_struct += "static constexpr bool NO_INPUT_BARRIERS = true;"
+        if self.no_reuse_barriers:
+            config_struct += "static constexpr bool NO_REUSE_BARRIERS = true;"
         if self.no_inst_overlap:
             config_struct += "static constexpr bool NO_INST_OVERLAP = true;"
         if self.no_inter_op_inst_overlap:

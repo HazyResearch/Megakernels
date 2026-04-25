@@ -349,6 +349,8 @@ def benchmark_tok_per_sec(
     warmup=5,
     compile_individual_ops=False,
     compile_per_layer=False,
+    no_input_barriers=False,
+    no_reuse_barriers=False,
     num_layers=NUM_LAYERS,
 ):
     """tok/s with HF weights + greedy decode, using megakittens.compile(decode)."""
@@ -359,6 +361,8 @@ def benchmark_tok_per_sec(
         raise RuntimeError(f"num_layers must be >= 1, got {num_layers}")
     if compile_individual_ops and compile_per_layer:
         raise RuntimeError("compile_individual_ops and compile_per_layer are mutually exclusive")
+    if (no_input_barriers or no_reuse_barriers) and (compile_individual_ops or compile_per_layer):
+        raise RuntimeError("barrier ablations are only supported in whole-compile mode")
     global DECODE_NUM_LAYERS
     DECODE_NUM_LAYERS = num_layers
 
@@ -418,6 +422,8 @@ def benchmark_tok_per_sec(
             instruction_pipeline_stages=2,
             no_inter_op_inst_overlap=False,
             no_inst_overlap=False,
+            no_input_barriers=no_input_barriers,
+            no_reuse_barriers=no_reuse_barriers,
             coarse_grained_barriers=False
         )
 
@@ -506,6 +512,8 @@ if __name__ == "__main__":
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--compile-individual-ops", action="store_true")
     parser.add_argument("--compile-per-layer", action="store_true")
+    parser.add_argument("--no-input-barriers", action="store_true")
+    parser.add_argument("--no-reuse-barriers", action="store_true")
     parser.add_argument("--num-layers", type=int, default=NUM_LAYERS)
     args = parser.parse_args()
     benchmark_tok_per_sec(
@@ -515,5 +523,7 @@ if __name__ == "__main__":
         warmup=args.warmup,
         compile_individual_ops=args.compile_individual_ops,
         compile_per_layer=args.compile_per_layer,
+        no_input_barriers=args.no_input_barriers,
+        no_reuse_barriers=args.no_reuse_barriers,
         num_layers=args.num_layers,
     )

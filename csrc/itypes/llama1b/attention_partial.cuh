@@ -223,8 +223,8 @@ struct AttentionPartial {
                         const auto &raw = s.instruction();
                         int total = raw.num_src_input_barriers + raw.num_src_reuse_barriers;
                         for (int i = total - 2; i < total; i++)
-                            barrier_wait<Config>(&g.barriers.raw_ptr[raw.src_barriers[i]],
-                                                 raw.src_barrier_targets[i]);
+                            input_barrier_wait<Config>(&g.barriers.raw_ptr[raw.src_barriers[i]],
+                                                       raw.src_barrier_targets[i]);
                     }
                     if (local_i >= NUM_STAGES) {
                         kittens::wait(K_finished(s, stage), (local_i / NUM_STAGES - 1) % 2);
@@ -297,8 +297,8 @@ struct AttentionPartial {
                 const auto &raw = s.instruction();
                 int num_q = raw.num_src_input_barriers - 2;
                 for (int i = 0; i < num_q; i++)
-                    barrier_wait<Config>(&g.barriers.raw_ptr[raw.src_barriers[i]],
-                                         raw.src_barrier_targets[i]);
+                    input_barrier_wait<Config>(&g.barriers.raw_ptr[raw.src_barriers[i]],
+                                               raw.src_barrier_targets[i]);
             }
             kittens::warp::sync();
 
@@ -411,7 +411,7 @@ struct AttentionPartial {
                 if (kittens::warp::elect_leader()) {
                     s.page_finish(qol_pid(s));
                     __threadfence();
-                    barrier_arrive<Config>(&g.barriers.raw_ptr[inst.barrier_base], GQA_RATIO);
+                    input_barrier_arrive<Config>(&g.barriers.raw_ptr[inst.barrier_base], GQA_RATIO);
                 }
             } else {
                 kittens::rv_bf<HEAD_DIM> O_bf;

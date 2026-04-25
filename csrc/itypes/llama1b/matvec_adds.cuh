@@ -52,7 +52,7 @@ struct MatVecAdds {
 
                 if (output_idx == inst.iters - 1) {
                     const auto &instr = s.instruction();
-                    barrier_arrive<Config>(&g.barriers.raw_ptr[instr.dst_barriers[0]], 1);
+                    input_barrier_arrive<Config>(&g.barriers.raw_ptr[instr.dst_barriers[0]], 1);
                 }
             }
             kittens::warp::sync();
@@ -117,7 +117,7 @@ struct MatVecAdds {
             if (kittens::warp::elect_leader()) {
                 const auto &inst = s.instruction();
                 for (int i = 1; i < inst.num_dst_input_barriers; i++)
-                    barrier_arrive<Config>(&g.barriers.raw_ptr[inst.dst_barriers[i]], 1);
+                    input_barrier_arrive<Config>(&g.barriers.raw_ptr[inst.dst_barriers[i]], 1);
                 all_reuse_barrier_arrive<Config>(g, inst);
             }
         }

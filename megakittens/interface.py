@@ -23,6 +23,8 @@ def compile(
     cluster_size: int = 2,
     instruction_pipeline_stages: int = 2,
     coarse_grained_barriers: bool = False,
+    no_input_barriers: bool = False,
+    no_reuse_barriers: bool = False,
     no_inst_overlap: bool = False,
     no_inter_op_inst_overlap: bool = False,
 ) -> Callable[..., Any]:
@@ -42,6 +44,8 @@ def compile(
                 cluster_size=cluster_size,
                 instruction_pipeline_stages=instruction_pipeline_stages,
                 coarse_grained_barriers=coarse_grained_barriers,
+                no_input_barriers=no_input_barriers,
+                no_reuse_barriers=no_reuse_barriers,
                 no_inst_overlap=no_inst_overlap,
                 no_inter_op_inst_overlap=no_inter_op_inst_overlap,
             ),
