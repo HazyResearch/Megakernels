@@ -81,74 +81,16 @@ def decode_one_token(model: Transformer, x: torch.Tensor, input_pos: torch.Tenso
     logits = model(mask, x, input_pos)
     return sample(logits, **sampling_kwargs)
 
-def decode_n_tokens(model: Transformer, cur_token: torch.Tensor, input_pos: torch.Tensor, num_new_tokens: int, callback=lambda _: _, **sampling_kwargs):
+def decode_n_tokens(model: Transformer, cur_token: torch.Tensor, input_pos: torch.Tensor, num_new_tokens: int, **sampling_kwargs):
     block_mask = create_block_mask(causal_mask, 1, 1, model.max_seq_length, model.max_seq_length, device=cur_token.device)
-    new_tokens, new_probs = [], []
-    for i in range(num_new_tokens):
-        next_token, next_prob = decode_one_token(
-            model, cur_token, input_pos, block_mask, **sampling_kwargs
-        )
+    new_tokens = []
+    for _ in range(num_new_tokens):
+        next_token, _ = decode_one_token(model, cur_token, input_pos, block_mask, **sampling_kwargs)
         input_pos += 1
         new_tokens.append(next_token.clone())
-        callback(new_tokens[-1])
-        new_probs.append(next_prob.clone())
         cur_token = next_token.clone()
 
-    return new_tokens, new_probs
-
-
-def model_forward(model, x, input_pos):
-    return model(x, input_pos)
-
-def speculative_decode(
-    model: Transformer,
-    draft_model: Transformer,
-    cur_token: torch.Tensor,
-    input_pos: int,
-    speculate_k: int,
-    **sampling_kwargs
-) -> torch.Tensor:
-    # draft model inference sequentially
-    device = cur_token.device
-    orig_input_pos = torch.tensor([input_pos], dtype=torch.int64, device=cur_token.device)
-    draft_tokens, draft_probs = decode_n_tokens(draft_model, cur_token.view(1, -1), orig_input_pos.clone(), speculate_k, **sampling_kwargs)
-
-    draft_tokens = torch.cat(draft_tokens)
-    # parallel inference on target model using draft tokens
-    target_logits = model_forward(
-        model,
-        torch.cat([cur_token.view(1), draft_tokens]).view(1, -1),
-        torch.arange(input_pos, input_pos + speculate_k + 1, device=cur_token.device)
-    )
-    target_probs = logits_to_probs(target_logits[0], **sampling_kwargs)
-    draft_probs = torch.stack(draft_probs)
-    # q: target prob, p: draft prob
-    # q >= p: always accept draft token
-    # q < p: q/p prob to accept draft token
-    p = draft_probs[torch.arange(0, speculate_k, device=device), draft_tokens]
-    q = target_probs[torch.arange(0, speculate_k, device=device), draft_tokens]
-    accept_draft_prob = torch.minimum(torch.ones(()), q[:speculate_k]/ p)
-    rejected_locations = (torch.rand_like(accept_draft_prob) > accept_draft_prob).nonzero()
-
-    if rejected_locations.shape[0] == 0: # All draft tokens have been accepted
-        accept_length = speculate_k + 1
-        last_token = multinomial_sample_one_no_sync(target_probs[-1])
-        # fill last token into draft model
-        model_forward(
-            draft_model,
-            draft_tokens[-1].view(1, -1),
-            orig_input_pos + speculate_k,
-        )
-        return torch.cat([draft_tokens, last_token])
-    else:
-        accept_length = rejected_locations[0].item()
-        p = draft_probs[accept_length]
-        q = target_probs[accept_length]
-        new = q - p
-        new = torch.where(new > 0, new, 0.0)
-        new = new / new.sum()
-        next_token = multinomial_sample_one_no_sync(new)
-        return torch.cat([draft_tokens[:accept_length], next_token])
+    return new_tokens
 
 @torch.no_grad()
 def generate(
@@ -156,28 +98,20 @@ def generate(
     prompt: torch.Tensor,
     max_new_tokens: int,
     batch_size: int,
-    *,
-    draft_model: Transformer,
-    speculate_k: Optional[int] = 8,
-    callback = lambda x: x,
     **sampling_kwargs
 ) -> torch.Tensor:
     """
     Takes a conditioning sequence (prompt) as input and continues to generate as many tokens as requested.
     """
 
-    is_speculative = draft_model is not None
     # create an empty tensor of the expected final shape and fill in the current tokens
     T = prompt.size(-1)
     T_new = T + max_new_tokens
     max_seq_length = min(T_new, model.config.block_size)
 
     device, dtype = prompt.device, prompt.dtype
-    max_seq_length = max_seq_length + speculate_k + 1 if is_speculative else max_seq_length
     with torch.device(device):
         model.setup_caches(max_batch_size=batch_size, max_seq_length=max_seq_length)
-        if is_speculative and draft_model is not model:
-            draft_model.setup_caches(max_batch_size=batch_size, max_seq_length=max_seq_length)
 
     # create an empty tensor of the expected final shape and fill in the current tokens
     empty = torch.empty(batch_size, T_new, dtype=dtype, device=device)
@@ -188,37 +122,13 @@ def generate(
     input_pos = torch.arange(0, T, device=device)
 
     next_token = prefill(model, prompt.view(batch_size, -1), input_pos, **sampling_kwargs).clone()
-    if is_speculative:
-        prefill(draft_model, prompt.view(batch_size, -1), input_pos, **sampling_kwargs)
     seq[:, T] = next_token.squeeze()
 
     input_pos = torch.tensor([T], device=device, dtype=torch.int)
-    accept_counts = [0] * (speculate_k + 1)
+    generated_tokens = decode_n_tokens(model, next_token.view(batch_size, -1), input_pos, max_new_tokens - 1, **sampling_kwargs)
+    seq[:, T + 1:] = torch.cat(generated_tokens, dim=-1)
 
-    if is_speculative:
-        input_pos = input_pos.item()  # for speculative decoding easier to keep on host
-        while input_pos < T_new - 1:
-            cur_token = next_token.view(())
-
-            next_tokens = speculative_decode(
-                model, draft_model, cur_token, input_pos, speculate_k, **sampling_kwargs
-            )
-
-            accept_counts[len(next_tokens) - 1] += 1
-            num_added = min(T_new - input_pos - 1, len(next_tokens))
-            seq[input_pos + 1 : input_pos + num_added + 1] = next_tokens[: num_added]
-            for i in next_tokens[: num_added,]:
-                callback(i)
-            input_pos = input_pos + num_added
-            next_token = next_tokens[-1]
-    else:
-        generated_tokens, _ = decode_n_tokens(model, next_token.view(batch_size, -1), input_pos, max_new_tokens - 1, callback=callback, **sampling_kwargs)
-        seq[:, T + 1:] = torch.cat(generated_tokens, dim=-1)
-
-    generate_stats = {
-        'accept_counts': accept_counts
-    }
-    return seq, generate_stats
+    return seq
 
 def encode_tokens(tokenizer, string, bos=True, device=default_device):
     tokens = tokenizer.encode(string)
@@ -273,8 +183,6 @@ def main(
     compile: bool = True,
     compile_prefill: bool = False,
     profile: Optional[Path] = None,
-    draft_checkpoint_path: Optional[Path] = None,
-    speculate_k: int = 5,
     device=default_device,
 ) -> None:
     """Generates text samples based on a pre-trained Transformer model and tokenizer.
@@ -295,16 +203,10 @@ def main(
 
     print(f"Using device={device}")
     precision = torch.bfloat16
-    is_speculative = draft_checkpoint_path is not None
 
     print("Loading model ...")
     t0 = time.time()
     model = _load_model(checkpoint_path, device, precision, use_tp)
-
-    if is_speculative:
-        draft_model = _load_model(draft_checkpoint_path, device, precision, use_tp)
-    else:
-        draft_model = None
 
     device_sync(device=device) # MKG
     print(f"Time to load model: {time.time() - t0:.02f} seconds")
@@ -321,13 +223,6 @@ def main(
     torch.manual_seed(1234)
     model_size, params = _get_model_size(model)
     if compile:
-        if is_speculative and use_tp: # and ("cuda" in device):
-            torch._inductor.config.triton.cudagraph_trees = False # Bug with cudagraph trees in this case
-
-        if is_speculative:
-            global model_forward, logits_to_prob
-            model_forward = torch.compile(model_forward, mode="reduce-overhead", fullgraph=True)
-
         global decode_one_token, prefill
         decode_one_token = torch.compile(decode_one_token, mode="reduce-overhead", fullgraph=True)
 
@@ -338,13 +233,11 @@ def main(
 
     aggregate_metrics = {
         'tokens_per_sec': [],
-        'accept_counts': [],
     }
     start = -1 if compile else 0
 
     for i in range(start, num_samples):
         device_sync(device=device) # MKG
-        callback = lambda x : x
         t0 = time.perf_counter()
         import contextlib
         if (i != num_samples - 1 or not profile) or (use_tp and rank != 0):
@@ -353,18 +246,14 @@ def main(
             torch.profiler._utils._init_for_cuda_graphs()
             prof = torch.profiler.profile()
         with prof:
-            y, metrics = generate(
+            y = generate(
                 model,
                 encoded,
                 max_new_tokens,
                 batch_size=batch_size,
-                draft_model=draft_model,
-                speculate_k=speculate_k,
-                callback=callback,
                 temperature=temperature,
                 top_k=top_k,
             )
-            aggregate_metrics['accept_counts'].append(metrics['accept_counts'])
         if i == -1:
             print(f"Compilation time: {time.perf_counter() - t0:.2f} seconds")
             continue
@@ -389,12 +278,6 @@ def main(
         print(f"FLOPS achieved: {params * total_tokens_sec * 2 / 1e12:.02f} TF/s")
         print()
     print("==========")
-    if is_speculative:
-        counts_aggregated = [sum(i) for i in zip(*aggregate_metrics['accept_counts'])]
-        acceptance_probs = [i/sum(counts_aggregated) for i in counts_aggregated]
-        print(f"Acceptance probs: {acceptance_probs}")
-        print(f"Mean Accepted: {sum([idx * i for idx, i in enumerate(counts_aggregated)])/sum(counts_aggregated)}")
-
     print(f"Batch Size: {batch_size}")
     print(f"Prompt Length: {prompt_length}")
     print(f"Generated tokens: {max_new_tokens}")
@@ -422,13 +305,10 @@ if __name__ == '__main__':
     parser.add_argument('--compile', action='store_true', help='Whether to compile the model.')
     parser.add_argument('--compile_prefill', action='store_true', help='Whether to compile the prefill (improves prefill perf, but higher compile times)')
     parser.add_argument('--profile', type=Path, default=None, help='Profile path.')
-    parser.add_argument('--speculate_k', type=int, default=5, help='Speculative execution depth.')
-    parser.add_argument('--draft_checkpoint_path', type=Path, default=None, help='Draft checkpoint path.')
     parser.add_argument('--device', type=str, default=default_device, help='Device to use')
 
     args = parser.parse_args()
     main(
         args.prompt, args.num_samples, args.max_new_tokens, args.batch_size, args.top_k,
-        args.temperature, args.checkpoint_path, args.compile, args.compile_prefill, args.profile, args.draft_checkpoint_path,
-        args.speculate_k, args.device
+        args.temperature, args.checkpoint_path, args.compile, args.compile_prefill, args.profile, args.device
     )
