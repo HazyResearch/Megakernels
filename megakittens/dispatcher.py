@@ -149,6 +149,7 @@ class Dispatcher:
         coarse_grained_barriers: bool = False,
         no_input_barriers: bool = False,
         no_reuse_barriers: bool = False,
+        no_virtual_smem: bool = False,
         no_inst_overlap: bool = False,
         no_inter_op_inst_overlap: bool = False,
     ) -> None:
@@ -223,6 +224,7 @@ class Dispatcher:
         self.coarse_grained_barriers = coarse_grained_barriers
         self.no_input_barriers = no_input_barriers
         self.no_reuse_barriers = no_reuse_barriers
+        self.no_virtual_smem = no_virtual_smem
         self.no_inst_overlap = no_inst_overlap
         self.no_inter_op_inst_overlap = no_inter_op_inst_overlap
 
@@ -348,6 +350,8 @@ class Dispatcher:
             config_struct += "static constexpr bool NO_INPUT_BARRIERS = true;"
         if self.no_reuse_barriers:
             config_struct += "static constexpr bool NO_REUSE_BARRIERS = true;"
+        if self.no_virtual_smem:
+            config_struct += "static constexpr bool NO_VIRTUAL_SMEM = true;"
         if self.no_inst_overlap:
             config_struct += "static constexpr bool NO_INST_OVERLAP = true;"
         if self.no_inter_op_inst_overlap:

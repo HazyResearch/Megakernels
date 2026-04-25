@@ -64,9 +64,12 @@ __device__ __forceinline__ void controller_loop(const Globals &g, megakittens::s
         kittens::warp::sync();
 
         // Step 2. Establish physical page order
-        if (s.iter == 0 || Config::INSTRUCTION_PIPE_STAGES == 1) {
+        if (s.iter == 0) {
             if (lane_id < Config::NUM_PAGES)
                 s.instruction_states[s.stage].pid_order[lane_id] = lane_id;
+        } else if constexpr (Config::NO_VIRTUAL_SMEM || Config::INSTRUCTION_PIPE_STAGES == 1) {
+            // Identity order was initialized once. With one pipe stage, the previous
+            // instruction is fully drained before reuse, so virtual remapping is unnecessary.
         } else {
             const int last_icode = s.instruction_states[last_stage].instruction.icode;
             if (lane_id < Config::NUM_PAGES) {

@@ -48,6 +48,7 @@ struct default_config {
     static constexpr bool COARSE_GRAINED_BARRIERS = false;
     static constexpr bool NO_INPUT_BARRIERS = false;
     static constexpr bool NO_REUSE_BARRIERS = false;
+    static constexpr bool NO_VIRTUAL_SMEM = false;
     static constexpr bool NO_INST_OVERLAP = false;
     static constexpr bool NO_INTER_OP_INST_OVERLAP = false;
 
@@ -142,7 +143,8 @@ struct state_t {
         return reinterpret_cast<void *>(&instruction_states[stage].scratch[0]);
     }
     __device__ __forceinline__ int lid_to_pid(int lid) {
-        return pid_order()[lid];
+        if constexpr (Config::NO_VIRTUAL_SMEM) return lid;
+        else return pid_order()[lid];
     }
     __device__ __forceinline__ void page_wait(int pid) {
         kittens::wait(page_finished[pid], iter&0b1);

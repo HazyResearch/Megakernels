@@ -28,6 +28,7 @@ def megakittens_backend(
     coarse_grained_barriers: bool = False,
     no_input_barriers: bool = False,
     no_reuse_barriers: bool = False,
+    no_virtual_smem: bool = False,
     no_inst_overlap: bool = False,
     no_inter_op_inst_overlap: bool = False,
 ) -> Callable[[torch.fx.GraphModule, List[Any]], Callable[..., Any]]:
@@ -91,6 +92,7 @@ def megakittens_backend(
                 coarse_grained_barriers=coarse_grained_barriers,
                 no_input_barriers=no_input_barriers,
                 no_reuse_barriers=no_reuse_barriers,
+                no_virtual_smem=no_virtual_smem,
                 no_inst_overlap=no_inst_overlap,
                 no_inter_op_inst_overlap=no_inter_op_inst_overlap,
             )

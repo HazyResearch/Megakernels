@@ -96,19 +96,30 @@ def decode(
     return logits
 
 
+def _compile(
+    fn,
+    *,
+    no_input_barriers=False,
+    no_reuse_barriers=False,
+    no_virtual_smem=False,
+):
+    return megakittens.compile(
+        fn,
+        use_jit_cache=False,
+        verbose=False,
+        save_schedule=False,
+        cluster_size=1,
+        instruction_pipeline_stages=2,
+        no_inter_op_inst_overlap=False,
+        no_inst_overlap=False,
+        no_input_barriers=no_input_barriers,
+        no_reuse_barriers=no_reuse_barriers,
+        no_virtual_smem=no_virtual_smem,
+        coarse_grained_barriers=False,
+    )
+
+
 def decode_compile_individual_ops():
-    def _compile(fn):
-        return megakittens.compile(
-            fn,
-            use_jit_cache=True,
-            verbose=False,
-            save_schedule=False,
-            cluster_size=1,
-            instruction_pipeline_stages=2,
-            no_inter_op_inst_overlap=False,
-            no_inst_overlap=False,
-            coarse_grained_barriers=False,
-        )
 
     def qkv_op(
         hidden_states,
@@ -225,19 +236,6 @@ def decode_compile_individual_ops():
 
 
 def decode_compile_per_layer():
-    def _compile(fn):
-        return megakittens.compile(
-            fn,
-            use_jit_cache=True,
-            verbose=False,
-            save_schedule=False,
-            cluster_size=1,
-            instruction_pipeline_stages=2,
-            no_inter_op_inst_overlap=False,
-            no_inst_overlap=False,
-            coarse_grained_barriers=False,
-        )
-
     def layer_op(
         hidden_states,
         qkv_weights,
@@ -351,6 +349,7 @@ def benchmark_tok_per_sec(
     compile_per_layer=False,
     no_input_barriers=False,
     no_reuse_barriers=False,
+    no_virtual_smem=False,
     num_layers=NUM_LAYERS,
 ):
     """tok/s with HF weights + greedy decode, using megakittens.compile(decode)."""
@@ -413,18 +412,11 @@ def benchmark_tok_per_sec(
     elif compile_per_layer:
         compiled = decode_compile_per_layer()
     else:
-        compiled = megakittens.compile(
+        compiled = _compile(
             decode,
-            use_jit_cache=False,
-            verbose=False,
-            save_schedule=False,
-            cluster_size=1,
-            instruction_pipeline_stages=2,
-            no_inter_op_inst_overlap=False,
-            no_inst_overlap=False,
             no_input_barriers=no_input_barriers,
             no_reuse_barriers=no_reuse_barriers,
-            coarse_grained_barriers=False
+            no_virtual_smem=no_virtual_smem,
         )
 
     # Pre-allocate CPU-side buffer and cache GPU address for fast pos_id updates
@@ -514,6 +506,7 @@ if __name__ == "__main__":
     parser.add_argument("--compile-per-layer", action="store_true")
     parser.add_argument("--no-input-barriers", action="store_true")
     parser.add_argument("--no-reuse-barriers", action="store_true")
+    parser.add_argument("--no-virtual-smem", action="store_true")
     parser.add_argument("--num-layers", type=int, default=NUM_LAYERS)
     args = parser.parse_args()
     benchmark_tok_per_sec(
@@ -525,5 +518,6 @@ if __name__ == "__main__":
         compile_per_layer=args.compile_per_layer,
         no_input_barriers=args.no_input_barriers,
         no_reuse_barriers=args.no_reuse_barriers,
+        no_virtual_smem=args.no_virtual_smem,
         num_layers=args.num_layers,
     )
