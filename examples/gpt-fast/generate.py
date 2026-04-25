@@ -14,22 +14,11 @@ import torch._dynamo.config
 import torch._inductor.config
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask
 
-def device_sync(device):
-    if "cuda" in device:
-        torch.cuda.synchronize(device)
-    elif ("cpu" in device) or ("mps" in device):
-        pass
-    else:
-        print(f"device={device} is not yet suppported")
-
-
 torch._inductor.config.coordinate_descent_tuning = True
 torch._inductor.config.triton.unique_kernel_names = True
 # Experimental features to reduce compilation times, will be on by default in future
 torch._inductor.config.fx_graph_cache = True 
 torch._functorch.config.enable_autograd_cache = True
-
-default_device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 create_block_mask = torch.compile(create_block_mask)
 
@@ -130,13 +119,13 @@ def generate(
 
     return seq
 
-def encode_tokens(tokenizer, string, bos=True, device=default_device):
+def encode_tokens(tokenizer, string, bos=True):
     tokens = tokenizer.encode(string)
     if bos:
         tokens = [tokenizer.bos_id()] + tokens
-    return torch.tensor(tokens, dtype=torch.int, device=device)
+    return torch.tensor(tokens, dtype=torch.int, device='cuda')
 
-def _load_model(checkpoint_path, device, precision, use_tp):
+def _load_model(checkpoint_path, precision, use_tp):
     with torch.device('meta'):
         model = Transformer.from_name(checkpoint_path.parent.name)
 
@@ -150,7 +139,7 @@ def _load_model(checkpoint_path, device, precision, use_tp):
         print("Applying tensor parallel to model ...")
         apply_tp(model)
 
-    model = model.to(device=device, dtype=precision)
+    model = model.to(device='cuda', dtype=precision)
     return model.eval()
 
 def _get_model_size(model):
@@ -183,7 +172,6 @@ def main(
     compile: bool = True,
     compile_prefill: bool = False,
     profile: Optional[Path] = None,
-    device=default_device,
 ) -> None:
     """Generates text samples based on a pre-trained Transformer model and tokenizer.
     """
@@ -201,23 +189,22 @@ def main(
             # only print on rank 0
             print = lambda *args, **kwargs: None
 
-    print(f"Using device={device}")
     precision = torch.bfloat16
 
     print("Loading model ...")
     t0 = time.time()
-    model = _load_model(checkpoint_path, device, precision, use_tp)
+    model = _load_model(checkpoint_path, precision, use_tp)
 
-    device_sync(device=device) # MKG
+    torch.cuda.synchronize() # MKG
     print(f"Time to load model: {time.time() - t0:.02f} seconds")
 
     tokenizer = get_tokenizer(tokenizer_path, checkpoint_path)
 
     if isinstance(prompt, str):
-        encoded = encode_tokens(tokenizer, prompt, bos=True, device=device)
+        encoded = encode_tokens(tokenizer, prompt, bos=True)
     else:
         # generate a fully synthetic prompt
-        encoded = torch.randint(0, 1024, (prompt,), device=device, dtype=torch.int64)
+        encoded = torch.randint(0, 1024, (prompt,), device='cuda', dtype=torch.int64)
     prompt_length = encoded.size(-1)
 
     torch.manual_seed(1234)
@@ -237,7 +224,7 @@ def main(
     start = -1 if compile else 0
 
     for i in range(start, num_samples):
-        device_sync(device=device) # MKG
+        torch.cuda.synchronize() # MKG
         t0 = time.perf_counter()
         import contextlib
         if (i != num_samples - 1 or not profile) or (use_tp and rank != 0):
@@ -262,7 +249,7 @@ def main(
                 prof.export_chrome_trace(f"{profile}_rank_{rank}.json")
             else:
                 prof.export_chrome_trace(f"{profile}.json")
-        device_sync(device=device) # MKG
+        torch.cuda.synchronize() # MKG
         t = time.perf_counter() - t0
 
         # Just displaying the first generation
@@ -305,10 +292,9 @@ if __name__ == '__main__':
     parser.add_argument('--compile', action='store_true', help='Whether to compile the model.')
     parser.add_argument('--compile_prefill', action='store_true', help='Whether to compile the prefill (improves prefill perf, but higher compile times)')
     parser.add_argument('--profile', type=Path, default=None, help='Profile path.')
-    parser.add_argument('--device', type=str, default=default_device, help='Device to use')
 
     args = parser.parse_args()
     main(
         args.prompt, args.num_samples, args.max_new_tokens, args.batch_size, args.top_k,
-        args.temperature, args.checkpoint_path, args.compile, args.compile_prefill, args.profile, args.device
+        args.temperature, args.checkpoint_path, args.compile, args.compile_prefill, args.profile
     )
