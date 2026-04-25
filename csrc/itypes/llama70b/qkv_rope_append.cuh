@@ -8,7 +8,7 @@ namespace megakittens {
 namespace llama70b {
 
 template <typename Config, typename Globals,
-          int BATCH_SIZE, int NUM_PAGES, int PAGES_PER_SEQ,
+          int BATCH_SIZE,
           int HIDDEN_DIM, int QKV_DIM, int HEAD_DIM, int PAGE_SIZE,
           int NUM_Q_HEADS, int NUM_KV_HEADS,
           int SRC_X, int SRC_QKV_W, int SRC_ROPE_COS, int SRC_ROPE_SIN,
@@ -116,7 +116,7 @@ struct QkvRopeAppend {
             const int append_idx = static_cast<int>(append_gl.raw_ptr[global_row]);
             const int page = append_idx / PAGE_SIZE;
             const int offset = append_idx % PAGE_SIZE;
-            const int cache_page = pi.base_page + pi.layer_idx * NUM_PAGES + page;
+            const int cache_page = pi.base_page + page;
             kv_gl[{cache_page, offset, head_idx, dim_start + col}] = tile[{row, col}];
         }
     }

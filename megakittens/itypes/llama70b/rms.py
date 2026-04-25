@@ -100,7 +100,7 @@ class Rms70b(IType):
         src_ranges: Tuple[TensorRange, ...],
         dst_ranges: Tuple[TensorRange, ...],
     ) -> int:
-        return min(src_ranges[0][2].size, get_sm_count())
+        return min(src_ranges[0][-2].size, get_sm_count())
 
     def block_indices(
         self,
@@ -110,12 +110,12 @@ class Rms70b(IType):
         dst_ranges: Tuple[TensorRange, ...],
     ) -> List[Tuple[int, ...]]:
         x_range = src_ranges[0]
-        B = x_range[2].size
+        B = x_range[-2].size
         sm_count = get_sm_count()
         n_inst = min(B, sm_count)
         return [
             (0, 0,
-             x_range[2].start + round(i * B / n_inst),
+             x_range[-2].start + round(i * B / n_inst),
              round((i + 1) * B / n_inst) - round(i * B / n_inst))
             for i in range(n_inst)
         ]
@@ -128,10 +128,11 @@ class Rms70b(IType):
     ):
         _, _, row_start, num_rows = block_index
         C = src_metas[0].shape[-1]
-        x_region = ((0, 1), (0, 1), (row_start, row_start + num_rows), (0, C))
+        leading_region = tuple((0, 1) for _ in range(len(src_metas[0].shape) - 2))
+        x_region = leading_region + ((row_start, row_start + num_rows), (0, C))
         w_region = ((0, C),)
         eps_region = ((0, 1),)
-        y_region = ((0, 1), (0, 1), (row_start, row_start + num_rows), (0, C))
+        y_region = leading_region + ((row_start, row_start + num_rows), (0, C))
         return [[x_region], [w_region], [eps_region]], [[y_region]]
 
     def validate(
@@ -148,7 +149,7 @@ class Rms70b(IType):
                 f"[MegaKittens] Rms70b expected col_dim={self.col_dim}, got {C}"
             )
 
-        B = src_ranges[0][2].size
+        B = src_ranges[0][-2].size
         sm_count = get_sm_count()
         n_inst = min(B, sm_count)
         rows_per_inst = (B + n_inst - 1) // n_inst if n_inst > 0 else 0

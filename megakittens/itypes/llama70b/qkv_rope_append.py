@@ -112,10 +112,8 @@ def _qkv_rope_append70b_fake(
 
 def _resolve_qkv_rope_append70b(args, kwargs):
     x_shape = args[0].meta["val"].shape
-    w_shape = args[1].meta["val"].shape
     k_shape = args[6].meta["val"].shape
-    num_pages_per_layer = k_shape[-4] // w_shape[-3]
-    return QkvRopeAppend70b(batch_size=x_shape[-2], num_pages=num_pages_per_layer), [0, 1, 2]
+    return QkvRopeAppend70b(batch_size=x_shape[-2], num_pages=k_shape[-4]), [0, 1, 2]
 
 
 class QkvRopeAppend70b(IType):
@@ -159,7 +157,7 @@ class QkvRopeAppend70b(IType):
     def cpp_template(self) -> str:
         return (
             f"llama70b::QkvRopeAppend<MKConfig, MKGlobals, "
-            f"{self.batch_size}, {self.num_pages}, {self.pages_per_seq}, "
+            f"{self.batch_size}, "
             f"{HIDDEN_DIM}, {QKV_DIM}, {HEAD_DIM}, {PAGE_SIZE}, "
             f"{NUM_Q_HEADS}, {NUM_KV_HEADS}, {{tensors}}>"
         )
@@ -261,10 +259,8 @@ class QkvRopeAppend70b(IType):
     ):
         layer_idx, base_page, m, n = block_index
         B = dst_metas[0].shape[-2]
-        num_layers = src_metas[1].shape[-3]
-        num_pages = src_metas[6].shape[-4] // num_layers
+        num_pages = self.num_pages or src_metas[6].shape[-4]
         pages_per_seq = num_pages // B
-        layer_page_start = base_page + layer_idx * num_pages
         row_start = m * self.M_INST
         row_stop = row_start + self.M_INST
         n_start = n * self.Nb
@@ -282,19 +278,18 @@ class QkvRopeAppend70b(IType):
         k_regions = [empty_kv]
         v_regions = [empty_kv]
 
+        page_start = base_page + row_start * pages_per_seq
+        page_stop = base_page + row_stop * pages_per_seq
+
         if n_start < Q_DIM:
             q_regions = [((row_start, row_stop), (n_start, min(n_stop, Q_DIM)))]
         elif n_start < Q_DIM + KV_DIM:
             head_start = (n_start - Q_DIM) // HEAD_DIM
             head_stop = (min(n_stop, Q_DIM + KV_DIM) - Q_DIM + HEAD_DIM - 1) // HEAD_DIM
-            page_start = layer_page_start + row_start * pages_per_seq
-            page_stop = layer_page_start + row_stop * pages_per_seq
             k_regions = [((page_start, page_stop), (0, PAGE_SIZE), (head_start, head_stop), (0, HEAD_DIM))]
         else:
             head_start = (n_start - Q_DIM - KV_DIM) // HEAD_DIM
             head_stop = (min(n_stop, QKV_DIM) - Q_DIM - KV_DIM + HEAD_DIM - 1) // HEAD_DIM
-            page_start = layer_page_start + row_start * pages_per_seq
-            page_stop = layer_page_start + row_stop * pages_per_seq
             v_regions = [((page_start, page_stop), (0, PAGE_SIZE), (head_start, head_stop), (0, HEAD_DIM))]
 
         return (
@@ -323,14 +318,7 @@ class QkvRopeAppend70b(IType):
         q_shape = dst_ranges[0].effective_shape
 
         B = x_shape[-2]
-        num_layers = src_metas[1].shape[-3]
-        total_cache_pages = k_shape[-4]
-        if total_cache_pages % num_layers != 0:
-            raise RuntimeError(
-                f"[MegaKittens] QkvRopeAppend70b requires cache pages divisible by num_layers, "
-                f"got cache_pages={total_cache_pages}, num_layers={num_layers}"
-            )
-        num_pages = total_cache_pages // num_layers
+        num_pages = k_shape[-4]
 
         if x_shape[-1] != HIDDEN_DIM:
             raise RuntimeError(f"[MegaKittens] QkvRopeAppend70b expected x dim={HIDDEN_DIM}, got {x_shape[-1]}")

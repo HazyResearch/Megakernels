@@ -60,10 +60,8 @@ def _attention_decode70b_fake(
 
 
 def _resolve_attention_decode70b(args, kwargs):
-    q_node = args[0]
-    k_cache_node = args[1]
-    q_shape = q_node.meta["val"].shape
-    k_shape = k_cache_node.meta["val"].shape
+    q_shape = args[0].meta["val"].shape
+    k_shape = args[1].meta["val"].shape
     return AttentionDecode70b(batch_size=q_shape[-2], num_pages=k_shape[-4])
 
 
@@ -171,7 +169,7 @@ class AttentionDecode70b(IType):
     ):
         base_page, seq_idx = block_index
         batch_size = dst_metas[0].shape[-2]
-        num_pages = src_metas[1].shape[-4]
+        num_pages = self.num_pages or src_metas[1].shape[-4]
         pages_per_seq = num_pages // batch_size
         page_start = base_page + seq_idx * pages_per_seq
         page_stop = page_start + pages_per_seq
