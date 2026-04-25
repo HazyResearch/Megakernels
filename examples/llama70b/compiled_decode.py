@@ -1,31 +1,36 @@
-"""Single-GPU batched Llama-70B decode using megakittens.compile.
+"""Single-GPU batched Llama-3.3-70B decode using megakittens.compile.
 
-This mirrors the llama1b compiled decode example, but targets the current
-single-GPU 70B itypes and the static paged KV cache layout:
+Loads real HF weights via streaming safetensors reads to fit on a single B200
+(192 GB). Mirrors the llama1b compiled decode example, scaled to the 70B
+single-GPU itypes and the static paged KV cache layout:
 
     [NUM_LAYERS * num_pages, PAGE_SIZE, NUM_KV_HEADS, HEAD_DIM]
 
 where each layer owns `num_pages = batch_size * pages_per_seq` pages and
 sequence i owns pages [i * pages_per_seq, (i + 1) * pages_per_seq).
-
-The example uses synthetic weights/tokens. Loading a full HF 70B checkpoint just
-to keep 20 layers resident is not practical as a default example path.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import math
+import os
 import time
 
 import torch
+from huggingface_hub import snapshot_download
+from safetensors import safe_open
+from transformers import AutoConfig
+from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding
 
 import megakittens
-from megakittens.itypes.llama70b.qkv_rope_append import interleave_qkv_weights
 from megakittens.jit.cuda_utils import initialize_cuda_context
 
 
-NUM_LAYERS = 20
+MODEL_ID = "meta-llama/Llama-3.3-70B-Instruct"
+
+NUM_LAYERS = 80
 HIDDEN_DIM = 8192
 HEAD_DIM = 128
 NUM_Q_HEADS = 64
@@ -33,7 +38,7 @@ NUM_KV_HEADS = 8
 Q_DIM = NUM_Q_HEADS * HEAD_DIM
 KV_DIM = NUM_KV_HEADS * HEAD_DIM
 QKV_DIM = Q_DIM + 2 * KV_DIM
-INTERMEDIATE_DIM = 3584
+INTERMEDIATE_DIM = 28672
 VOCAB_SIZE = 128256
 PAGE_SIZE = 128
 RMS_NORM_EPS = 1e-5
@@ -51,16 +56,15 @@ def _interleave_indices(num_heads: int, head_dim: int, device=None) -> torch.Ten
     return torch.tensor(indices, dtype=torch.long, device=device)
 
 
-def _make_rope_table(max_seq_len: int, device: str) -> tuple[torch.Tensor, torch.Tensor]:
-    inv_freq = 1.0 / (
-        10000 ** (torch.arange(0, HEAD_DIM, 2, dtype=torch.float32, device=device) / HEAD_DIM)
-    )
-    positions = torch.arange(max_seq_len, dtype=torch.float32, device=device)
-    freqs = torch.outer(positions, inv_freq)
-    cos = torch.cat((freqs.cos(), freqs.cos()), dim=-1)
-    sin = torch.cat((freqs.sin(), freqs.sin()), dim=-1)
-    indices = _interleave_indices(1, HEAD_DIM, device=device)
-    return cos[..., indices].contiguous(), sin[..., indices].contiguous()
+def _make_rope_table(config, max_seq_len: int, device: str) -> tuple[torch.Tensor, torch.Tensor]:
+    rope = LlamaRotaryEmbedding(config=config)
+    positions = torch.arange(max_seq_len).unsqueeze(0)
+    dummy = torch.empty(0, config.hidden_size, dtype=torch.float32)
+    cos_hf, sin_hf = rope(dummy, positions)
+    cos_hf = cos_hf.squeeze(0).to(device)
+    sin_hf = sin_hf.squeeze(0).to(device)
+    one_head_indices = _interleave_indices(1, HEAD_DIM, device=device)
+    return cos_hf[..., one_head_indices].contiguous(), sin_hf[..., one_head_indices].contiguous()
 
 
 def _kv_append_indices(batch_size: int, pages_per_seq: int, pos: int, device: str) -> torch.Tensor:
@@ -146,42 +150,80 @@ def decode(
     return torch.ops.megakittens.lm_head70b(logits_hidden, lm_head_weight)
 
 
-def make_synthetic_inputs(
+def load_hf_weights(
     batch_size: int,
     max_seq_len: int,
     device: str,
-    seed: int = 0,
 ) -> tuple[dict[str, torch.Tensor], int]:
+    """Stream Llama-70B safetensors shards directly into stacked GPU tensors."""
+    print(f"Fetching {MODEL_ID} (cached) ...")
+    config = AutoConfig.from_pretrained(MODEL_ID)
+    repo_dir = snapshot_download(MODEL_ID, allow_patterns=["*.safetensors", "*.json"])
+
     pages_per_seq = (max_seq_len + PAGE_SIZE - 1) // PAGE_SIZE
     num_pages = batch_size * pages_per_seq
-    generator = torch.Generator(device=device).manual_seed(seed)
 
-    def randn(*shape, scale=1.0):
-        return torch.randn(*shape, dtype=torch.bfloat16, device=device, generator=generator) * scale
-
-    qkv_weights = randn(NUM_LAYERS, QKV_DIM, HIDDEN_DIM, scale=HIDDEN_DIM ** -0.5)
-    qkv_weights = interleave_qkv_weights(qkv_weights).contiguous()
     weights = {
-        "qkv_weights": qkv_weights,
-        "o_weights": randn(NUM_LAYERS, HIDDEN_DIM, HIDDEN_DIM, scale=HIDDEN_DIM ** -0.5),
-        "attn_norm_weights": torch.ones(NUM_LAYERS, HIDDEN_DIM, dtype=torch.bfloat16, device=device),
-        "mlp_norm_weights": torch.ones(NUM_LAYERS, HIDDEN_DIM, dtype=torch.bfloat16, device=device),
-        "gate_weights": randn(NUM_LAYERS, INTERMEDIATE_DIM, HIDDEN_DIM, scale=HIDDEN_DIM ** -0.5),
-        "up_weights": randn(NUM_LAYERS, INTERMEDIATE_DIM, HIDDEN_DIM, scale=HIDDEN_DIM ** -0.5),
-        "down_weights": randn(NUM_LAYERS, HIDDEN_DIM, INTERMEDIATE_DIM, scale=INTERMEDIATE_DIM ** -0.5),
-        "lm_head_norm_weight": torch.ones(HIDDEN_DIM, dtype=torch.bfloat16, device=device),
-        "lm_head_weight": randn(1, VOCAB_SIZE, HIDDEN_DIM, scale=HIDDEN_DIM ** -0.5),
-        "embed_weight": randn(VOCAB_SIZE, HIDDEN_DIM, scale=1.0),
-        "k_cache": torch.zeros(
-            NUM_LAYERS * num_pages, PAGE_SIZE, NUM_KV_HEADS, HEAD_DIM,
-            dtype=torch.bfloat16, device=device,
-        ),
-        "v_cache": torch.zeros(
-            NUM_LAYERS * num_pages, PAGE_SIZE, NUM_KV_HEADS, HEAD_DIM,
-            dtype=torch.bfloat16, device=device,
-        ),
+        "qkv_weights": torch.empty(NUM_LAYERS, QKV_DIM, HIDDEN_DIM, dtype=torch.bfloat16, device=device),
+        "o_weights": torch.empty(NUM_LAYERS, HIDDEN_DIM, HIDDEN_DIM, dtype=torch.bfloat16, device=device),
+        "attn_norm_weights": torch.empty(NUM_LAYERS, HIDDEN_DIM, dtype=torch.bfloat16, device=device),
+        "mlp_norm_weights": torch.empty(NUM_LAYERS, HIDDEN_DIM, dtype=torch.bfloat16, device=device),
+        "gate_weights": torch.empty(NUM_LAYERS, INTERMEDIATE_DIM, HIDDEN_DIM, dtype=torch.bfloat16, device=device),
+        "up_weights": torch.empty(NUM_LAYERS, INTERMEDIATE_DIM, HIDDEN_DIM, dtype=torch.bfloat16, device=device),
+        "down_weights": torch.empty(NUM_LAYERS, HIDDEN_DIM, INTERMEDIATE_DIM, dtype=torch.bfloat16, device=device),
+        "lm_head_norm_weight": torch.empty(HIDDEN_DIM, dtype=torch.bfloat16, device=device),
+        "lm_head_weight": torch.empty(1, VOCAB_SIZE, HIDDEN_DIM, dtype=torch.bfloat16, device=device),
+        "embed_weight": torch.empty(VOCAB_SIZE, HIDDEN_DIM, dtype=torch.bfloat16, device=device),
+        "k_cache": torch.zeros(NUM_LAYERS * num_pages, PAGE_SIZE, NUM_KV_HEADS, HEAD_DIM, dtype=torch.bfloat16, device=device),
+        "v_cache": torch.zeros(NUM_LAYERS * num_pages, PAGE_SIZE, NUM_KV_HEADS, HEAD_DIM, dtype=torch.bfloat16, device=device),
     }
-    weights["rope_cos"], weights["rope_sin"] = _make_rope_table(max_seq_len, device)
+
+    q_idx = _interleave_indices(NUM_Q_HEADS, HEAD_DIM, device=device)
+    k_idx = _interleave_indices(NUM_KV_HEADS, HEAD_DIM, device=device)
+
+    with open(os.path.join(repo_dir, "model.safetensors.index.json")) as f:
+        weight_map = json.load(f)["weight_map"]
+
+    shards: dict[str, list[str]] = {}
+    for name, shard in weight_map.items():
+        shards.setdefault(shard, []).append(name)
+
+    print(f"Streaming {len(shards)} safetensors shards into GPU buffers...")
+    for shard_file, names in shards.items():
+        with safe_open(os.path.join(repo_dir, shard_file), framework="pt", device=device) as f:
+            for name in names:
+                t = f.get_tensor(name)
+                if name == "model.embed_tokens.weight":
+                    weights["embed_weight"].copy_(t)
+                elif name == "model.norm.weight":
+                    weights["lm_head_norm_weight"].copy_(t)
+                elif name == "lm_head.weight":
+                    weights["lm_head_weight"][0].copy_(t)
+                elif name.startswith("model.layers."):
+                    parts = name.split(".")
+                    layer = int(parts[2])
+                    suffix = ".".join(parts[3:])
+                    if suffix == "input_layernorm.weight":
+                        weights["attn_norm_weights"][layer].copy_(t)
+                    elif suffix == "post_attention_layernorm.weight":
+                        weights["mlp_norm_weights"][layer].copy_(t)
+                    elif suffix == "self_attn.q_proj.weight":
+                        weights["qkv_weights"][layer, :Q_DIM].copy_(t[q_idx])
+                    elif suffix == "self_attn.k_proj.weight":
+                        weights["qkv_weights"][layer, Q_DIM:Q_DIM + KV_DIM].copy_(t[k_idx])
+                    elif suffix == "self_attn.v_proj.weight":
+                        weights["qkv_weights"][layer, Q_DIM + KV_DIM:].copy_(t)
+                    elif suffix == "self_attn.o_proj.weight":
+                        weights["o_weights"][layer].copy_(t)
+                    elif suffix == "mlp.gate_proj.weight":
+                        weights["gate_weights"][layer].copy_(t)
+                    elif suffix == "mlp.up_proj.weight":
+                        weights["up_weights"][layer].copy_(t)
+                    elif suffix == "mlp.down_proj.weight":
+                        weights["down_weights"][layer].copy_(t)
+                del t
+
+    weights["rope_cos"], weights["rope_sin"] = _make_rope_table(config, max_seq_len, device)
     return weights, pages_per_seq
 
 
@@ -192,16 +234,14 @@ def benchmark_tok_per_sec(
     max_new_tokens: int = 16,
     num_samples: int = 3,
     warmup: int = 2,
-    seed: int = 0,
 ):
     if batch_size % 512 != 0:
         raise ValueError("Current 70B matmul itypes require batch_size divisible by 512.")
     if max_new_tokens > max_seq_len:
-        raise ValueError("max_new_tokens must be <= max_seq_len for this synthetic example.")
+        raise ValueError("max_new_tokens must be <= max_seq_len.")
 
     device = "cuda"
-    print(f"Building synthetic Llama-70B/{NUM_LAYERS}-layer weights...")
-    weights, pages_per_seq = make_synthetic_inputs(batch_size, max_seq_len, device, seed=seed)
+    weights, pages_per_seq = load_hf_weights(batch_size, max_seq_len, device)
     num_pages = batch_size * pages_per_seq
 
     hidden = torch.empty(batch_size, HIDDEN_DIM, dtype=torch.bfloat16, device=device)
@@ -314,7 +354,6 @@ if __name__ == "__main__":
     parser.add_argument("--max-new-tokens", type=int, default=16)
     parser.add_argument("--num-samples", type=int, default=3)
     parser.add_argument("--warmup", type=int, default=2)
-    parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
 
     benchmark_tok_per_sec(
@@ -323,5 +362,4 @@ if __name__ == "__main__":
         max_new_tokens=args.max_new_tokens,
         num_samples=args.num_samples,
         warmup=args.warmup,
-        seed=args.seed,
     )
