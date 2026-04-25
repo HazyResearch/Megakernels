@@ -35,6 +35,7 @@ from .scheduler import (
 )
 
 ATTN_SCALE = 1.0 / math.sqrt(HEAD_DIM)
+DECODE_NUM_LAYERS = NUM_LAYERS
 
 
 def decode(
@@ -56,36 +57,37 @@ def decode(
     attn_scale,            # [1] fp32
     rms_norm_eps,          # [1] fp32
 ):
-    for i in range(NUM_LAYERS):
+    for i in range(DECODE_NUM_LAYERS):
+        layer_idx = i % NUM_LAYERS
         q = torch.ops.megakittens.rms_qkv_rope_append(
             hidden_states,
-            attn_norm_weights[i:i+1],
-            qkv_weights[i:i+1],
+            attn_norm_weights[layer_idx:layer_idx+1],
+            qkv_weights[layer_idx:layer_idx+1],
             rope_cos,
             rope_sin,
-            k_cache[i:i+1],
-            v_cache[i:i+1],
+            k_cache[layer_idx:layer_idx+1],
+            v_cache[layer_idx:layer_idx+1],
             pos_id,
             rms_norm_eps,
         )
 
         attn_out = torch.ops.megakittens.attention_partial(
-            q, k_cache[i:i+1], v_cache[i:i+1], pos_id, attn_scale,
+            q, k_cache[layer_idx:layer_idx+1], v_cache[layer_idx:layer_idx+1], pos_id, attn_scale,
         )
 
         # o_proj + residual: mutates hidden_states in place
-        torch.ops.megakittens.mat_vec_adds(hidden_states, attn_out, o_weights[i:i+1])
+        torch.ops.megakittens.mat_vec_adds(hidden_states, attn_out, o_weights[layer_idx:layer_idx+1])
 
         silu_out = torch.ops.megakittens.rms_upgate_silu(
             hidden_states,
-            mlp_norm_weights[i:i+1],
-            up_weights[i:i+1],
-            gate_weights[i:i+1],
+            mlp_norm_weights[layer_idx:layer_idx+1],
+            up_weights[layer_idx:layer_idx+1],
+            gate_weights[layer_idx:layer_idx+1],
             rms_norm_eps,
         )
 
         torch.ops.megakittens.mat_vec_adds(
-            hidden_states, silu_out, down_weights[i:i+1],
+            hidden_states, silu_out, down_weights[layer_idx:layer_idx+1],
         )
 
     logits = torch.ops.megakittens.rms_lm_head(
@@ -181,37 +183,38 @@ def decode_compile_individual_ops():
         attn_scale,
         rms_norm_eps,
     ):
-        for i in range(NUM_LAYERS):
+        for i in range(DECODE_NUM_LAYERS):
+            layer_idx = i % NUM_LAYERS
             q = compiled_qkv(
                 hidden_states,
-                attn_norm_weights[i:i+1],
-                qkv_weights[i:i+1],
+                attn_norm_weights[layer_idx:layer_idx+1],
+                qkv_weights[layer_idx:layer_idx+1],
                 rope_cos,
                 rope_sin,
-                k_cache[i:i+1],
-                v_cache[i:i+1],
+                k_cache[layer_idx:layer_idx+1],
+                v_cache[layer_idx:layer_idx+1],
                 pos_id,
                 rms_norm_eps,
             )
 
             attn_out = compiled_attention(
-                q, k_cache[i:i+1], v_cache[i:i+1], pos_id, attn_scale,
+                q, k_cache[layer_idx:layer_idx+1], v_cache[layer_idx:layer_idx+1], pos_id, attn_scale,
             )
 
             hidden_states = compiled_o_proj(
-                hidden_states, attn_out, o_weights[i:i+1],
+                hidden_states, attn_out, o_weights[layer_idx:layer_idx+1],
             )
 
             silu_out = compiled_upgate(
                 hidden_states,
-                mlp_norm_weights[i:i+1],
-                up_weights[i:i+1],
-                gate_weights[i:i+1],
+                mlp_norm_weights[layer_idx:layer_idx+1],
+                up_weights[layer_idx:layer_idx+1],
+                gate_weights[layer_idx:layer_idx+1],
                 rms_norm_eps,
             )
 
             hidden_states = compiled_down_proj(
-                hidden_states, silu_out, down_weights[i:i+1],
+                hidden_states, silu_out, down_weights[layer_idx:layer_idx+1],
             )
 
         return compiled_lm_head(
@@ -228,11 +231,16 @@ def benchmark_tok_per_sec(
     num_samples=5,
     warmup=5,
     compile_individual_ops=False,
+    num_layers=NUM_LAYERS,
 ):
     """tok/s with HF weights + greedy decode, using megakittens.compile(decode)."""
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     D = "cuda"
+    if num_layers < 1:
+        raise RuntimeError(f"num_layers must be >= 1, got {num_layers}")
+    global DECODE_NUM_LAYERS
+    DECODE_NUM_LAYERS = num_layers
 
     print("Loading Llama-3.2-1B weights from HuggingFace...")
     hf_model = AutoModelForCausalLM.from_pretrained(
@@ -372,6 +380,7 @@ if __name__ == "__main__":
     parser.add_argument("--num-samples", type=int, default=5)
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--compile-individual-ops", action="store_true")
+    parser.add_argument("--num-layers", type=int, default=NUM_LAYERS)
     args = parser.parse_args()
     benchmark_tok_per_sec(
         prompt=args.prompt,
@@ -379,4 +388,5 @@ if __name__ == "__main__":
         num_samples=args.num_samples,
         warmup=args.warmup,
         compile_individual_ops=args.compile_individual_ops,
+        num_layers=args.num_layers,
     )
