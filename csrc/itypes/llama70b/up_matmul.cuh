@@ -223,9 +223,6 @@ struct UpMatmul {
                     {0, 0, (2 * pi.m + cta_rank) * NUM_CONSUMERS + cid, EPI_PIPE_DEPTH * pi.n + i});
             }
 
-            // Both consumers must be done reading from tmem before we release it.
-            // tensor_load_wait() above is per-warpgroup, so without this sync the
-            // elected leader can free tmem while the other consumer is mid-loop.
             consumer_group::sync(4);
             if (consumer_group::elect_leader()) s.tensor_finish();
 
