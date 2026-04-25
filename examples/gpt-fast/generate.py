@@ -20,6 +20,12 @@ torch._inductor.config.triton.unique_kernel_names = True
 torch._inductor.config.fx_graph_cache = True 
 torch._functorch.config.enable_autograd_cache = True
 
+# Custom inductor options
+torch._inductor.config.aggressive_fusion = True
+torch._inductor.config.combo_kernels = True
+torch._inductor.config.benchmark_fusion = True  # defaults to False
+torch._inductor.config.triton.coalesce_tiling_analysis = True
+
 # PDL must be set before torch.compile is called, so check sys.argv early.
 if hasattr(torch._inductor.config.triton, "enable_pdl"):
     import re
