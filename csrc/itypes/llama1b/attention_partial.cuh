@@ -219,10 +219,9 @@ struct AttentionPartial {
                     kv_st &K_smem = get_K_smem(s, stage);
                     kv_st &V_smem = get_V_smem(s, stage);
                     if (local_i == num_local_blocks - 1) {
-                        // K, V are the last 2 src_barriers in both hand and auto schedules
+                        // K, V are the last 2 input barriers. Reuse barriers follow input barriers.
                         const auto &raw = s.instruction();
-                        int total = raw.num_src_input_barriers + raw.num_src_reuse_barriers;
-                        for (int i = total - 2; i < total; i++)
+                        for (int i = raw.num_src_input_barriers - 2; i < raw.num_src_input_barriers; i++)
                             input_barrier_wait<Config>(&g.barriers.raw_ptr[raw.src_barriers[i]],
                                                        raw.src_barrier_targets[i]);
                     }
