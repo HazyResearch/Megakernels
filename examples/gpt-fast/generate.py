@@ -7,7 +7,7 @@ import itertools
 import sys
 import time
 from pathlib import Path
-from typing import Optional, Union
+from typing import Union
 
 import torch
 import torch._dynamo.config
@@ -149,7 +149,6 @@ def main(
     checkpoint_path: Path = Path("checkpoints/meta-Transformer/Transformer-2-7b-chat-hf/model.pth"),
     compile: bool = True,
     compile_prefill: bool = False,
-    profile: Optional[Path] = None,
 ) -> None:
     """Generates text samples based on a pre-trained Transformer model and tokenizer.
     """
@@ -204,27 +203,12 @@ def main(
     for i in range(start, num_samples):
         torch.cuda.synchronize() # MKG
         t0 = time.perf_counter()
-        import contextlib
-        if (i != num_samples - 1 or not profile) or (use_tp and rank != 0):
-            prof = contextlib.nullcontext()
-        else:
-            torch.profiler._utils._init_for_cuda_graphs()
-            prof = torch.profiler.profile()
-        with prof:
-            y = generate(
-                model,
-                encoded,
-                max_new_tokens,
-                batch_size=batch_size,
-            )
-        if i == -1:
-            print(f"Compilation time: {time.perf_counter() - t0:.2f} seconds")
-            continue
-        if hasattr(prof, "export_chrome_trace"):
-            if use_tp:
-                prof.export_chrome_trace(f"{profile}_rank_{rank}.json")
-            else:
-                prof.export_chrome_trace(f"{profile}.json")
+        y = generate(
+            model,
+            encoded,
+            max_new_tokens,
+            batch_size=batch_size,
+        )
         torch.cuda.synchronize() # MKG
         t = time.perf_counter() - t0
 
@@ -265,10 +249,9 @@ if __name__ == '__main__':
     parser.add_argument('--checkpoint_path', type=Path, default=Path("checkpoints/meta-Transformer/Transformer-2-7b-chat-hf/model.pth"), help='Model checkpoint path.')
     parser.add_argument('--compile', action='store_true', help='Whether to compile the model.')
     parser.add_argument('--compile_prefill', action='store_true', help='Whether to compile the prefill (improves prefill perf, but higher compile times)')
-    parser.add_argument('--profile', type=Path, default=None, help='Profile path.')
 
     args = parser.parse_args()
     main(
         args.prompt, args.num_samples, args.max_new_tokens, args.batch_size,
-        args.checkpoint_path, args.compile, args.compile_prefill, args.profile
+        args.checkpoint_path, args.compile, args.compile_prefill
     )
