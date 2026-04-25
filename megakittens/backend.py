@@ -24,6 +24,7 @@ def megakittens_backend(
     verbose: bool = True,
     global_work_queue: bool = False,
     cluster_size: int = 2,
+    no_inter_op_inst_overlap: bool = False,
 ) -> Callable[[torch.fx.GraphModule, List[Any]], Callable[..., Any]]:
     def _megakittens_backend(gm: torch.fx.GraphModule, example_inputs: List[Any]) -> Callable[..., Any]:
         if verbose:
@@ -76,6 +77,7 @@ def megakittens_backend(
                 verbose=verbose,
                 global_work_queue=global_work_queue,
                 cluster_size=cluster_size,
+                no_inter_op_inst_overlap=no_inter_op_inst_overlap,
             )
 
         return make_boxed_func(dispatcher)
