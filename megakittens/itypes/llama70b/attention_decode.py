@@ -68,7 +68,7 @@ def _resolve_attention_decode70b(args, kwargs):
 
 
 class AttentionDecode70b(IType):
-    Q_TMA = sv(dtype=DType.bf16, length=HEAD_DIM)
+    Q_TMA = sv(dtype=DType.bf16, length=HIDDEN_DIM)
     KV_TMA = st(dtype=DType.bf16, rows=KV_BLOCK_SIZE, cols=HEAD_DIM, axis=1)
     O_TMA = sv(dtype=DType.bf16, length=HEAD_DIM)
 
@@ -77,10 +77,18 @@ class AttentionDecode70b(IType):
         torch.ops.megakittens.attention_decode70b.default: _resolve_attention_decode70b,
     }
 
-    test_cases = []
+    test_cases = [
+        ((256, 256), (256, 128, 15)),
+        ((128, 128), (128, 128, 62)),
+        ((128, 128), (128, 128, 63)),
+        ((256, 256), (256, 256, 127)),
+        ((512, 512), (512, 512, 255)),
+    ]
     test_atol = 1e-2
     test_rtol = 1e-2
-    bench_cases = []
+    bench_cases = [
+        ((1024, 1024), (1024, 1024, 511)),
+    ]
 
     def __init__(self, batch_size: int = 0, num_pages: int = 0):
         self.batch_size = batch_size
@@ -162,8 +170,11 @@ class AttentionDecode70b(IType):
         dst_metas: Tuple[TensorMeta, ...],
     ):
         base_page, seq_idx = block_index
-        page_start = base_page + seq_idx * self.pages_per_seq
-        page_stop = page_start + self.pages_per_seq
+        batch_size = dst_metas[0].shape[-2]
+        num_pages = src_metas[1].shape[-4]
+        pages_per_seq = num_pages // batch_size
+        page_start = base_page + seq_idx * pages_per_seq
+        page_stop = page_start + pages_per_seq
 
         q_region = ((seq_idx, seq_idx + 1), (0, HIDDEN_DIM))
         k_region = ((page_start, page_stop), (0, PAGE_SIZE), (0, NUM_KV_HEADS), (0, HEAD_DIM))
