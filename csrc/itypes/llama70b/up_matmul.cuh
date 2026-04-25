@@ -223,12 +223,15 @@ struct UpMatmul {
                     {0, 0, (2 * pi.m + cta_rank) * NUM_CONSUMERS + cid, EPI_PIPE_DEPTH * pi.n + i});
             }
 
+            // Both consumers must be done reading from tmem before we release it.
+            // tensor_load_wait() above is per-warpgroup, so without this sync the
+            // elected leader can free tmem while the other consumer is mid-loop.
+            consumer_group::sync(4);
             if (consumer_group::elect_leader()) s.tensor_finish();
 
             kittens::warpgroup::tma::store_async_wait();
             consumer_group::sync(4);
             if (consumer_group::elect_leader()) {
-                s.page_finish(s.lid_to_pid(A_LIDS[0]));
                 #pragma unroll
                 for (int cid_i = 0; cid_i < NUM_CONSUMERS; cid_i++) {
                     #pragma unroll
@@ -236,6 +239,7 @@ struct UpMatmul {
                         s.page_finish(s.lid_to_pid(GATE_LIDS[cid_i][half_i]));
                     }
                 }
+                s.page_finish(s.lid_to_pid(A_LIDS[0]));
                 all_barrier_arrive<Config>(g, s.instruction());
             }
         }

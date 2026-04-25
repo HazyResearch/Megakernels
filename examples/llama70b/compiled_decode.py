@@ -271,13 +271,7 @@ def benchmark_tok_per_sec(
         pos_ids, kv_indices, pos_id, attn_scale, rms_norm_eps,
     )
 
-    compiled = megakittens.compile(
-        decode,
-        use_jit_cache=False,
-        verbose=False,
-        save_schedule=False,
-        cluster_size=2,
-    )
+    compiled = decode  # eager mode: dispatch through python reference impls of each custom op
 
     weight_tensors = [
         weights["qkv_weights"], weights["o_weights"], weights["attn_norm_weights"],
