@@ -94,8 +94,141 @@ def decode(
     return logits
 
 
+def decode_compile_individual_ops():
+    def _compile(fn):
+        return megakittens.compile(
+            fn,
+            use_jit_cache=True,
+            verbose=False,
+            save_schedule=False,
+            cluster_size=1,
+            instruction_pipeline_stages=2,
+            no_inter_op_inst_overlap=False,
+            no_inst_overlap=False,
+            coarse_grained_barriers=False,
+        )
+
+    def qkv_op(
+        hidden_states,
+        attn_norm_weights,
+        qkv_weights,
+        rope_cos,
+        rope_sin,
+        k_cache,
+        v_cache,
+        pos_id,
+        rms_norm_eps,
+    ):
+        return torch.ops.megakittens.rms_qkv_rope_append(
+            hidden_states,
+            attn_norm_weights,
+            qkv_weights,
+            rope_cos,
+            rope_sin,
+            k_cache,
+            v_cache,
+            pos_id,
+            rms_norm_eps,
+        )
+
+    def attention_op(q, k_cache, v_cache, pos_id, attn_scale):
+        return torch.ops.megakittens.attention_partial(q, k_cache, v_cache, pos_id, attn_scale)
+
+    def matvec_adds_op(residual, x, weights):
+        torch.ops.megakittens.mat_vec_adds(residual, x, weights)
+        return residual
+
+    def upgate_op(hidden_states, mlp_norm_weights, up_weights, gate_weights, rms_norm_eps):
+        return torch.ops.megakittens.rms_upgate_silu(
+            hidden_states,
+            mlp_norm_weights,
+            up_weights,
+            gate_weights,
+            rms_norm_eps,
+        )
+
+    def lm_head_op(hidden_states, lm_head_norm_weight, lm_head_weight, rms_norm_eps):
+        return torch.ops.megakittens.rms_lm_head(
+            hidden_states,
+            lm_head_norm_weight,
+            lm_head_weight,
+            rms_norm_eps,
+        )
+
+    compiled_qkv = _compile(qkv_op)
+    compiled_attention = _compile(attention_op)
+    compiled_o_proj = _compile(matvec_adds_op)
+    compiled_upgate = _compile(upgate_op)
+    compiled_down_proj = _compile(matvec_adds_op)
+    compiled_lm_head = _compile(lm_head_op)
+
+    def compiled(
+        hidden_states,
+        qkv_weights,
+        o_weights,
+        attn_norm_weights,
+        mlp_norm_weights,
+        up_weights,
+        gate_weights,
+        down_weights,
+        lm_head_norm_weight,
+        lm_head_weight,
+        k_cache,
+        v_cache,
+        rope_cos,
+        rope_sin,
+        pos_id,
+        attn_scale,
+        rms_norm_eps,
+    ):
+        for i in range(NUM_LAYERS):
+            q = compiled_qkv(
+                hidden_states,
+                attn_norm_weights[i:i+1],
+                qkv_weights[i:i+1],
+                rope_cos,
+                rope_sin,
+                k_cache[i:i+1],
+                v_cache[i:i+1],
+                pos_id,
+                rms_norm_eps,
+            )
+
+            attn_out = compiled_attention(
+                q, k_cache[i:i+1], v_cache[i:i+1], pos_id, attn_scale,
+            )
+
+            hidden_states = compiled_o_proj(
+                hidden_states, attn_out, o_weights[i:i+1],
+            )
+
+            silu_out = compiled_upgate(
+                hidden_states,
+                mlp_norm_weights[i:i+1],
+                up_weights[i:i+1],
+                gate_weights[i:i+1],
+                rms_norm_eps,
+            )
+
+            hidden_states = compiled_down_proj(
+                hidden_states, silu_out, down_weights[i:i+1],
+            )
+
+        return compiled_lm_head(
+            hidden_states, lm_head_norm_weight, lm_head_weight, rms_norm_eps,
+        )
+
+    return compiled
+
+
 @torch.inference_mode()
-def benchmark_tok_per_sec(prompt="Hello, my name is", max_new_tokens=200, num_samples=5, warmup=5):
+def benchmark_tok_per_sec(
+    prompt="Hello, my name is",
+    max_new_tokens=200,
+    num_samples=5,
+    warmup=5,
+    compile_individual_ops=False,
+):
     """tok/s with HF weights + greedy decode, using megakittens.compile(decode)."""
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -143,7 +276,7 @@ def benchmark_tok_per_sec(prompt="Hello, my name is", max_new_tokens=200, num_sa
         pos_id_tensor, attn_scale_tensor, rms_norm_eps_tensor,
     )
 
-    compiled = megakittens.compile(
+    compiled = decode_compile_individual_ops() if compile_individual_ops else megakittens.compile(
         decode,
         use_jit_cache=False,
         verbose=False,
@@ -238,10 +371,12 @@ if __name__ == "__main__":
     parser.add_argument("--max-new-tokens", type=int, default=100)
     parser.add_argument("--num-samples", type=int, default=5)
     parser.add_argument("--warmup", type=int, default=5)
+    parser.add_argument("--compile-individual-ops", action="store_true")
     args = parser.parse_args()
     benchmark_tok_per_sec(
         prompt=args.prompt,
         max_new_tokens=args.max_new_tokens,
         num_samples=args.num_samples,
         warmup=args.warmup,
+        compile_individual_ops=args.compile_individual_ops,
     )
