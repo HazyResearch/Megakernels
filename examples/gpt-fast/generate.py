@@ -157,7 +157,6 @@ def generate(
     max_new_tokens: int,
     batch_size: int,
     *,
-    interactive: bool,
     draft_model: Transformer,
     speculate_k: Optional[int] = 8,
     callback = lambda x: x,
@@ -171,10 +170,7 @@ def generate(
     # create an empty tensor of the expected final shape and fill in the current tokens
     T = prompt.size(-1)
     T_new = T + max_new_tokens
-    if interactive:
-        max_seq_length = 350
-    else:
-        max_seq_length = min(T_new, model.config.block_size)
+    max_seq_length = min(T_new, model.config.block_size)
 
     device, dtype = prompt.device, prompt.dtype
     max_seq_length = max_seq_length + speculate_k + 1 if is_speculative else max_seq_length
@@ -266,11 +262,8 @@ def _get_model_size(model):
             )
     return model_size, params
 
-B_INST, E_INST = "[INST]", "[/INST]"
-
 def main(
     prompt: Union[int, str] = "Hello, my name is",
-    interactive: bool = False,
     num_samples: int = 5,
     max_new_tokens: int = 100,
     batch_size: int = 1,
@@ -303,7 +296,6 @@ def main(
     print(f"Using device={device}")
     precision = torch.bfloat16
     is_speculative = draft_checkpoint_path is not None
-    is_chat = "chat" in str(checkpoint_path)
 
     print("Loading model ...")
     t0 = time.time()
@@ -352,29 +344,7 @@ def main(
 
     for i in range(start, num_samples):
         device_sync(device=device) # MKG
-        if i >= 0 and interactive:
-            prompt = input("What is your prompt? ")
-            if is_chat:
-                prompt = f"{B_INST} {prompt.strip()} {E_INST}"
-            encoded = encode_tokens(tokenizer, prompt, bos=True, device=device)
-
-        if interactive and i >= 0:
-            buffer = []
-            period_id = tokenizer.encode('.')[0]
-            done_generating = False
-            def callback(x):
-                nonlocal done_generating
-                if done_generating:
-                    return
-                buffer.append(tokenizer.decode([period_id] + x.tolist())[1:])
-                if x.item() == tokenizer.eos_id():
-                    done_generating = True
-                if len(buffer) == 4 or done_generating:
-                    print(''.join(buffer), end='', flush=True)
-                    buffer.clear()
-                # print(, end='', flush=True)
-        else:
-            callback = lambda x : x
+        callback = lambda x : x
         t0 = time.perf_counter()
         import contextlib
         if (i != num_samples - 1 or not profile) or (use_tp and rank != 0):
@@ -390,7 +360,6 @@ def main(
                 batch_size=batch_size,
                 draft_model=draft_model,
                 speculate_k=speculate_k,
-                interactive=interactive,
                 callback=callback,
                 temperature=temperature,
                 top_k=top_k,
@@ -407,13 +376,10 @@ def main(
         device_sync(device=device) # MKG
         t = time.perf_counter() - t0
 
-        if not interactive:
-            # Just displaying the first generation
-            if batch_size > 1:
-                print("Only displaying the first generation of the batch")
-            print(tokenizer.decode(y[0].tolist()))
-        else:
-            print()
+        # Just displaying the first generation
+        if batch_size > 1:
+            print("Only displaying the first generation of the batch")
+        print(tokenizer.decode(y[0].tolist()))
         tokens_generated = y.size(-1) - prompt_length
         generated_tokens_sec = tokens_generated / t
         aggregate_metrics['tokens_per_sec'].append(generated_tokens_sec)
@@ -447,7 +413,6 @@ if __name__ == '__main__':
             return x
 
     parser.add_argument('--prompt', type=int_or_str, default="Hello, my name is", help="Input prompt. If it's an integer, will instead generate a synthetic prompt.")
-    parser.add_argument('--interactive', action='store_true', help='Whether to launch in interactive mode')
     parser.add_argument('--num_samples', type=int, default=5, help='Number of samples.')
     parser.add_argument('--max_new_tokens', type=int, default=200, help='Maximum number of new tokens.')
     parser.add_argument('--batch_size', type=int, default=1, help='Batch size to benchmark with')
@@ -463,7 +428,7 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
     main(
-        args.prompt, args.interactive, args.num_samples, args.max_new_tokens, args.batch_size, args.top_k,
+        args.prompt, args.num_samples, args.max_new_tokens, args.batch_size, args.top_k,
         args.temperature, args.checkpoint_path, args.compile, args.compile_prefill, args.profile, args.draft_checkpoint_path,
         args.speculate_k, args.device
     )
