@@ -224,6 +224,123 @@ def decode_compile_individual_ops():
     return compiled
 
 
+def decode_compile_per_layer():
+    def _compile(fn):
+        return megakittens.compile(
+            fn,
+            use_jit_cache=True,
+            verbose=False,
+            save_schedule=False,
+            cluster_size=1,
+            instruction_pipeline_stages=2,
+            no_inter_op_inst_overlap=False,
+            no_inst_overlap=False,
+            coarse_grained_barriers=False,
+        )
+
+    def layer_op(
+        hidden_states,
+        qkv_weights,
+        o_weights,
+        attn_norm_weights,
+        mlp_norm_weights,
+        up_weights,
+        gate_weights,
+        down_weights,
+        k_cache,
+        v_cache,
+        rope_cos,
+        rope_sin,
+        pos_id,
+        attn_scale,
+        rms_norm_eps,
+    ):
+        q = torch.ops.megakittens.rms_qkv_rope_append(
+            hidden_states,
+            attn_norm_weights,
+            qkv_weights,
+            rope_cos,
+            rope_sin,
+            k_cache,
+            v_cache,
+            pos_id,
+            rms_norm_eps,
+        )
+
+        attn_out = torch.ops.megakittens.attention_partial(
+            q, k_cache, v_cache, pos_id, attn_scale,
+        )
+
+        torch.ops.megakittens.mat_vec_adds(hidden_states, attn_out, o_weights)
+
+        silu_out = torch.ops.megakittens.rms_upgate_silu(
+            hidden_states,
+            mlp_norm_weights,
+            up_weights,
+            gate_weights,
+            rms_norm_eps,
+        )
+
+        torch.ops.megakittens.mat_vec_adds(hidden_states, silu_out, down_weights)
+        return hidden_states
+
+    def lm_head_op(hidden_states, lm_head_norm_weight, lm_head_weight, rms_norm_eps):
+        return torch.ops.megakittens.rms_lm_head(
+            hidden_states,
+            lm_head_norm_weight,
+            lm_head_weight,
+            rms_norm_eps,
+        )
+
+    compiled_layer = _compile(layer_op)
+    compiled_lm_head = _compile(lm_head_op)
+
+    def compiled(
+        hidden_states,
+        qkv_weights,
+        o_weights,
+        attn_norm_weights,
+        mlp_norm_weights,
+        up_weights,
+        gate_weights,
+        down_weights,
+        lm_head_norm_weight,
+        lm_head_weight,
+        k_cache,
+        v_cache,
+        rope_cos,
+        rope_sin,
+        pos_id,
+        attn_scale,
+        rms_norm_eps,
+    ):
+        for i in range(DECODE_NUM_LAYERS):
+            layer_idx = i % NUM_LAYERS
+            hidden_states = compiled_layer(
+                hidden_states,
+                qkv_weights[layer_idx:layer_idx+1],
+                o_weights[layer_idx:layer_idx+1],
+                attn_norm_weights[layer_idx:layer_idx+1],
+                mlp_norm_weights[layer_idx:layer_idx+1],
+                up_weights[layer_idx:layer_idx+1],
+                gate_weights[layer_idx:layer_idx+1],
+                down_weights[layer_idx:layer_idx+1],
+                k_cache[layer_idx:layer_idx+1],
+                v_cache[layer_idx:layer_idx+1],
+                rope_cos,
+                rope_sin,
+                pos_id,
+                attn_scale,
+                rms_norm_eps,
+            )
+
+        return compiled_lm_head(
+            hidden_states, lm_head_norm_weight, lm_head_weight, rms_norm_eps,
+        )
+
+    return compiled
+
+
 @torch.inference_mode()
 def benchmark_tok_per_sec(
     prompt="Hello, my name is",
@@ -231,6 +348,7 @@ def benchmark_tok_per_sec(
     num_samples=5,
     warmup=5,
     compile_individual_ops=False,
+    compile_per_layer=False,
     num_layers=NUM_LAYERS,
 ):
     """tok/s with HF weights + greedy decode, using megakittens.compile(decode)."""
@@ -239,6 +357,8 @@ def benchmark_tok_per_sec(
     D = "cuda"
     if num_layers < 1:
         raise RuntimeError(f"num_layers must be >= 1, got {num_layers}")
+    if compile_individual_ops and compile_per_layer:
+        raise RuntimeError("compile_individual_ops and compile_per_layer are mutually exclusive")
     global DECODE_NUM_LAYERS
     DECODE_NUM_LAYERS = num_layers
 
@@ -284,17 +404,22 @@ def benchmark_tok_per_sec(
         pos_id_tensor, attn_scale_tensor, rms_norm_eps_tensor,
     )
 
-    compiled = decode_compile_individual_ops() if compile_individual_ops else megakittens.compile(
-        decode,
-        use_jit_cache=False,
-        verbose=False,
-        save_schedule=False,
-        cluster_size=1,
-        instruction_pipeline_stages=2,
-        no_inter_op_inst_overlap=False,
-        no_inst_overlap=False,
-        coarse_grained_barriers=False
-    )
+    if compile_individual_ops:
+        compiled = decode_compile_individual_ops()
+    elif compile_per_layer:
+        compiled = decode_compile_per_layer()
+    else:
+        compiled = megakittens.compile(
+            decode,
+            use_jit_cache=False,
+            verbose=False,
+            save_schedule=False,
+            cluster_size=1,
+            instruction_pipeline_stages=2,
+            no_inter_op_inst_overlap=False,
+            no_inst_overlap=False,
+            coarse_grained_barriers=False
+        )
 
     # Pre-allocate CPU-side buffer and cache GPU address for fast pos_id updates
     _pos_id_buf = (ctypes.c_int * 1)(0)
@@ -380,6 +505,7 @@ if __name__ == "__main__":
     parser.add_argument("--num-samples", type=int, default=5)
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--compile-individual-ops", action="store_true")
+    parser.add_argument("--compile-per-layer", action="store_true")
     parser.add_argument("--num-layers", type=int, default=NUM_LAYERS)
     args = parser.parse_args()
     benchmark_tok_per_sec(
@@ -388,5 +514,6 @@ if __name__ == "__main__":
         num_samples=args.num_samples,
         warmup=args.warmup,
         compile_individual_ops=args.compile_individual_ops,
+        compile_per_layer=args.compile_per_layer,
         num_layers=args.num_layers,
     )
