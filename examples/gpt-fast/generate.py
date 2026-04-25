@@ -68,7 +68,7 @@ def generate(
     prompt: torch.Tensor,
     max_new_tokens: int,
     batch_size: int,
-) -> torch.Tensor:
+):
     """
     Takes a conditioning sequence (prompt) as input and continues to generate as many tokens as requested.
     """
@@ -93,11 +93,17 @@ def generate(
     next_token = prefill(model, prompt.view(batch_size, -1), input_pos).clone()
     seq[:, T] = next_token.squeeze()
 
+    torch.cuda.synchronize()
+    t0 = time.perf_counter()
     input_pos = torch.tensor([T], device=device, dtype=torch.int)
     generated_tokens = decode_n_tokens(model, next_token.view(batch_size, -1), input_pos, max_new_tokens - 1)
     seq[:, T + 1:] = torch.cat(generated_tokens, dim=-1)
+    torch.cuda.synchronize()
+    t1 = time.perf_counter()
 
-    return seq
+    metrics = {'decode_time': t1 - t0}
+
+    return seq, metrics
 
 def encode_tokens(tokenizer, string, bos=True):
     tokens = tokenizer.encode(string)
@@ -201,16 +207,13 @@ def main(
     start = -1 if compile else 0
 
     for i in range(start, num_samples):
-        torch.cuda.synchronize() # MKG
-        t0 = time.perf_counter()
-        y = generate(
+        y, metrics = generate(
             model,
             encoded,
             max_new_tokens,
             batch_size=batch_size,
         )
-        torch.cuda.synchronize() # MKG
-        t = time.perf_counter() - t0
+        t = metrics['decode_time']
 
         # Just displaying the first generation
         if batch_size > 1:
