@@ -21,5 +21,6 @@ python generate.py \
   --max_new_tokens 100 \
   --num_samples 5 \
   --warmup 5 \
-  --compile
+  --compile max-autotune \
+  --pdl
 ```
