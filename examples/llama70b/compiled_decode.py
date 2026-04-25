@@ -21,7 +21,7 @@ import time
 import torch
 from huggingface_hub import snapshot_download
 from safetensors import safe_open
-from transformers import AutoConfig
+from transformers import AutoConfig, AutoTokenizer
 from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding
 
 import megakittens
@@ -229,18 +229,28 @@ def load_hf_weights(
 
 @torch.inference_mode()
 def benchmark_tok_per_sec(
+    prompt: str = "Hello, my name is",
     batch_size: int = 512,
     max_seq_len: int = 128,
-    max_new_tokens: int = 16,
+    max_new_tokens: int = 64,
     num_samples: int = 3,
     warmup: int = 2,
 ):
     if batch_size % 512 != 0:
         raise ValueError("Current 70B matmul itypes require batch_size divisible by 512.")
-    if max_new_tokens > max_seq_len:
-        raise ValueError("max_new_tokens must be <= max_seq_len.")
 
     device = "cuda"
+
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
+    prompt_ids = tokenizer(prompt, return_tensors="pt", add_special_tokens=True)["input_ids"][0].to(device)
+    prompt_len = prompt_ids.shape[0]
+    print(f"Prompt: {prompt!r} ({prompt_len} tokens)")
+
+    needed_seq_len = ((prompt_len + max_new_tokens + PAGE_SIZE - 1) // PAGE_SIZE) * PAGE_SIZE
+    if needed_seq_len > max_seq_len:
+        print(f"Bumping max_seq_len: {max_seq_len} -> {needed_seq_len} to fit prompt + max_new_tokens")
+        max_seq_len = needed_seq_len
+
     weights, pages_per_seq = load_hf_weights(batch_size, max_seq_len, device)
     num_pages = batch_size * pages_per_seq
 
@@ -269,11 +279,6 @@ def benchmark_tok_per_sec(
         cluster_size=2,
     )
 
-    tokens = torch.zeros(batch_size, dtype=torch.long, device=device)
-    output_tokens = torch.empty(max_new_tokens, batch_size, dtype=torch.long, device=device)
-    k_cache_snapshot = weights["k_cache"].clone()
-    v_cache_snapshot = weights["v_cache"].clone()
-
     weight_tensors = [
         weights["qkv_weights"], weights["o_weights"], weights["attn_norm_weights"],
         weights["mlp_norm_weights"], weights["gate_weights"], weights["up_weights"],
@@ -281,6 +286,11 @@ def benchmark_tok_per_sec(
     ]
     model_size = sum(t.nelement() * t.element_size() for t in weight_tensors)
     params = sum(t.nelement() for t in weight_tensors)
+
+    # Each prompt token broadcast across the batch; all 512 sequences share the prompt.
+    prompt_tokens = prompt_ids.unsqueeze(1).expand(prompt_len, batch_size).contiguous()
+    num_decode_tokens = max_new_tokens - 1
+    output_tokens = torch.empty(max_new_tokens, dtype=torch.long, device=device)
 
     def _decode_step(pos: int, input_tokens: torch.Tensor) -> torch.Tensor:
         hidden.copy_(weights["embed_weight"][input_tokens])
@@ -290,37 +300,37 @@ def benchmark_tok_per_sec(
         logits = compiled(*decode_args)
         return torch.argmax(logits, dim=-1)
 
+    def _run_once(save_tokens: bool = False) -> float:
+        weights["k_cache"].zero_()
+        weights["v_cache"].zero_()
+        for pos in range(prompt_len):
+            argmax = _decode_step(pos, prompt_tokens[pos])
+        torch.cuda.synchronize()
+
+        if save_tokens:
+            output_tokens[0] = argmax[0]
+
+        t0 = time.perf_counter()
+        for i in range(num_decode_tokens):
+            argmax = _decode_step(prompt_len + i, argmax)
+            if save_tokens:
+                output_tokens[i + 1] = argmax[0]
+        torch.cuda.synchronize()
+        return time.perf_counter() - t0
+
     print("Compiling / first run...")
-    tokens = _decode_step(0, tokens)
-    torch.cuda.synchronize()
+    _run_once()
 
     print(f"Warming up ({warmup} runs)...")
     for _ in range(warmup):
-        weights["k_cache"].copy_(k_cache_snapshot)
-        weights["v_cache"].copy_(v_cache_snapshot)
-        tokens.zero_()
-        for pos in range(max_new_tokens):
-            tokens = _decode_step(pos, tokens)
-            output_tokens[pos].copy_(tokens)
-    torch.cuda.synchronize()
+        _run_once()
 
     aggregate_tokens_per_sec_list = []
     per_seq_tokens_per_sec_list = []
     for sample in range(num_samples):
-        weights["k_cache"].copy_(k_cache_snapshot)
-        weights["v_cache"].copy_(v_cache_snapshot)
-        tokens.zero_()
-        torch.cuda.synchronize()
-        t0 = time.perf_counter()
-        for pos in range(max_new_tokens):
-            tokens = _decode_step(pos, tokens)
-            output_tokens[pos].copy_(tokens)
-        torch.cuda.synchronize()
-        t1 = time.perf_counter()
-
-        decode_time = t1 - t0
-        aggregate_tok_sec = (batch_size * max_new_tokens) / decode_time
-        per_seq_tok_sec = max_new_tokens / decode_time
+        decode_time = _run_once(save_tokens=(sample == num_samples - 1))
+        aggregate_tok_sec = (batch_size * num_decode_tokens) / decode_time
+        per_seq_tok_sec = num_decode_tokens / decode_time
         aggregate_tokens_per_sec_list.append(aggregate_tok_sec)
         per_seq_tokens_per_sec_list.append(per_seq_tok_sec)
         bandwidth_gbs = model_size * per_seq_tok_sec / 1e9
@@ -333,9 +343,14 @@ def benchmark_tok_per_sec(
         print(f"FLOPS achieved: {flops_tfs:.02f} TF/s")
         print()
 
+    all_ids = torch.cat([prompt_ids, output_tokens])
+    print(tokenizer.decode(all_ids.tolist()))
+    print()
+
     print("==========")
     print(f"Batch size: {batch_size}")
     print(f"Layers: {NUM_LAYERS}")
+    print(f"Prompt tokens: {prompt_len}")
     print(f"Generated tokens per sequence: {max_new_tokens}")
     print(f"Pages per sequence: {pages_per_seq}")
     print(f"Pages per layer: {num_pages}")
@@ -349,14 +364,16 @@ if __name__ == "__main__":
     torch._dynamo.reset()
 
     parser = argparse.ArgumentParser()
+    parser.add_argument("--prompt", type=str, default="Hello, my name is")
     parser.add_argument("--batch-size", type=int, default=512)
     parser.add_argument("--max-seq-len", type=int, default=128)
-    parser.add_argument("--max-new-tokens", type=int, default=16)
+    parser.add_argument("--max-new-tokens", type=int, default=64)
     parser.add_argument("--num-samples", type=int, default=3)
     parser.add_argument("--warmup", type=int, default=2)
     args = parser.parse_args()
 
     benchmark_tok_per_sec(
+        prompt=args.prompt,
         batch_size=args.batch_size,
         max_seq_len=args.max_seq_len,
         max_new_tokens=args.max_new_tokens,
