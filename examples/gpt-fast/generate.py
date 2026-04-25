@@ -152,6 +152,7 @@ def main(
     num_samples: int = 5,
     max_new_tokens: int = 100,
     batch_size: int = 1,
+    warmup: int = 5,
     checkpoint_path: Path = Path("checkpoints/meta-Transformer/Transformer-2-7b-chat-hf/model.pth"),
     compile: bool = True,
     compile_prefill: bool = False,
@@ -204,7 +205,7 @@ def main(
     aggregate_metrics = {
         'tokens_per_sec': [],
     }
-    start = -1 if compile else 0
+    start = -warmup if warmup > 0 else 0
 
     for i in range(start, num_samples):
         y, metrics = generate(
@@ -213,6 +214,8 @@ def main(
             max_new_tokens,
             batch_size=batch_size,
         )
+        if i < 0:
+            continue
         t = metrics['decode_time']
 
         # Just displaying the first generation
@@ -249,12 +252,13 @@ if __name__ == '__main__':
     parser.add_argument('--num_samples', type=int, default=5, help='Number of samples.')
     parser.add_argument('--max_new_tokens', type=int, default=200, help='Maximum number of new tokens.')
     parser.add_argument('--batch_size', type=int, default=1, help='Batch size to benchmark with')
+    parser.add_argument('--warmup', type=int, default=5, help='Number of warmup runs.')
     parser.add_argument('--checkpoint_path', type=Path, default=Path("checkpoints/meta-Transformer/Transformer-2-7b-chat-hf/model.pth"), help='Model checkpoint path.')
     parser.add_argument('--compile', action='store_true', help='Whether to compile the model.')
     parser.add_argument('--compile_prefill', action='store_true', help='Whether to compile the prefill (improves prefill perf, but higher compile times)')
 
     args = parser.parse_args()
     main(
-        args.prompt, args.num_samples, args.max_new_tokens, args.batch_size,
+        args.prompt, args.num_samples, args.max_new_tokens, args.batch_size, args.warmup,
         args.checkpoint_path, args.compile, args.compile_prefill
     )
