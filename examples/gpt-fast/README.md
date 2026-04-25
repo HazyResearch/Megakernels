@@ -19,5 +19,6 @@ python generate.py \
   --checkpoint_path checkpoints/$MODEL_REPO/model.pth \
   --prompt "Tell me a joke about cookies" \
   --max_new_tokens 100 \
-  --num_samples 5
+  --num_samples 5 \
+  --warmup 5
 ```
