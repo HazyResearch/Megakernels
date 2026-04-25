@@ -145,6 +145,7 @@ class Dispatcher:
         verbose: bool = True,
         global_work_queue: bool = False,
         cluster_size: int = 2,
+        instruction_pipeline_stages: int = 2,
         coarse_grained_barriers: bool = False,
         no_inst_overlap: bool = False,
         no_inter_op_inst_overlap: bool = False,
@@ -152,6 +153,10 @@ class Dispatcher:
         if cluster_size not in (1, 2):
             raise RuntimeError(
                 f"[MegaKittens] 'cluster_size' must be 1 or 2, got {cluster_size}"
+            )
+        if instruction_pipeline_stages not in (1, 2):
+            raise RuntimeError(
+                f"[MegaKittens] 'instruction_pipeline_stages' must be 1 or 2, got {instruction_pipeline_stages}"
             )
         if not tensor_metas:
             raise RuntimeError("[MegaKittens] 'tensor_metas' must not be empty")
@@ -212,6 +217,7 @@ class Dispatcher:
         self.verbose = verbose
         self.global_work_queue = global_work_queue
         self.cluster_size = cluster_size
+        self.instruction_pipeline_stages = instruction_pipeline_stages
         self.coarse_grained_barriers = coarse_grained_barriers
         self.no_inst_overlap = no_inst_overlap
         self.no_inter_op_inst_overlap = no_inter_op_inst_overlap
@@ -326,7 +332,10 @@ class Dispatcher:
             op = template.format(tensors=tensor_args)
             dispatch_cases.append(f"case {inst_meta.icode}: return dispatch_instruction<{op}, worker_type, T>(args...);")
         dispatch_cases = "\n".join(dispatch_cases)
-        config_struct = f"static constexpr int CLUSTER_SIZE = {self.cluster_size};"
+        config_struct = (
+            f"static constexpr int CLUSTER_SIZE = {self.cluster_size};"
+            f"static constexpr int INSTRUCTION_PIPE_STAGES = {self.instruction_pipeline_stages};"
+        )
         if self.global_work_queue:
             config_struct += "static constexpr bool GLOBAL_WORK_QUEUE = true;"
         if self.coarse_grained_barriers:

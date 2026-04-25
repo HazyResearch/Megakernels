@@ -64,7 +64,7 @@ __device__ __forceinline__ void controller_loop(const Globals &g, megakittens::s
         kittens::warp::sync();
 
         // Step 2. Establish physical page order
-        if (s.iter == 0) {
+        if (s.iter == 0 || Config::INSTRUCTION_PIPE_STAGES == 1) {
             if (lane_id < Config::NUM_PAGES)
                 s.instruction_states[s.stage].pid_order[lane_id] = lane_id;
         } else {

@@ -149,6 +149,7 @@ def benchmark_tok_per_sec(prompt="Hello, my name is", max_new_tokens=200, num_sa
         verbose=False,
         save_schedule=False,
         cluster_size=1,
+        instruction_pipeline_stages=2,
         no_inter_op_inst_overlap=False,
         no_inst_overlap=False,
         coarse_grained_barriers=False
