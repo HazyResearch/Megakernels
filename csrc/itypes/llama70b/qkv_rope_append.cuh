@@ -7,49 +7,185 @@
 namespace megakittens {
 namespace llama70b {
 
-template <typename Config, typename Globals, int N, int HEAD_DIM, int NUM_KV_HEADS,
-          int SRC_X, int SRC_QKV_W, int SRC_ROPE_COS, int SRC_ROPE_SIN, int SRC_POS_IDS,
-          int SRC_APPEND_IDS, int DST_Q, int DST_K_CACHE = -1, int DST_V_CACHE = -1>
+template <typename Config, typename Globals,
+          int BATCH_SIZE, int NUM_PAGES, int PAGES_PER_SEQ,
+          int HIDDEN_DIM, int QKV_DIM, int HEAD_DIM, int PAGE_SIZE,
+          int NUM_Q_HEADS, int NUM_KV_HEADS,
+          int SRC_X, int SRC_QKV_W, int SRC_ROPE_COS, int SRC_ROPE_SIN,
+          int SRC_POS_IDS, int SRC_APPEND_IDS, int SRC_K_CACHE, int SRC_V_CACHE,
+          int DST_Q, int DST_K_CACHE = -1, int DST_V_CACHE = -1>
 struct QkvRopeAppend {
-    static_assert(HEAD_DIM == 128, "Head dim must be 128.");
+    static_assert(DST_K_CACHE == -1 || DST_K_CACHE == SRC_K_CACHE);
+    static_assert(DST_V_CACHE == -1 || DST_V_CACHE == SRC_V_CACHE);
+    static_assert(HEAD_DIM == 128, "QkvRopeAppend70b expects head_dim=128.");
+    static_assert(HIDDEN_DIM == NUM_Q_HEADS * HEAD_DIM,
+                  "QkvRopeAppend70b expects hidden_dim == num_q_heads * head_dim.");
+    static_assert(QKV_DIM == HIDDEN_DIM + 2 * NUM_KV_HEADS * HEAD_DIM,
+                  "QkvRopeAppend70b QKV dim mismatch.");
 
-    static constexpr int HEADS_PER_INST = 2;
-    static constexpr int KV_COL_START = (N / HEAD_DIM) / HEADS_PER_INST;
-
-    static constexpr int Mb = 128;
+    static constexpr int Mb = 256;
     static constexpr int Nb = 256;
     static constexpr int Kb = 64;
-    static constexpr int EPI_PIPE_DEPTH = 2;
+    static constexpr int EPI_PIPE_DEPTH = 8;
+    static constexpr int ROWS_PER_CONSUMER = Mb / 2;
+    static constexpr int COLS_PER_CHUNK = Nb / EPI_PIPE_DEPTH;
+    static constexpr int Q_DIM = HIDDEN_DIM;
+    static constexpr int KV_DIM = NUM_KV_HEADS * HEAD_DIM;
 
-    using rope_sv_t = kittens::sv_fl<HEAD_DIM>;
-    using rope_rv_t = kittens::rv_fl<HEAD_DIM>;
-    using head_sv_t = kittens::sv_fl<HEAD_DIM>;
-    using head_rv_t = kittens::rv_fl<HEAD_DIM>;
+    using out_st_t = kittens::st_bf<ROWS_PER_CONSUMER, COLS_PER_CHUNK>;
+    using out_rt_bf_t = kittens::rt_bf<ROWS_PER_CONSUMER / 4, COLS_PER_CHUNK>;
 
     struct parsed_instruction {
-        int layer_idx, m, n;
+        int layer_idx, base_page, m, n;
+
         __device__ inline parsed_instruction(const instruction_t &instruction) {
             layer_idx = instruction.indices[0];
-            m = instruction.indices[1];
-            n = instruction.indices[2];
+            base_page = instruction.indices[1];
+            m = instruction.indices[2];
+            n = instruction.indices[3];
         }
+
         __device__ inline parsed_instruction(state_t<Config> &s)
             : parsed_instruction(s.instruction()) {}
-
-        __device__ inline bool is_kv() const { return n >= KV_COL_START; }
     };
 
-    __device__ static inline void apply_rope_inplace(head_rv_t &x,
-                                                     const head_rv_t &cos_v,
-                                                     const head_rv_t &sin_v) {}
+    __device__ static inline int row_tile_idx(const parsed_instruction &pi, int cta_rank, int cid) {
+        return (2 * pi.m + cta_rank) * 2 + cid;
+    }
+
+    template <typename Pipeline>
+    __device__ static inline void apply_rope_tile(
+            const Globals &g,
+            const parsed_instruction &pi,
+            out_st_t &tile,
+            int global_col_start) {
+        auto &pos_gl = g.template gls<SRC_POS_IDS>();
+        auto &cos_gl = g.template gls<SRC_ROPE_COS>();
+        auto &sin_gl = g.template gls<SRC_ROPE_SIN>();
+
+        const int cta_rank = kittens::cluster_ctarank();
+        const int cid = kittens::warpgroup::groupid();
+        const int row_base = row_tile_idx(pi, cta_rank, cid) * ROWS_PER_CONSUMER;
+        const int wg_tid = kittens::warpgroup::warpid() * kittens::WARP_THREADS + kittens::laneid();
+
+        #pragma unroll
+        for (int elem = wg_tid; elem < ROWS_PER_CONSUMER * (COLS_PER_CHUNK / 2);
+             elem += kittens::WARPGROUP_WARPS * kittens::WARP_THREADS) {
+            const int row = elem / (COLS_PER_CHUNK / 2);
+            const int pair_col = 2 * (elem % (COLS_PER_CHUNK / 2));
+            const int global_row = row_base + row;
+            const int dim_even = (global_col_start + pair_col) % HEAD_DIM;
+            const int dim_odd = dim_even + 1;
+            const int pos = static_cast<int>(pos_gl.raw_ptr[global_row]);
+
+            const float x_even = float(tile[{row, pair_col}]);
+            const float x_odd = float(tile[{row, pair_col + 1}]);
+            const float cos_even = cos_gl[{0, 0, pos, dim_even}];
+            const float sin_even = sin_gl[{0, 0, pos, dim_even}];
+            const float cos_odd = cos_gl[{0, 0, pos, dim_odd}];
+            const float sin_odd = sin_gl[{0, 0, pos, dim_odd}];
+
+            tile[{row, pair_col}] = __float2bfloat16_rn(x_even * cos_even - x_odd * sin_even);
+            tile[{row, pair_col + 1}] = __float2bfloat16_rn(x_odd * cos_odd + x_even * sin_odd);
+        }
+    }
+
+    template <typename Pipeline>
+    __device__ static inline void scatter_kv_tile(
+            const Globals &g,
+            const parsed_instruction &pi,
+            out_st_t &tile,
+            int global_col_start,
+            bool is_k) {
+        auto &append_gl = g.template gls<SRC_APPEND_IDS>();
+        auto &kv_gl = is_k ? g.template gls<SRC_K_CACHE>() : g.template gls<SRC_V_CACHE>();
+
+        const int cta_rank = kittens::cluster_ctarank();
+        const int cid = kittens::warpgroup::groupid();
+        const int row_base = row_tile_idx(pi, cta_rank, cid) * ROWS_PER_CONSUMER;
+        const int wg_tid = kittens::warpgroup::warpid() * kittens::WARP_THREADS + kittens::laneid();
+        const int kv_col_start = global_col_start - (is_k ? Q_DIM : Q_DIM + KV_DIM);
+        const int head_idx = kv_col_start / HEAD_DIM;
+        const int dim_start = kv_col_start % HEAD_DIM;
+
+        for (int elem = wg_tid; elem < ROWS_PER_CONSUMER * COLS_PER_CHUNK;
+             elem += kittens::WARPGROUP_WARPS * kittens::WARP_THREADS) {
+            const int row = elem / COLS_PER_CHUNK;
+            const int col = elem % COLS_PER_CHUNK;
+            const int global_row = row_base + row;
+            const int append_idx = static_cast<int>(append_gl.raw_ptr[global_row]);
+            const int page = append_idx / PAGE_SIZE;
+            const int offset = append_idx % PAGE_SIZE;
+            const int cache_page = pi.base_page + pi.layer_idx * NUM_PAGES + page;
+            kv_gl[{cache_page, offset, head_idx, dim_start + col}] = tile[{row, col}];
+        }
+    }
 
     struct pipeline_specifics {
         template <typename Pipeline>
-        __device__ static inline void consumer_loop(const Globals &g, state_t<Config> &s) {}
+        __device__ static inline void consumer_loop(const Globals &g, state_t<Config> &s) {
+            parsed_instruction pi{s};
+            const int cta_rank = kittens::cluster_ctarank();
+            const int cid = kittens::warpgroup::groupid();
+            using consumer_group = kittens::group<kittens::WARPGROUP_WARPS * Pipeline::NUM_CONSUMERS>;
+
+            auto &q_gl = g.template gls<DST_Q>();
+
+            typename Pipeline::d_tt_t d_tt = s.tensor_alloc.template allocate<typename Pipeline::d_tt_t>(cid * Nb);
+            kittens::wait(Pipeline::outputs_arrived(s), 0);
+
+            if (consumer_group::elect_leader()) all_reuse_barrier_wait<Config>(g, s.instruction());
+            consumer_group::sync(4);
+
+            #pragma unroll
+            for (int i = 0; i < EPI_PIPE_DEPTH; i++) {
+                const int slot = i % Pipeline::NUM_D_TILES;
+                const int global_chunk = EPI_PIPE_DEPTH * pi.n + i;
+                const int global_col_start = global_chunk * COLS_PER_CHUNK;
+
+                out_rt_bf_t d_reg;
+                kittens::warpgroup::load_async(
+                    d_reg,
+                    d_tt.template subtile<kittens::tt<float, ROWS_PER_CONSUMER, COLS_PER_CHUNK>>(
+                        0, COLS_PER_CHUNK * i));
+                kittens::tensor_load_wait();
+
+                kittens::warpgroup::tma::store_async_read_wait<Pipeline::NUM_D_TILES - 1>();
+                kittens::warpgroup::sync(cid + 1);
+                out_st_t &out_tile = Pipeline::d_st(s, cid, slot);
+                kittens::warpgroup::store(out_tile, d_reg);
+                kittens::warpgroup::sync(cid + 1);
+
+                if (global_col_start < Q_DIM) {
+                    apply_rope_tile<Pipeline>(g, pi, out_tile, global_col_start);
+                    kittens::warpgroup::sync(cid + 1);
+                    kittens::warpgroup::tma::store_async(
+                        q_gl, out_tile,
+                        {0, 0, row_tile_idx(pi, cta_rank, cid), global_chunk});
+                } else if (global_col_start < Q_DIM + KV_DIM) {
+                    apply_rope_tile<Pipeline>(g, pi, out_tile, global_col_start);
+                    kittens::warpgroup::sync(cid + 1);
+                    scatter_kv_tile<Pipeline>(g, pi, out_tile, global_col_start, true);
+                    kittens::warpgroup::sync(cid + 1);
+                } else {
+                    scatter_kv_tile<Pipeline>(g, pi, out_tile, global_col_start, false);
+                    kittens::warpgroup::sync(cid + 1);
+                }
+            }
+
+            if (consumer_group::elect_leader()) s.tensor_finish();
+
+            kittens::warpgroup::tma::store_async_wait();
+            consumer_group::sync(4);
+            if (consumer_group::elect_leader()) {
+                __threadfence();
+                s.page_finish(s.lid_to_pid(Pipeline::A_LIDS[0]));
+                all_barrier_arrive<Config>(g, s.instruction());
+            }
+        }
     };
 
-    using pipeline = matmul_pipeline<Config, Globals,
-                                     /*M=*/0, /*N=*/N, /*K=*/0,
+    using pipeline = matmul_pipeline<Config, Globals, BATCH_SIZE, QKV_DIM, HIDDEN_DIM,
                                      Mb, Nb, Kb, EPI_PIPE_DEPTH,
                                      parsed_instruction, pipeline_specifics,
                                      SRC_X, SRC_QKV_W>;
@@ -58,6 +194,7 @@ struct QkvRopeAppend {
         __device__ __forceinline__ static int lid_release_order(const Globals &g, state_t<Config> &s, int query) {
             return pipeline::lid_release_order(g, s, query);
         }
+
         __device__ __forceinline__ static int init_semaphores(const Globals &g, state_t<Config> &s) {
             return pipeline::init_semaphores(g, s);
         }
@@ -82,9 +219,7 @@ struct QkvRopeAppend {
     };
 
     struct storer {
-        __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
-            pipeline::storer_loop(g, s);
-        }
+        __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {}
     };
 };
 
