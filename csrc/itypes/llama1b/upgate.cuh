@@ -122,8 +122,12 @@ struct RmsUpgateSilu {
                             g.template gls<DST>(), out_smem, {0, block_idx});
                         kittens::tma::store_async_wait();
 
-                        barrier_arrive<Config>(
-                            &g.barriers.raw_ptr[s.instruction().dst_barriers[i / 2]], 1);
+                        if constexpr (Config::COARSE_GRAINED_BARRIERS) {
+                            if (i + 1 == inst.iters && s.instruction().num_dst_input_barriers > 0)
+                                barrier_arrive<Config>(&g.barriers.raw_ptr[s.instruction().dst_barriers[0]], 1);
+                        } else {
+                            barrier_arrive<Config>(&g.barriers.raw_ptr[s.instruction().dst_barriers[i / 2]], 1);
+                        }
                     }
                     kittens::warp::sync();
                 }
