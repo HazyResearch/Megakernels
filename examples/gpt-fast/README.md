@@ -20,5 +20,6 @@ python generate.py \
   --prompt "Tell me a joke about cookies" \
   --max_new_tokens 100 \
   --num_samples 5 \
-  --warmup 5
+  --warmup 5 \
+  --compile
 ```
