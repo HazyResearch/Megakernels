@@ -145,6 +145,7 @@ class Dispatcher:
         verbose: bool = True,
         global_work_queue: bool = False,
         cluster_size: int = 2,
+        no_inst_overlap: bool = False,
         no_inter_op_inst_overlap: bool = False,
     ) -> None:
         if cluster_size not in (1, 2):
@@ -210,6 +211,7 @@ class Dispatcher:
         self.verbose = verbose
         self.global_work_queue = global_work_queue
         self.cluster_size = cluster_size
+        self.no_inst_overlap = no_inst_overlap
         self.no_inter_op_inst_overlap = no_inter_op_inst_overlap
 
     def __del__(self) -> None:
@@ -325,6 +327,8 @@ class Dispatcher:
         config_struct = f"static constexpr int CLUSTER_SIZE = {self.cluster_size};"
         if self.global_work_queue:
             config_struct += "static constexpr bool GLOBAL_WORK_QUEUE = true;"
+        if self.no_inst_overlap:
+            config_struct += "static constexpr bool NO_INST_OVERLAP = true;"
         if self.no_inter_op_inst_overlap:
             config_struct += "static constexpr bool NO_INTER_OP_INST_OVERLAP = true;"
         source = f"""

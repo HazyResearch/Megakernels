@@ -21,6 +21,7 @@ def compile(
     verbose: bool = True,
     global_work_queue: bool = False,
     cluster_size: int = 2,
+    no_inst_overlap: bool = False,
     no_inter_op_inst_overlap: bool = False,
 ) -> Callable[..., Any]:
     """Compile a PyTorch function into a MegaKernel."""
@@ -37,6 +38,7 @@ def compile(
                 verbose=verbose,
                 global_work_queue=global_work_queue,
                 cluster_size=cluster_size,
+                no_inst_overlap=no_inst_overlap,
                 no_inter_op_inst_overlap=no_inter_op_inst_overlap,
             ),
             nopython=True, # graph breaks currently not supported (TODO: support it)

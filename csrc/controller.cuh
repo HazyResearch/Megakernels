@@ -86,12 +86,14 @@ __device__ __forceinline__ void controller_loop(const Globals &g, megakittens::s
         // Step 4. Signal other workers that the instruction/pages/semaphores are ready
         kittens::warp::sync();
         if (kittens::warp::elect_leader()) {
-            if constexpr (Config::NO_INTER_OP_INST_OVERLAP) {
+            if constexpr (Config::NO_INST_OVERLAP || Config::NO_INTER_OP_INST_OVERLAP) {
                 if (s.iter > 0) {
-                    const int last_icode = s.instruction_states[last_stage].instruction.icode;
-                    if (icode != last_icode) {
-                        const int phasebit = ((s.iter - 1) / Config::INSTRUCTION_PIPE_STAGES) & 0b1;
+                    const int phasebit = ((s.iter - 1) / Config::INSTRUCTION_PIPE_STAGES) & 0b1;
+                    if constexpr (Config::NO_INST_OVERLAP) {
                         kittens::wait(s.instruction_finished[last_stage], phasebit);
+                    } else {
+                        const int last_icode = s.instruction_states[last_stage].instruction.icode;
+                        if (icode != last_icode) kittens::wait(s.instruction_finished[last_stage], phasebit);
                     }
                 }
             }
