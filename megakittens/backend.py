@@ -24,6 +24,7 @@ def megakittens_backend(
     verbose: bool = True,
     global_work_queue: bool = False,
     cluster_size: int = 2,
+    coarse_grained_barriers: bool = False,
     no_inst_overlap: bool = False,
     no_inter_op_inst_overlap: bool = False,
 ) -> Callable[[torch.fx.GraphModule, List[Any]], Callable[..., Any]]:
@@ -58,7 +59,12 @@ def megakittens_backend(
                 num_barriers,
                 input_tensor_indices,
                 output_tensor_indices,
-            ) = schedule(dag, cluster_size=cluster_size, verbose=verbose)
+            ) = schedule(
+                dag,
+                cluster_size=cluster_size,
+                verbose=verbose,
+                coarse_grained_barriers=coarse_grained_barriers,
+            )
 
         if save_schedule:
             with timed("Saved schedule as TXT", verbose):
@@ -78,6 +84,7 @@ def megakittens_backend(
                 verbose=verbose,
                 global_work_queue=global_work_queue,
                 cluster_size=cluster_size,
+                coarse_grained_barriers=coarse_grained_barriers,
                 no_inst_overlap=no_inst_overlap,
                 no_inter_op_inst_overlap=no_inter_op_inst_overlap,
             )

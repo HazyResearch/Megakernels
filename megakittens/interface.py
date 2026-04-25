@@ -21,6 +21,7 @@ def compile(
     verbose: bool = True,
     global_work_queue: bool = False,
     cluster_size: int = 2,
+    coarse_grained_barriers: bool = False,
     no_inst_overlap: bool = False,
     no_inter_op_inst_overlap: bool = False,
 ) -> Callable[..., Any]:
@@ -38,6 +39,7 @@ def compile(
                 verbose=verbose,
                 global_work_queue=global_work_queue,
                 cluster_size=cluster_size,
+                coarse_grained_barriers=coarse_grained_barriers,
                 no_inst_overlap=no_inst_overlap,
                 no_inter_op_inst_overlap=no_inter_op_inst_overlap,
             ),

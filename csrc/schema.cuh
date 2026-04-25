@@ -45,6 +45,7 @@ static_assert(sizeof(instruction_t) == 256);
 
 struct default_config {
     static constexpr bool GLOBAL_WORK_QUEUE = false;
+    static constexpr bool COARSE_GRAINED_BARRIERS = false;
     static constexpr bool NO_INST_OVERLAP = false;
     static constexpr bool NO_INTER_OP_INST_OVERLAP = false;
 

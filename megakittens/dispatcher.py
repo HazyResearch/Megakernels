@@ -145,6 +145,7 @@ class Dispatcher:
         verbose: bool = True,
         global_work_queue: bool = False,
         cluster_size: int = 2,
+        coarse_grained_barriers: bool = False,
         no_inst_overlap: bool = False,
         no_inter_op_inst_overlap: bool = False,
     ) -> None:
@@ -211,6 +212,7 @@ class Dispatcher:
         self.verbose = verbose
         self.global_work_queue = global_work_queue
         self.cluster_size = cluster_size
+        self.coarse_grained_barriers = coarse_grained_barriers
         self.no_inst_overlap = no_inst_overlap
         self.no_inter_op_inst_overlap = no_inter_op_inst_overlap
 
@@ -327,6 +329,8 @@ class Dispatcher:
         config_struct = f"static constexpr int CLUSTER_SIZE = {self.cluster_size};"
         if self.global_work_queue:
             config_struct += "static constexpr bool GLOBAL_WORK_QUEUE = true;"
+        if self.coarse_grained_barriers:
+            config_struct += "static constexpr bool COARSE_GRAINED_BARRIERS = true;"
         if self.no_inst_overlap:
             config_struct += "static constexpr bool NO_INST_OVERLAP = true;"
         if self.no_inter_op_inst_overlap:
