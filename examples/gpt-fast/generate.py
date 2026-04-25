@@ -7,7 +7,7 @@ import itertools
 import sys
 import time
 from pathlib import Path
-from typing import Optional, Tuple, Union
+from typing import Optional, Union
 
 import torch
 import torch._dynamo.config
@@ -29,38 +29,19 @@ sys.path.append(str(wd))
 from model import Transformer
 from tokenizer import get_tokenizer
 
-def multinomial_sample_one_no_sync(probs_sort): # Does multinomial sampling without a cuda synchronization
-    q = torch.empty_like(probs_sort).exponential_(1)
-    return torch.argmax(probs_sort / q, dim=-1, keepdim=True).to(dtype=torch.int)
-
-def logits_to_probs(logits, temperature: float = 1.0, top_k: Optional[int] = None):
-    logits = logits / max(temperature, 1e-5)
-
-    if top_k is not None:
-        v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-        pivot = v.select(-1, -1).unsqueeze(-1)
-        logits = torch.where(logits < pivot, -float("Inf"), logits)
-    probs = torch.nn.functional.softmax(logits, dim=-1)
-    return probs
-
-def sample(logits, temperature: float = 1.0, top_k: Optional[int] = None):
-    probs = logits_to_probs(logits[:, -1], temperature, top_k)
-    idx_next = multinomial_sample_one_no_sync(probs)
-    return idx_next, probs
-
 def roundup(val, multiplier):
     return ((val - 1) // multiplier + 1) * multiplier
 
 def causal_mask(b, h, q, kv):
     return q >= kv
 
-def prefill(model: Transformer, x: torch.Tensor, input_pos: torch.Tensor, **sampling_kwargs) -> torch.Tensor:
+def prefill(model: Transformer, x: torch.Tensor, input_pos: torch.Tensor) -> torch.Tensor:
     # input_pos: [B, S]
     mask = create_block_mask(causal_mask, 1, 1, input_pos.shape[0], model.max_seq_length, device=x.device)
     logits = model(mask, x, input_pos)
-    return sample(logits, **sampling_kwargs)[0]
+    return torch.argmax(logits[:, -1], dim=-1, keepdim=True).to(dtype=torch.int)
 
-def decode_one_token(model: Transformer, x: torch.Tensor, input_pos: torch.Tensor, block_mask: BlockMask, **sampling_kwargs) -> Tuple[torch.Tensor, torch.Tensor]:
+def decode_one_token(model: Transformer, x: torch.Tensor, input_pos: torch.Tensor, block_mask: BlockMask) -> torch.Tensor:
     # input_pos: [B, 1]
     assert input_pos.shape[-1] == 1
     block_index = input_pos // block_mask.BLOCK_SIZE[0]
@@ -68,13 +49,13 @@ def decode_one_token(model: Transformer, x: torch.Tensor, input_pos: torch.Tenso
     mask.mask_mod = block_mask.mask_mod
     mask.seq_lengths = (1, model.max_seq_length)
     logits = model(mask, x, input_pos)
-    return sample(logits, **sampling_kwargs)
+    return torch.argmax(logits[:, -1], dim=-1, keepdim=True).to(dtype=torch.int)
 
-def decode_n_tokens(model: Transformer, cur_token: torch.Tensor, input_pos: torch.Tensor, num_new_tokens: int, **sampling_kwargs):
+def decode_n_tokens(model: Transformer, cur_token: torch.Tensor, input_pos: torch.Tensor, num_new_tokens: int):
     block_mask = create_block_mask(causal_mask, 1, 1, model.max_seq_length, model.max_seq_length, device=cur_token.device)
     new_tokens = []
     for _ in range(num_new_tokens):
-        next_token, _ = decode_one_token(model, cur_token, input_pos, block_mask, **sampling_kwargs)
+        next_token = decode_one_token(model, cur_token, input_pos, block_mask)
         input_pos += 1
         new_tokens.append(next_token.clone())
         cur_token = next_token.clone()
@@ -87,7 +68,6 @@ def generate(
     prompt: torch.Tensor,
     max_new_tokens: int,
     batch_size: int,
-    **sampling_kwargs
 ) -> torch.Tensor:
     """
     Takes a conditioning sequence (prompt) as input and continues to generate as many tokens as requested.
@@ -110,11 +90,11 @@ def generate(
     seq = empty
     input_pos = torch.arange(0, T, device=device)
 
-    next_token = prefill(model, prompt.view(batch_size, -1), input_pos, **sampling_kwargs).clone()
+    next_token = prefill(model, prompt.view(batch_size, -1), input_pos).clone()
     seq[:, T] = next_token.squeeze()
 
     input_pos = torch.tensor([T], device=device, dtype=torch.int)
-    generated_tokens = decode_n_tokens(model, next_token.view(batch_size, -1), input_pos, max_new_tokens - 1, **sampling_kwargs)
+    generated_tokens = decode_n_tokens(model, next_token.view(batch_size, -1), input_pos, max_new_tokens - 1)
     seq[:, T + 1:] = torch.cat(generated_tokens, dim=-1)
 
     return seq
@@ -166,8 +146,6 @@ def main(
     num_samples: int = 5,
     max_new_tokens: int = 100,
     batch_size: int = 1,
-    top_k: int = 200,
-    temperature: float = 0.8,
     checkpoint_path: Path = Path("checkpoints/meta-Transformer/Transformer-2-7b-chat-hf/model.pth"),
     compile: bool = True,
     compile_prefill: bool = False,
@@ -238,8 +216,6 @@ def main(
                 encoded,
                 max_new_tokens,
                 batch_size=batch_size,
-                temperature=temperature,
-                top_k=top_k,
             )
         if i == -1:
             print(f"Compilation time: {time.perf_counter() - t0:.2f} seconds")
@@ -286,8 +262,6 @@ if __name__ == '__main__':
     parser.add_argument('--num_samples', type=int, default=5, help='Number of samples.')
     parser.add_argument('--max_new_tokens', type=int, default=200, help='Maximum number of new tokens.')
     parser.add_argument('--batch_size', type=int, default=1, help='Batch size to benchmark with')
-    parser.add_argument('--top_k', type=int, default=200, help='Top-k for sampling.')
-    parser.add_argument('--temperature', type=float, default=0.8, help='Temperature for sampling.')
     parser.add_argument('--checkpoint_path', type=Path, default=Path("checkpoints/meta-Transformer/Transformer-2-7b-chat-hf/model.pth"), help='Model checkpoint path.')
     parser.add_argument('--compile', action='store_true', help='Whether to compile the model.')
     parser.add_argument('--compile_prefill', action='store_true', help='Whether to compile the prefill (improves prefill perf, but higher compile times)')
@@ -295,6 +269,6 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
     main(
-        args.prompt, args.num_samples, args.max_new_tokens, args.batch_size, args.top_k,
-        args.temperature, args.checkpoint_path, args.compile, args.compile_prefill, args.profile
+        args.prompt, args.num_samples, args.max_new_tokens, args.batch_size,
+        args.checkpoint_path, args.compile, args.compile_prefill, args.profile
     )
