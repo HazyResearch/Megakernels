@@ -35,6 +35,7 @@ def convert_hf_checkpoint(
     model_map_json_safetensors = checkpoint_dir / 'model.safetensors.index.json'
     model_map_json_pytorch = checkpoint_dir / "pytorch_model.bin.index.json"
     model_map_json = None
+    bin_files = None
    
     try:
       assert model_map_json_safetensors.is_file()
@@ -50,10 +51,22 @@ def convert_hf_checkpoint(
       except AssertionError:
         print(f"{model_map_json_pytorch} not found")
    
-    if model_map_json is None: raise Exception("No model map found!")
+    if model_map_json is None:
+        single_safetensors = checkpoint_dir / "model.safetensors"
+        single_pytorch = checkpoint_dir / "pytorch_model.bin"
+        if single_safetensors.is_file():
+            bin_files = {single_safetensors}
+            print(f"Found safetensors checkpoint at {single_safetensors}")
+        elif single_pytorch.is_file():
+            bin_files = {single_pytorch}
+            print(f"Found pytorch checkpoint at {single_pytorch}")
+        else:
+            raise Exception("No model weights found!")
 
-    with open(model_map_json) as json_map:
-        bin_index = json.load(json_map)
+    if model_map_json is not None:
+        with open(model_map_json) as json_map:
+            bin_index = json.load(json_map)
+        bin_files = {checkpoint_dir / bin for bin in bin_index["weight_map"].values()}
 
     weight_map = {
         "model.embed_tokens.weight": "tok_embeddings.weight",
@@ -70,7 +83,6 @@ def convert_hf_checkpoint(
         "model.norm.weight": "norm.weight",
         "lm_head.weight": "output.weight",
     }
-    bin_files = {checkpoint_dir / bin for bin in bin_index["weight_map"].values()}
 
     def permute(w, n_head):
         dim = config.dim
@@ -101,6 +113,8 @@ def convert_hf_checkpoint(
             new_key = weight_map[key]
 
         final_result[new_key] = value
+    if "output.weight" not in final_result and "tok_embeddings.weight" in final_result:
+        final_result["output.weight"] = final_result["tok_embeddings.weight"]
 
     for key in tuple(final_result.keys()):
         if "wq" in key:
@@ -115,7 +129,7 @@ def convert_hf_checkpoint(
             del final_result[key.replace("wq", "wv")]
     print(f"Saving checkpoint to {checkpoint_dir / 'model.pth'}")
     torch.save(final_result, checkpoint_dir / "model.pth")
-    if 'llama-3-' in model_name.lower() or 'llama-3.1-' in model_name.lower():
+    if 'llama-3' in model_name.lower():
         if 'llama-3.1-405b' in model_name.lower():
             original_dir = checkpoint_dir / "original" / "mp16"
         else:
