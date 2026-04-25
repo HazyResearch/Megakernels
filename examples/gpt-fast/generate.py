@@ -20,6 +20,56 @@ torch._inductor.config.triton.unique_kernel_names = True
 torch._inductor.config.fx_graph_cache = True 
 torch._functorch.config.enable_autograd_cache = True
 
+# PDL must be set before torch.compile is called, so check sys.argv early.
+if hasattr(torch._inductor.config.triton, "enable_pdl"):
+    import re
+    from torch._inductor.codecache import PyCodeCache
+    torch._inductor.config.triton.enable_pdl = "--pdl" in sys.argv
+    def set_inductor_pdl(enabled: bool):
+        updated = 0
+        for mod in getattr(PyCodeCache, "modules", []):
+            if not hasattr(mod, "call"):
+                continue
+            src_file = getattr(mod, "__file__", None)
+            if src_file is None:
+                continue
+            try:
+                src = Path(src_file).read_text()
+            except OSError:
+                continue
+
+            # Strip any existing launch_pdl= so we can re-insert cleanly
+            src = re.sub(r",\s*launch_pdl\s*=\s*\w+", "", src)
+
+            if enabled:
+                patched_src = re.sub(
+                    r",(\s*stream\s*=\s*\w+\s*\))",
+                    r", launch_pdl=True,\1",
+                    src,
+                )
+            else:
+                patched_src = src
+
+            exec(compile(patched_src, src_file, "exec"), mod.__dict__)  # noqa: S102
+            updated += 1
+
+        total = len(getattr(PyCodeCache, "modules", []))
+        label = "True" if enabled else "False"
+        if updated == 0:
+            print(f"[patch_pdl] WARNING: no inductor modules with call() found (total in cache: {total})")
+        else:
+            print(f"[patch_pdl] Set launch_pdl={label} on {updated}/{total} inductor module(s)")
+
+
+COMPILE_MODES = {"none", "default", "reduce-overhead", "max-autotune-no-cudagraphs", "max-autotune"}
+COMPILE_ARGS = {
+    "none": None,
+    "default": {"fullgraph": True},
+    "reduce-overhead": {"fullgraph": True, "mode": "reduce-overhead"},
+    "max-autotune-no-cudagraphs": {"fullgraph": True, "mode": "max-autotune-no-cudagraphs"},
+    "max-autotune": {"fullgraph": True, "mode": "max-autotune"},
+}
+
 create_block_mask = torch.compile(create_block_mask)
 
 # support running without installing as a package
@@ -154,8 +204,9 @@ def main(
     batch_size: int = 1,
     warmup: int = 5,
     checkpoint_path: Path = Path("checkpoints/meta-Transformer/Transformer-2-7b-chat-hf/model.pth"),
-    compile: bool = True,
+    compile: str = "none",
     compile_prefill: bool = False,
+    pdl: bool = False,
 ) -> None:
     """Generates text samples based on a pre-trained Transformer model and tokenizer.
     """
@@ -193,13 +244,14 @@ def main(
 
     torch.manual_seed(1234)
     model_size, params = _get_model_size(model)
-    if compile:
+    compile_opts = COMPILE_ARGS[compile]
+    if compile_opts is not None:
         global decode_one_token, prefill
-        decode_one_token = torch.compile(decode_one_token, mode="reduce-overhead", fullgraph=True)
+        decode_one_token = torch.compile(decode_one_token, **compile_opts)
 
         # Uncomment to squeeze more perf out of prefill
         if compile_prefill:
-            prefill = torch.compile(prefill, fullgraph=True, dynamic=True)
+            prefill = torch.compile(prefill, dynamic=True, **compile_opts)
 
 
     aggregate_metrics = {
@@ -215,6 +267,10 @@ def main(
             batch_size=batch_size,
         )
         if i < 0:
+            if i == start and compile_opts is not None:
+                # Patch PDL after first run so compiled modules exist to patch.
+                # Remaining warmup runs will capture CUDA graphs with PDL active.
+                set_inductor_pdl(pdl)
             continue
         t = metrics['decode_time']
 
@@ -254,11 +310,12 @@ if __name__ == '__main__':
     parser.add_argument('--batch_size', type=int, default=1, help='Batch size to benchmark with')
     parser.add_argument('--warmup', type=int, default=5, help='Number of warmup runs.')
     parser.add_argument('--checkpoint_path', type=Path, default=Path("checkpoints/meta-Transformer/Transformer-2-7b-chat-hf/model.pth"), help='Model checkpoint path.')
-    parser.add_argument('--compile', action='store_true', help='Whether to compile the model.')
+    parser.add_argument('--compile', default='none', choices=COMPILE_MODES, help='torch.compile mode.')
     parser.add_argument('--compile_prefill', action='store_true', help='Whether to compile the prefill (improves prefill perf, but higher compile times)')
+    parser.add_argument('--pdl', action='store_true', help='Enable Triton PDL (programmatic dependent launch).')
 
     args = parser.parse_args()
     main(
         args.prompt, args.num_samples, args.max_new_tokens, args.batch_size, args.warmup,
-        args.checkpoint_path, args.compile, args.compile_prefill
+        args.checkpoint_path, args.compile, args.compile_prefill, args.pdl
     )
