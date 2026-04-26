@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ctypes
 import struct
 from typing import Any, Sequence
 
@@ -204,7 +205,9 @@ class Dispatcher:
         self.device: Device = tensor_metas[0].device  # TODO: handle multi-GPU case
         self.tensor_metas: list[TensorMeta] = tensor_metas
         self.tensors: list[torch.Tensor | None] = [None] * len(tensor_metas)
-        self._materialized: bool = False
+        self._initialized: bool = False
+        self._tensor_gl_map_cache: list[tuple[int, bytes]] | None = None
+        self._globals_cache: tuple[ctypes.Array, ctypes.Array] | None = None
         self.instructions: list[Instruction] = instructions
         self.instruction_tensor: torch.Tensor | None = None
         self.num_barriers: int = num_barriers
@@ -247,21 +250,33 @@ class Dispatcher:
                 f"[MegaKittens] Dispatcher arg count mismatch: expected {num_tensors} tensors, got {len(args)}"
             )
 
-        if not self._materialized:
-            self._materialize(args)
-        else:
-            self._materialize_inputs(args)
+        self._materialize_inputs(args)
+        if not self._initialized:
+            self._validate_inputs(args)
+            self._materialize()
+            self._tensor_gl_map_cache = [
+                (t.data_ptr(), g.tensor_to_gl(t)) for t, g in zip(self.all_tensors, self.gls)
+            ]
+        self._initialized = True
 
         self._launch()
 
         outputs = tuple(self.tensors[idx] for idx in self.output_tensor_indices)
         return outputs[0] if len(outputs) == 1 else outputs
 
-    def _materialize(self, args: tuple[Any, ...]) -> None:
-        """For the first call: validate & assign inputs, allocate non-input tensors."""
-        # Assign input tensor references
-        self._materialize_inputs(args)
+    def _validate_inputs(self, args: tuple[Any, ...]) -> None:
+        for input_arg_idx, tensor_idx in enumerate(self.input_tensor_indices):
+            src = args[input_arg_idx]
+            if not isinstance(src, torch.Tensor):
+                raise RuntimeError(
+                    f"[MegaKittens] Input {input_arg_idx} is not a torch.Tensor "
+                    f"(type={type(src).__name__})"
+                )
+            _validate_tensor_against_meta(
+                src, self.tensor_metas[tensor_idx], f"Input {input_arg_idx}"
+            )
 
+    def _materialize(self) -> None:
         # Allocate non-input tensors
         for slot_idx, meta in enumerate(self.tensor_metas):
             if slot_idx in self._input_indices_set:
@@ -304,20 +319,10 @@ class Dispatcher:
                 tma = tensor_tma_types.get(i - 2, [])
                 self.gls[i] = gl(dtype=mk_dtype, b=-1, d=-1, r=-1, c=-1, tma_types=tma)
 
-        self._materialized = True
-
     def _materialize_inputs(self, args: tuple[Any, ...]) -> None:
-        """Validate & assign input references only."""
+        """Assign input tensor references into the tensor slots."""
         for input_arg_idx, tensor_idx in enumerate(self.input_tensor_indices):
             src = args[input_arg_idx]
-            if not isinstance(src, torch.Tensor):
-                raise RuntimeError(
-                    f"[MegaKittens] Input {input_arg_idx} is not a torch.Tensor "
-                    f"(type={type(src).__name__})"
-                )
-            _validate_tensor_against_meta(
-                src, self.tensor_metas[tensor_idx], f"Input {input_arg_idx}"
-            )
             self.tensors[tensor_idx] = src
             self.all_tensors[2 + tensor_idx] = src  # TODO: if input dims change, all other dims + gls should change
 
@@ -391,8 +396,15 @@ class Dispatcher:
         # Reset barriers before each launch
         if self.num_barriers > 0:
             self.barrier_tensor.zero_()
-        fields = [(g.tensor_to_gl(t), g.size, g.align) for g, t in zip(self.gls, self.all_tensors)]
-        _globals_holder, globals_packed = pack_args(fields)
+        inputs_changed = False
+        for i, (g, t) in enumerate(zip(self.gls, self.all_tensors)):
+            data_ptr = t.data_ptr()
+            if data_ptr != self._tensor_gl_map_cache[i][0]:
+                self._tensor_gl_map_cache[i] = (data_ptr, g.tensor_to_gl(t))
+                inputs_changed = True
+        if inputs_changed or self._globals_cache is None:
+            fields = [(self._tensor_gl_map_cache[i][1], g.size, g.align) for i, g in enumerate(self.gls)]
+            self._globals_cache = pack_args(fields)
         if self.global_work_queue:
             grid_size = -(-len(self.instructions) // self.cluster_size) * self.cluster_size  # round up
         else:
@@ -400,7 +412,7 @@ class Dispatcher:
         stream = torch.cuda.current_stream(device_index).cuda_stream
         launch_kernel(
             self._kernel_fn,
-            globals_packed,
+            self._globals_cache[1],
             grid=(grid_size,),
             block=(self.NUM_THREADS,),
             dynamic_smem_bytes=self.DYNAMIC_SHARED_MEMORY,
