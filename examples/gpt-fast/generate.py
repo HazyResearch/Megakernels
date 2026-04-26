@@ -76,7 +76,7 @@ COMPILE_ARGS = {
     "max-autotune": {"fullgraph": True, "mode": "max-autotune"},
 }
 
-create_block_mask = torch.compile(create_block_mask)
+create_block_mask = torch.compile(create_block_mask, options={"combo_kernels": False})
 
 # support running without installing as a package
 wd = Path(__file__).parent.parent.resolve()
