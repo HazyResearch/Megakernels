@@ -82,7 +82,7 @@ def decode(
     gate_weights,          # [L, INTERMEDIATE_DIM, HIDDEN_DIM] bf16
     up_weights,            # [L, INTERMEDIATE_DIM, HIDDEN_DIM] bf16
     down_weights,          # [L, HIDDEN_DIM, INTERMEDIATE_DIM] bf16
-    lm_head_norm_weight,   # [HIDDEN_DIM] bf16
+    lm_head_norm_weight,   # [1, HIDDEN_DIM] bf16
     lm_head_weight,        # [1, VOCAB_SIZE, HIDDEN_DIM] bf16
     k_cache,               # [L * num_pages, PAGE_SIZE, NUM_KV_HEADS, HEAD_DIM] bf16
     v_cache,               # [L * num_pages, PAGE_SIZE, NUM_KV_HEADS, HEAD_DIM] bf16
@@ -145,7 +145,7 @@ def decode(
         )
 
     logits_hidden = torch.ops.megakittens.rms70b(
-        hidden, lm_head_norm_weight, rms_norm_eps,
+        hidden, lm_head_norm_weight[0], rms_norm_eps,
     )
     return torch.ops.megakittens.lm_head70b(logits_hidden, lm_head_weight)
 
@@ -171,7 +171,7 @@ def load_hf_weights(
         "gate_weights": torch.empty(NUM_LAYERS, INTERMEDIATE_DIM, HIDDEN_DIM, dtype=torch.bfloat16, device=device),
         "up_weights": torch.empty(NUM_LAYERS, INTERMEDIATE_DIM, HIDDEN_DIM, dtype=torch.bfloat16, device=device),
         "down_weights": torch.empty(NUM_LAYERS, HIDDEN_DIM, INTERMEDIATE_DIM, dtype=torch.bfloat16, device=device),
-        "lm_head_norm_weight": torch.empty(HIDDEN_DIM, dtype=torch.bfloat16, device=device),
+        "lm_head_norm_weight": torch.empty(1, HIDDEN_DIM, dtype=torch.bfloat16, device=device),
         "lm_head_weight": torch.empty(1, VOCAB_SIZE, HIDDEN_DIM, dtype=torch.bfloat16, device=device),
         "embed_weight": torch.empty(VOCAB_SIZE, HIDDEN_DIM, dtype=torch.bfloat16, device=device),
         "k_cache": torch.zeros(NUM_LAYERS * num_pages, PAGE_SIZE, NUM_KV_HEADS, HEAD_DIM, dtype=torch.bfloat16, device=device),
@@ -196,7 +196,7 @@ def load_hf_weights(
                 if name == "model.embed_tokens.weight":
                     weights["embed_weight"].copy_(t)
                 elif name == "model.norm.weight":
-                    weights["lm_head_norm_weight"].copy_(t)
+                    weights["lm_head_norm_weight"][0].copy_(t)
                 elif name == "lm_head.weight":
                     weights["lm_head_weight"][0].copy_(t)
                 elif name.startswith("model.layers."):

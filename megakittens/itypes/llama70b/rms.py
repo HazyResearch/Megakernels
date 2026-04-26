@@ -62,9 +62,14 @@ class Rms70b(IType):
         C = case[-1]
         return (
             torch.randn(*case, dtype=torch.bfloat16, device="cuda"),
-            torch.randn(C, dtype=torch.bfloat16, device="cuda"),
+            torch.randn(1, C, dtype=torch.bfloat16, device="cuda"),
             torch.tensor([1e-6], dtype=torch.float32, device="cuda"),
         )
+
+    @staticmethod
+    def test_fn(x, weight, eps):
+        # Mirror the model's call site: layer-stacked weight selected to 1D before the op.
+        return rms70b_op(x, weight[0], eps)
 
     @property
     def inputs(self) -> list[TensorSpec]:
@@ -111,7 +116,8 @@ class Rms70b(IType):
     ) -> List[Tuple[int, ...]]:
         x_range = src_ranges[0]
         w_range = src_ranges[1]
-        layer_idx = w_range[-2].start  # 0 for lm_head_norm (1D), layer index for attn/mlp norm (2D)
+        # Weight base is (L, C); the layer dim lands at axis -2 after 4D padding.
+        layer_idx = w_range[-2].start
         B = x_range[-2].size
         sm_count = get_sm_count()
         n_inst = min(B, sm_count)
@@ -132,12 +138,7 @@ class Rms70b(IType):
         C = src_metas[0].shape[-1]
         leading_region = tuple((0, 1) for _ in range(len(src_metas[0].shape) - 2))
         x_region = leading_region + ((row_start, row_start + num_rows), (0, C))
-        # Weight is either (C,) for lm_head_norm or (NUM_LAYERS, C) for attn/mlp norm.
-        # Use layer_idx to point at the correct slice.
-        if len(src_metas[1].shape) == 1:
-            w_region = ((0, C),)
-        else:
-            w_region = ((layer_idx, layer_idx + 1), (0, C))
+        w_region = ((layer_idx, layer_idx + 1), (0, C))
         eps_region = ((0, 1),)
         y_region = leading_region + ((row_start, row_start + num_rows), (0, C))
         return [[x_region], [w_region], [eps_region]], [[y_region]]

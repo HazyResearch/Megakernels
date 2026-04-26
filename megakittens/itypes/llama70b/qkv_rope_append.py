@@ -111,28 +111,7 @@ def _qkv_rope_append70b_fake(
 
 
 def _resolve_qkv_rope_append70b(args, kwargs):
-    x_shape = args[0].meta["val"].shape
-    qkv_w_node = args[1]
-    k_node = args[6]
-
-    # k_cache is a mutated arg, so auto_functionalized_v2 strips its slice
-    # metadata and leaves us with the base tensor. Derive num_pages_per_layer
-    # by combining the base k_cache row count with NUM_LAYERS recovered from
-    # the qkv_weights base (qkv_weights is non-mutated; its slice is preserved
-    # via aten.slice.Tensor, but its base FX node carries the layer dim).
-    qkv_w_base = qkv_w_node
-    while qkv_w_base.op == "call_function" and qkv_w_base.target == torch.ops.aten.slice.Tensor:
-        qkv_w_base = qkv_w_base.args[0]
-    num_layers = qkv_w_base.meta["val"].shape[-3]
-
-    total_k_pages = k_node.meta["val"].shape[-4]
-    if total_k_pages % num_layers != 0:
-        raise RuntimeError(
-            f"[MegaKittens] qkv_rope_append70b: k_cache rows ({total_k_pages}) "
-            f"not divisible by num_layers ({num_layers})"
-        )
-    pages_per_layer = total_k_pages // num_layers
-    return QkvRopeAppend70b(batch_size=x_shape[-2], num_pages=pages_per_layer), [0, 1, 2]
+    return QkvRopeAppend70b(batch_size=args[0].meta["val"].shape[-2]), [0, 1, 2]
 
 
 class QkvRopeAppend70b(IType):
@@ -155,22 +134,17 @@ class QkvRopeAppend70b(IType):
     }
 
     test_cases = [
-        ((512, 512), (512, 128, 62)),
-        ((1024, 2048), (1024, 256, 127)),
+        ((512,), (512, 128, 62)),
+        ((1024,), (1024, 256, 127)),
     ]
     test_atol = 1e-1
     test_rtol = 1e-2
     bench_cases = [
-        ((1024, 2048), (1024, 256, 127)),
+        ((1024,), (1024, 256, 127)),
     ]
 
-    def __init__(self, batch_size: int = 0, num_pages: int = 0):
+    def __init__(self, batch_size: int = 0):
         self.batch_size = batch_size
-        self.num_pages = num_pages
-
-    @property
-    def pages_per_seq(self) -> int:
-        return self.num_pages // self.batch_size if self.batch_size else 0
 
     @property
     def cpp_template(self) -> str:
@@ -258,9 +232,10 @@ class QkvRopeAppend70b(IType):
         q_range = dst_ranges[0]
         w_range = src_ranges[1]
         layer_idx = w_range[-3].start
-        # k_cache slice info is stripped by auto_functionalized_v2 (mutated arg),
-        # so derive base_page from layer_idx * pages_per_layer instead of from k_range.
-        base_page = layer_idx * self.num_pages
+        # k_cache is flat across layers (rows = NUM_LAYERS * pages_per_layer);
+        # the layer-local base_page comes from qkv_weights' layer slice.
+        pages_per_layer = src_metas[6].shape[-4] // src_metas[1].shape[-3]
+        base_page = layer_idx * pages_per_layer
         m_start = q_range[-2].start // self.M_INST
         m_stop = q_range[-2].stop // self.M_INST
         indices = []
@@ -279,8 +254,8 @@ class QkvRopeAppend70b(IType):
     ):
         layer_idx, base_page, m, n = block_index
         B = dst_metas[0].shape[-2]
-        num_pages = self.num_pages or src_metas[6].shape[-4]
-        pages_per_seq = num_pages // B
+        pages_per_layer = src_metas[6].shape[-4] // src_metas[1].shape[-3]
+        pages_per_seq = pages_per_layer // B
         row_start = m * self.M_INST
         row_stop = row_start + self.M_INST
         n_start = n * self.Nb
@@ -338,9 +313,8 @@ class QkvRopeAppend70b(IType):
         q_shape = dst_ranges[0].effective_shape
 
         B = x_shape[-2]
-        # k_shape[-4] is the FULL k_cache row count (NUM_LAYERS * pages_per_layer);
-        # use the IType's num_pages (= pages_per_layer, set by the resolver) for checks.
-        num_pages = self.num_pages or k_shape[-4]
+        # k_shape[-4] is the full k_cache row count (NUM_LAYERS * pages_per_layer).
+        pages_per_layer = src_metas[6].shape[-4] // src_metas[1].shape[-3]
 
         if x_shape[-1] != HIDDEN_DIM:
             raise RuntimeError(f"[MegaKittens] QkvRopeAppend70b expected x dim={HIDDEN_DIM}, got {x_shape[-1]}")
@@ -370,16 +344,13 @@ class QkvRopeAppend70b(IType):
             raise RuntimeError(
                 f"[MegaKittens] QkvRopeAppend70b expected q output shape ({B}, {HIDDEN_DIM}), got {q_shape}"
             )
-        if num_pages % B != 0:
+        if pages_per_layer % B != 0:
             raise RuntimeError(
-                f"[MegaKittens] QkvRopeAppend70b requires num_pages divisible by B, got num_pages={num_pages}, B={B}"
+                f"[MegaKittens] QkvRopeAppend70b requires pages_per_layer divisible by B, "
+                f"got pages_per_layer={pages_per_layer}, B={B}"
             )
         if B % self.M_INST != 0:
             raise RuntimeError(f"[MegaKittens] QkvRopeAppend70b requires B divisible by {self.M_INST}, got B={B}")
 
         if self.batch_size and B != self.batch_size:
             raise RuntimeError(f"[MegaKittens] QkvRopeAppend70b expected B={self.batch_size}, got {B}")
-        if self.num_pages and num_pages != self.num_pages:
-            raise RuntimeError(
-                f"[MegaKittens] QkvRopeAppend70b expected num_pages={self.num_pages}, got {num_pages}"
-            )

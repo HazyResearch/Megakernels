@@ -270,7 +270,7 @@ def step_9_compiled(hidden, attn_norm_weight, eps,
     gate = torch.ops.megakittens.gate_silu70b(mlp_norm, gate_weights)
     up = torch.ops.megakittens.up_matmul70b(mlp_norm, up_weights, gate)
     torch.ops.megakittens.oproj_residual70b(hidden, up, down_weights)
-    final_norm = torch.ops.megakittens.rms70b(hidden, lm_head_norm_weight, eps)
+    final_norm = torch.ops.megakittens.rms70b(hidden, lm_head_norm_weight[0], eps)
     return torch.ops.megakittens.lm_head70b(final_norm, lm_head_weight)
 
 
@@ -285,7 +285,7 @@ def step_9_eager(hidden, attn_norm_weight, eps,
         k_cache, v_cache, pos_id, attn_scale, o_weights,
         mlp_norm_weight, gate_weights, up_weights, down_weights,
     )
-    final_norm = torch.rms_norm(hidden, [hidden.shape[-1]], lm_head_norm_weight, eps.item())
+    final_norm = torch.rms_norm(hidden, [hidden.shape[-1]], lm_head_norm_weight[0], eps.item())
     return final_norm @ lm_head_weight[0].transpose(-1, -2)
 
 
@@ -314,7 +314,7 @@ def step_10_compiled(hidden, qkv_weights, o_weights, attn_norm_weights, mlp_norm
         gate = torch.ops.megakittens.gate_silu70b(mlp_norm, gate_weights[layer_idx:layer_idx + 1])
         up = torch.ops.megakittens.up_matmul70b(mlp_norm, up_weights[layer_idx:layer_idx + 1], gate)
         torch.ops.megakittens.oproj_residual70b(hidden, up, down_weights[layer_idx:layer_idx + 1])
-    final_norm = torch.ops.megakittens.rms70b(hidden, lm_head_norm_weight, eps)
+    final_norm = torch.ops.megakittens.rms70b(hidden, lm_head_norm_weight[0], eps)
     return torch.ops.megakittens.lm_head70b(final_norm, lm_head_weight)
 
 
@@ -336,7 +336,7 @@ def step_10_eager(hidden, qkv_weights, o_weights, attn_norm_weights, mlp_norm_we
             mlp_norm_weights[layer_idx], gate_weights[layer_idx:layer_idx + 1],
             up_weights[layer_idx:layer_idx + 1], down_weights[layer_idx:layer_idx + 1],
         )
-    final_norm = torch.rms_norm(hidden, [hidden.shape[-1]], lm_head_norm_weight, eps.item())
+    final_norm = torch.rms_norm(hidden, [hidden.shape[-1]], lm_head_norm_weight[0], eps.item())
     return final_norm @ lm_head_weight[0].transpose(-1, -2)
 
 
