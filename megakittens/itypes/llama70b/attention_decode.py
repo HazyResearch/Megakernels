@@ -168,9 +168,7 @@ class AttentionDecode70b(IType):
         dst_metas: Tuple[TensorMeta, ...],
     ):
         base_page, seq_idx = block_index
-        batch_size = dst_metas[0].shape[-2]
-        num_pages = self.num_pages or src_metas[1].shape[-4]
-        pages_per_seq = num_pages // batch_size
+        pages_per_seq = self.num_pages // self.batch_size
         page_start = base_page + seq_idx * pages_per_seq
         page_stop = page_start + pages_per_seq
 
@@ -234,11 +232,11 @@ class AttentionDecode70b(IType):
                 f"[MegaKittens] AttentionDecode70b expected attn_scale shape [1], got effective shape {scale_shape}"
             )
 
-        if self.batch_size and B != self.batch_size:
+        if B != self.batch_size:
             raise RuntimeError(
                 f"[MegaKittens] AttentionDecode70b expected B={self.batch_size}, got {B}"
             )
-        if self.num_pages and num_pages != self.num_pages:
+        if num_pages != self.num_pages:
             raise RuntimeError(
                 f"[MegaKittens] AttentionDecode70b expected num_pages={self.num_pages}, got {num_pages}"
             )
