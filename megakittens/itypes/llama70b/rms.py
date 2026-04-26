@@ -110,11 +110,13 @@ class Rms70b(IType):
         dst_ranges: Tuple[TensorRange, ...],
     ) -> List[Tuple[int, ...]]:
         x_range = src_ranges[0]
+        w_range = src_ranges[1]
+        layer_idx = w_range[-2].start  # 0 for lm_head_norm (1D), layer index for attn/mlp norm (2D)
         B = x_range[-2].size
         sm_count = get_sm_count()
         n_inst = min(B, sm_count)
         return [
-            (0, 0,
+            (layer_idx, 0,
              x_range[-2].start + round(i * B / n_inst),
              round((i + 1) * B / n_inst) - round(i * B / n_inst))
             for i in range(n_inst)
@@ -126,11 +128,16 @@ class Rms70b(IType):
         src_metas: Tuple[TensorMeta, ...],
         dst_metas: Tuple[TensorMeta, ...],
     ):
-        _, _, row_start, num_rows = block_index
+        layer_idx, _, row_start, num_rows = block_index
         C = src_metas[0].shape[-1]
         leading_region = tuple((0, 1) for _ in range(len(src_metas[0].shape) - 2))
         x_region = leading_region + ((row_start, row_start + num_rows), (0, C))
-        w_region = ((0, C),)
+        # Weight is either (C,) for lm_head_norm or (NUM_LAYERS, C) for attn/mlp norm.
+        # Use layer_idx to point at the correct slice.
+        if len(src_metas[1].shape) == 1:
+            w_region = ((0, C),)
+        else:
+            w_region = ((layer_idx, layer_idx + 1), (0, C))
         eps_region = ((0, 1),)
         y_region = leading_region + ((row_start, row_start + num_rows), (0, C))
         return [[x_region], [w_region], [eps_region]], [[y_region]]

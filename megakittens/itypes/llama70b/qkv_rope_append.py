@@ -112,8 +112,27 @@ def _qkv_rope_append70b_fake(
 
 def _resolve_qkv_rope_append70b(args, kwargs):
     x_shape = args[0].meta["val"].shape
-    k_shape = args[6].meta["val"].shape
-    return QkvRopeAppend70b(batch_size=x_shape[-2], num_pages=k_shape[-4]), [0, 1, 2]
+    qkv_w_node = args[1]
+    k_node = args[6]
+
+    # k_cache is a mutated arg, so auto_functionalized_v2 strips its slice
+    # metadata and leaves us with the base tensor. Derive num_pages_per_layer
+    # by combining the base k_cache row count with NUM_LAYERS recovered from
+    # the qkv_weights base (qkv_weights is non-mutated; its slice is preserved
+    # via aten.slice.Tensor, but its base FX node carries the layer dim).
+    qkv_w_base = qkv_w_node
+    while qkv_w_base.op == "call_function" and qkv_w_base.target == torch.ops.aten.slice.Tensor:
+        qkv_w_base = qkv_w_base.args[0]
+    num_layers = qkv_w_base.meta["val"].shape[-3]
+
+    total_k_pages = k_node.meta["val"].shape[-4]
+    if total_k_pages % num_layers != 0:
+        raise RuntimeError(
+            f"[MegaKittens] qkv_rope_append70b: k_cache rows ({total_k_pages}) "
+            f"not divisible by num_layers ({num_layers})"
+        )
+    pages_per_layer = total_k_pages // num_layers
+    return QkvRopeAppend70b(batch_size=x_shape[-2], num_pages=pages_per_layer), [0, 1, 2]
 
 
 class QkvRopeAppend70b(IType):
@@ -238,9 +257,10 @@ class QkvRopeAppend70b(IType):
     ) -> List[Tuple[int, ...]]:
         q_range = dst_ranges[0]
         w_range = src_ranges[1]
-        k_range = src_ranges[6]
         layer_idx = w_range[-3].start
-        base_page = k_range[-4].start
+        # k_cache slice info is stripped by auto_functionalized_v2 (mutated arg),
+        # so derive base_page from layer_idx * pages_per_layer instead of from k_range.
+        base_page = layer_idx * self.num_pages
         m_start = q_range[-2].start // self.M_INST
         m_stop = q_range[-2].stop // self.M_INST
         indices = []
@@ -318,7 +338,9 @@ class QkvRopeAppend70b(IType):
         q_shape = dst_ranges[0].effective_shape
 
         B = x_shape[-2]
-        num_pages = k_shape[-4]
+        # k_shape[-4] is the FULL k_cache row count (NUM_LAYERS * pages_per_layer);
+        # use the IType's num_pages (= pages_per_layer, set by the resolver) for checks.
+        num_pages = self.num_pages or k_shape[-4]
 
         if x_shape[-1] != HIDDEN_DIM:
             raise RuntimeError(f"[MegaKittens] QkvRopeAppend70b expected x dim={HIDDEN_DIM}, got {x_shape[-1]}")

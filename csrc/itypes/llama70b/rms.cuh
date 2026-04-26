@@ -10,8 +10,9 @@ namespace llama70b {
 template <typename Config, typename Globals, int N, int SRC_X, int SRC_WEIGHT, int SCALAR_EPS, int DST_Y>
 struct RMS {
     struct parsed_instruction {
-        int row_start, num_rows;
+        int layer_idx, row_start, num_rows;
         __device__ inline parsed_instruction(const instruction_t &instruction) {
+            layer_idx = instruction.indices[0];
             row_start = instruction.indices[2];
             num_rows  = instruction.indices[3];
         }

@@ -62,7 +62,7 @@ struct rms_pipeline {
             row_vec &weight_smem = *reinterpret_cast<row_vec*>(s.pages[weight_pid].ptr());
             auto &w_gl = g.template gls<SRC_WEIGHT>();
             kittens::tma::expect_bytes(weights_arrived(s), sizeof(row_vec));
-            kittens::tma::load_async(weight_smem, w_gl, {0, 0, 0, 0}, weights_arrived(s));
+            kittens::tma::load_async(weight_smem, w_gl, {0, 0, inst.layer_idx, 0}, weights_arrived(s));
 
             auto &x_gl = g.template gls<SRC_X>();
             for (int i = 0; i < inst.num_rows; i++) {
