@@ -27,7 +27,8 @@ def megakittens_backend(
 ) -> Callable[[torch.fx.GraphModule, List[Any]], Callable[..., Any]]:
     def _megakittens_backend(gm: torch.fx.GraphModule, example_inputs: List[Any]) -> Callable[..., Any]:
         if verbose:
-            print(f"[MegaKittens] Compiling function `{fn.__qualname__}`")
+            name = getattr(fn, '__qualname__', None) or type(fn).__qualname__
+            print(f"[MegaKittens] Compiling `{name}`")
             print(f"[MegaKittens] FX graph:")
             gm.graph.print_tabular()
 
