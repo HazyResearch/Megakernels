@@ -49,7 +49,24 @@ MODEL_REPO=meta-llama/Llama-3.3-70B-Instruct
 python generate.py \
   --checkpoint_path checkpoints/$MODEL_REPO/model.pth \
   --prompt "Tell me a joke about cookies" \
+  --batch_size 512 \
   --max_new_tokens 100 \
+  --num_samples 5 \
+  --warmup 5 \
+  --compile max-autotune \
+  --pdl
+```
+
+## Llama 3.3 70B (synthetic)
+
+To run:
+
+```bash
+python generate.py \
+  --model_name llama-3.3-70b \
+  --prompt 6 \
+  --batch_size 512 \
+  --max_new_tokens 122 \
   --num_samples 5 \
   --warmup 5 \
   --compile max-autotune \

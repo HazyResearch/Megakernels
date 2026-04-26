@@ -214,14 +214,10 @@ def main(
     compile: str = "none",
     compile_prefill: bool = False,
     pdl: bool = False,
+    model_name: str = None,
 ) -> None:
     """Generates text samples based on a pre-trained Transformer model and tokenizer.
     """
-    assert checkpoint_path.is_file(), checkpoint_path
-
-    tokenizer_path = checkpoint_path.parent / "tokenizer.model"
-    assert tokenizer_path.is_file(), str(tokenizer_path)
-
     global print
     from tp import maybe_init_dist
     rank = maybe_init_dist()
@@ -233,20 +229,33 @@ def main(
 
     precision = torch.bfloat16
 
-    print("Loading model ...")
-    t0 = time.time()
-    model = _load_model(checkpoint_path, precision, use_tp)
-
-    torch.cuda.synchronize() # MKG
-    print(f"Time to load model: {time.time() - t0:.02f} seconds")
-
-    tokenizer = get_tokenizer(tokenizer_path, checkpoint_path)
-
-    if isinstance(prompt, str):
-        encoded = encode_tokens(tokenizer, prompt, bos=True)
-    else:
-        # generate a fully synthetic prompt
+    if model_name is not None:
+        assert isinstance(prompt, int), \
+            "--prompt must be an integer (token count) when using --model_name"
+        print(f"Creating synthetic {model_name} model ...")
+        t0 = time.time()
+        model = Transformer.from_name(model_name)
+        for p in model.parameters():
+            p.data = torch.randn_like(p, device='cuda', dtype=precision)
+        model = model.to(device='cuda', dtype=precision).eval()
+        tokenizer = None
         encoded = torch.randint(0, 1024, (prompt,), device='cuda', dtype=torch.int64)
+    else:
+        assert checkpoint_path.is_file(), checkpoint_path
+        tokenizer_path = checkpoint_path.parent / "tokenizer.model"
+        assert tokenizer_path.is_file(), str(tokenizer_path)
+        print("Loading model ...")
+        t0 = time.time()
+        model = _load_model(checkpoint_path, precision, use_tp)
+        tokenizer = get_tokenizer(tokenizer_path, checkpoint_path)
+        if isinstance(prompt, str):
+            encoded = encode_tokens(tokenizer, prompt, bos=True)
+        else:
+            # generate a fully synthetic prompt
+            encoded = torch.randint(0, 1024, (prompt,), device='cuda', dtype=torch.int64)
+
+    torch.cuda.synchronize()
+    print(f"Time to load model: {time.time() - t0:.02f} seconds")
     prompt_length = encoded.size(-1)
 
     torch.manual_seed(1234)
@@ -283,10 +292,10 @@ def main(
             continue
         t = metrics['decode_time']
 
-        # Just displaying the first generation
-        if batch_size > 1:
-            print("Only displaying the first generation of the batch")
-        print(tokenizer.decode(y[0].tolist()))
+        if tokenizer is not None:
+            if batch_size > 1:
+                print("Only displaying the first generation of the batch")
+            print(tokenizer.decode(y[0].tolist()))
         tokens_generated = y.size(-1) - prompt_length
         generated_tokens_sec = tokens_generated / t
         aggregate_metrics['tokens_per_sec'].append(generated_tokens_sec)
@@ -322,9 +331,10 @@ if __name__ == '__main__':
     parser.add_argument('--compile', default='none', choices=COMPILE_MODES, help='Compile mode.')
     parser.add_argument('--compile_prefill', action='store_true', help='Whether to compile the prefill (improves prefill perf, but higher compile times)')
     parser.add_argument('--pdl', action='store_true', help='Enable Triton PDL (programmatic dependent launch).')
+    parser.add_argument('--model_name', type=str, default=None, help='Use random weights for this model (e.g. llama-3.3-70b). Skips download.')
 
     args = parser.parse_args()
     main(
         args.prompt, args.num_samples, args.max_new_tokens, args.batch_size, args.warmup,
-        args.checkpoint_path, args.compile, args.compile_prefill, args.pdl
+        args.checkpoint_path, args.compile, args.compile_prefill, args.pdl, args.model_name
     )
