@@ -122,6 +122,8 @@ class Dispatcher:
     MegaKernel.
     """
 
+    MAX_GLOBALS_CACHE_SIZE = 32768
+
     # Must match default_config in csrc/schema.cuh
     INSTRUCTION_PIPE_STAGES = 2
     NUM_CONSUMER_WARPS = 8
@@ -195,8 +197,8 @@ class Dispatcher:
         self.tensor_metas: list[TensorMeta] = tensor_metas
         self.tensors: list[torch.Tensor | None] = [None] * len(tensor_metas)
         self._initialized: bool = False
-        self._tensor_gl_map_cache: list[tuple[int, bytes]] | None = None
-        self._globals_cache: tuple[ctypes.Array, ctypes.Array] | None = None
+        self._tensor_gl_map_cache: list[dict[int, bytes]] | None = None
+        self._globals_cache: dict[tuple[int, ...], tuple[ctypes.Array, ctypes.Array]] = {}
         self.instructions: list[Instruction] = instructions
         self.instruction_tensor: torch.Tensor | None = None
         self.num_barriers: int = num_barriers
@@ -237,7 +239,7 @@ class Dispatcher:
             self._validate_inputs(args)
             self._materialize()
             self._tensor_gl_map_cache = [
-                (t.data_ptr(), g.tensor_to_gl(t)) for t, g in zip(self.all_tensors, self.gls)
+                {t.data_ptr(): g.tensor_to_gl(t)} for t, g in zip(self.all_tensors, self.gls)
             ]
         self._initialized = True
 
@@ -363,15 +365,17 @@ class Dispatcher:
         # Reset barriers before each launch
         if self.num_barriers > 0:
             self.barrier_tensor.zero_()
-        inputs_changed = False
-        for i, (g, t) in enumerate(zip(self.gls, self.all_tensors)):
-            data_ptr = t.data_ptr()
-            if data_ptr != self._tensor_gl_map_cache[i][0]:
-                self._tensor_gl_map_cache[i] = (data_ptr, g.tensor_to_gl(t))
-                inputs_changed = True
-        if inputs_changed or self._globals_cache is None:
-            fields = [(self._tensor_gl_map_cache[i][1], g.size, g.align) for i, g in enumerate(self.gls)]
-            self._globals_cache = pack_args(fields)
+        globals_key = tuple(t.data_ptr() for t in self.all_tensors)
+        if globals_key not in self._globals_cache:
+            if len(self._globals_cache) >= self.MAX_GLOBALS_CACHE_SIZE:
+                raise RuntimeError(f"[MegaKittens] Dispatcher globals cache exceeded max entries.")
+            for i, (g, t) in enumerate(zip(self.gls, self.all_tensors)):
+                if globals_key[i] not in self._tensor_gl_map_cache[i]:
+                    if len(self._tensor_gl_map_cache[i]) >= self.MAX_GLOBALS_CACHE_SIZE:
+                        raise RuntimeError(f"[MegaKittens] Dispatcher tensor gl cache for slot {i} exceeded max entries.")
+                    self._tensor_gl_map_cache[i][globals_key[i]] = g.tensor_to_gl(t)
+            fields = [(self._tensor_gl_map_cache[i][globals_key[i]], g.size, g.align) for i, g in enumerate(self.gls)]
+            self._globals_cache[globals_key] = pack_args(fields)
         if self.global_work_queue:
             grid_size = -(-len(self.instructions) // self.cluster_size) * self.cluster_size  # round up
         else:
@@ -379,7 +383,7 @@ class Dispatcher:
         stream = torch.cuda.current_stream(device_index).cuda_stream
         launch_kernel(
             self._kernel_fn,
-            self._globals_cache[1],
+            self._globals_cache[globals_key][1],
             grid=(grid_size,),
             block=(self.NUM_THREADS,),
             dynamic_smem_bytes=self.DYNAMIC_SHARED_MEMORY,
