@@ -233,3 +233,7 @@ At every step, correctness is verified by:
   (scope changes per step).
 - `examples/gpt-fast/model.py` — possibly minor changes to control which
   sub-modules are compiled (but no model logic changes).
+
+## Notes
+
+Do not create any new Python file. Do not create any temporary directory.
