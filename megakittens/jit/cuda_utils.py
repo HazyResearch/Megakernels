@@ -145,16 +145,15 @@ def set_kernel_dynamic_smem(fn: cuda_driver.CUfunction, dynamic_smem_bytes: int)
     check_cuda(err)
 
 
-def launch_kernel(
-    fn: cuda_driver.CUfunction,
-    packed_args,
+@functools.cache
+def create_launch_config(
     grid: tuple[int, ...],
     block: tuple[int, ...],
     dynamic_smem_bytes: int,
     stream,
     cluster: tuple[int, ...] | None = None,
     pdl: bool = True,
-) -> None:
+) -> tuple[cuda_driver.CUlaunchConfig, list]:
     assert 1 <= len(grid) <= 3
     assert 1 <= len(block) <= 3
     config = cuda_driver.CUlaunchConfig()
@@ -194,5 +193,19 @@ def launch_kernel(
     config.numAttrs = len(attrs)
     config.attrs = attrs
 
+    return config, attrs  # needed to prevent garbage collection
+
+
+def launch_kernel(
+    fn: cuda_driver.CUfunction,
+    packed_args,
+    grid: tuple[int, ...],
+    block: tuple[int, ...],
+    dynamic_smem_bytes: int,
+    stream,
+    cluster: tuple[int, ...] | None = None,
+    pdl: bool = True,
+) -> None:
+    config, _attrs = create_launch_config(grid, block, dynamic_smem_bytes, stream, cluster, pdl)
     (err,) = cuda_driver.cuLaunchKernelEx(config, fn, packed_args, 0)
     check_cuda(err)
