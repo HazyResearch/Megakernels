@@ -23,13 +23,9 @@ struct rms_pipeline {
     __device__ static inline kittens::semaphore &outputs_arrived(state_t<Config> &s, int i)     { return s.semaphores()[2 * i + 2]; }
 
     __device__ static inline int lid_release_order(const Globals &g, state_t<Config> &s, int query) {
-        parsed_instruction inst{s};
-        int num_row_pages = (inst.num_rows + 1) / 2;
-        int num_used = 1 + num_row_pages;
-        int num_unused = Config::NUM_PAGES - num_used;
-        if (query < num_unused)            return num_used + query;
-        if (query < Config::NUM_PAGES - 1) return query - num_unused + 1;
-        return 0;
+        // Must be num_rows-independent so cluster-paired CTAs agree on pid_order for the next instruction's MMA
+        constexpr int order[Config::NUM_PAGES] = {1, 2, 3, 4, 5, 6, 0};
+        return order[query];
     }
 
     __device__ static inline int init_semaphores(const Globals &g, state_t<Config> &s) {

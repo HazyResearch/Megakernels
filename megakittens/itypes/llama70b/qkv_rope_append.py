@@ -136,6 +136,7 @@ class QkvRopeAppend70b(IType):
     test_cases = [
         ((512,), (512, 128, 62)),
         ((1024,), (1024, 256, 127)),
+        ((1024,), (1024, 128, 62)),
     ]
     test_atol = 1e-1
     test_rtol = 1e-2
@@ -186,7 +187,7 @@ class QkvRopeAppend70b(IType):
 
     @staticmethod
     def test_fn(*args):
-        q = qkv_rope_append70b_op(*args)
+        q = torch.ops.megakittens.qkv_rope_append70b(*args)
         return q, args[6], args[7]
 
     def test_args(self, case: tuple) -> tuple:

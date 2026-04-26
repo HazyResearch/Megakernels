@@ -22,6 +22,7 @@ from examples.llama70b.compiled_decode import (
     load_hf_weights, _kv_append_indices,
 )
 from megakittens.itypes.llama70b.qkv_rope_append import _apply_rope
+from megakittens.itypes.llama70b.qkv_rope_append import qkv_rope_append70b_op as qkv_rope_append70b_op_eager_call
 from megakittens.jit.cuda_utils import initialize_cuda_context
 from transformers import AutoTokenizer
 import megakittens
@@ -422,7 +423,48 @@ def run(step: int, batch_size: int, max_seq_len: int):
     hidden = weights["embed_weight"][last_token].unsqueeze(0).expand(batch_size, HIDDEN_DIM).contiguous().to(torch.bfloat16)
     eps = torch.tensor([RMS_NORM_EPS], dtype=torch.float32, device=device)
 
-    if step == -1:
+    if step == -2:
+        # qkv_rope_append ONLY (compiled), fed by eager-rms output, layer 0.
+        # Tests qkv in megakernel context but without rms preceding it in the same compile.
+        pages_per_seq = (max_seq_len + PAGE_SIZE - 1) // PAGE_SIZE
+        num_pages = batch_size * pages_per_seq
+        pos = prompt_len - 1
+        pos_ids = torch.full((batch_size,), pos, dtype=torch.int32, device=device)
+        kv_indices = _kv_append_indices(batch_size, pages_per_seq, pos, device)
+
+        # Eager rms (so the qkv input is identical to what step 2's chain feeds it).
+        attn_norm_w_l0 = weights["attn_norm_weights"][0]
+        h_norm = torch.rms_norm(hidden, [hidden.shape[-1]], attn_norm_w_l0, eps.item())
+
+        # Eager run.
+        layer_k_e = torch.zeros(num_pages, PAGE_SIZE, NUM_KV_HEADS, HEAD_DIM, dtype=torch.bfloat16, device=device)
+        layer_v_e = torch.zeros_like(layer_k_e)
+        expected = qkv_rope_append70b_op_eager_call(
+            h_norm.clone(), weights["qkv_weights"][0:1], weights["rope_cos"], weights["rope_sin"],
+            pos_ids, kv_indices, layer_k_e, layer_v_e,
+        )
+        l_k_snap, l_v_snap = layer_k_e.clone(), layer_v_e.clone()
+
+        # Compiled run: only qkv compiled.
+        layer_k_a = torch.zeros_like(layer_k_e)
+        layer_v_a = torch.zeros_like(layer_k_e)
+
+        def _qkv_only(hidden_norm, qkv_weights, rope_cos, rope_sin, pos_ids, kv_indices, k_cache, v_cache):
+            return torch.ops.megakittens.qkv_rope_append70b(
+                hidden_norm, qkv_weights, rope_cos, rope_sin, pos_ids, kv_indices, k_cache, v_cache,
+            )
+
+        torch._dynamo.reset()
+        compiled = megakittens.compile(_qkv_only, use_jit_cache=False, verbose=False, save_schedule=False)
+        actual = compiled(
+            h_norm.clone(), weights["qkv_weights"][0:1], weights["rope_cos"], weights["rope_sin"],
+            pos_ids, kv_indices, layer_k_a, layer_v_a,
+        )
+        _report("step -2: qkv only (eager rms input)", expected, actual, atol=1e-1, rtol=1e-2)
+        _report("step -2: layer 0 k_cache", l_k_snap, layer_k_a, atol=1e-2, rtol=1e-2)
+        _report("step -2: layer 0 v_cache", l_v_snap, layer_v_a, atol=1e-2, rtol=1e-2)
+
+    elif step == -1:
         # Just rms+qkv into LAYER 1's slice of a full-NUM_LAYERS cache.
         pos = prompt_len - 1
         pages_per_seq = (max_seq_len + PAGE_SIZE - 1) // PAGE_SIZE
@@ -516,7 +558,7 @@ def run(step: int, batch_size: int, max_seq_len: int):
             layer_k_e, layer_v_e,
         )
         torch._dynamo.reset()
-        compiled = megakittens.compile(step_2_compiled, use_jit_cache=False, verbose=False, save_schedule=False)
+        compiled = megakittens.compile(step_2_compiled, use_jit_cache=False, verbose=False, save_schedule=True)
         actual_q = compiled(
             hidden.clone(), attn_norm_weight, eps,
             qkv_weights, rope_cos, rope_sin, pos_ids, kv_indices,
