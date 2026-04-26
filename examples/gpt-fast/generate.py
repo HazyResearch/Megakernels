@@ -67,13 +67,14 @@ if hasattr(torch._inductor.config.triton, "enable_pdl"):
             print(f"[patch_pdl] Set launch_pdl={label} on {updated}/{total} inductor module(s)")
 
 
-COMPILE_MODES = {"none", "default", "reduce-overhead", "max-autotune-no-cudagraphs", "max-autotune"}
+COMPILE_MODES = {"none", "default", "reduce-overhead", "max-autotune-no-cudagraphs", "max-autotune", "megakittens"}
 COMPILE_ARGS = {
     "none": None,
     "default": {"fullgraph": True},
     "reduce-overhead": {"fullgraph": True, "mode": "reduce-overhead"},
     "max-autotune-no-cudagraphs": {"fullgraph": True, "mode": "max-autotune-no-cudagraphs"},
     "max-autotune": {"fullgraph": True, "mode": "max-autotune"},
+    "megakittens": None,
 }
 
 create_block_mask = torch.compile(create_block_mask, options={"combo_kernels": False})
@@ -250,15 +251,17 @@ def main(
 
     torch.manual_seed(1234)
     model_size, params = _get_model_size(model)
-    compile_opts = COMPILE_ARGS[compile]
-    if compile_opts is not None:
-        global decode_one_token, prefill
-        decode_one_token = torch.compile(decode_one_token, **compile_opts)
 
-        # Uncomment to squeeze more perf out of prefill
-        if compile_prefill:
-            prefill = torch.compile(prefill, dynamic=True, **compile_opts)
-
+    if compile == "megakittens":
+        import megakittens
+        model = megakittens.compile(model, dry_run=True, save_dag=True)
+    else:
+        compile_opts = COMPILE_ARGS[compile]
+        if compile_opts is not None:
+            global decode_one_token, prefill
+            decode_one_token = torch.compile(decode_one_token, **compile_opts)
+            if compile_prefill:
+                prefill = torch.compile(prefill, dynamic=True, **compile_opts)
 
     aggregate_metrics = {
         'tokens_per_sec': [],
@@ -316,7 +319,7 @@ if __name__ == '__main__':
     parser.add_argument('--batch_size', type=int, default=1, help='Batch size to benchmark with')
     parser.add_argument('--warmup', type=int, default=5, help='Number of warmup runs.')
     parser.add_argument('--checkpoint_path', type=Path, default=Path("checkpoints/meta-Transformer/Transformer-2-7b-chat-hf/model.pth"), help='Model checkpoint path.')
-    parser.add_argument('--compile', default='none', choices=COMPILE_MODES, help='torch.compile mode.')
+    parser.add_argument('--compile', default='none', choices=COMPILE_MODES, help='Compile mode.')
     parser.add_argument('--compile_prefill', action='store_true', help='Whether to compile the prefill (improves prefill perf, but higher compile times)')
     parser.add_argument('--pdl', action='store_true', help='Enable Triton PDL (programmatic dependent launch).')
 
