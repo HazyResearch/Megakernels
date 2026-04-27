@@ -17,7 +17,7 @@ class Node(BaseModel):
     is_input: bool = False
     is_output: bool = False  # There should be only 1 output node
 
-    itype: IType | None = None  # None if input/output
+    itype: IType | str | None = None  # IType for compute nodes, str for intermediate ops, None for input/output
 
     in_nodes: Tuple[Tuple[Node, NonNegativeInt], ...]  # [[source_node, output_slot_idx], ...]
     in_ranges: Tuple[TensorRange, ...]
@@ -40,7 +40,6 @@ class DAG:
 
     def __init__(self, nodes: List[Node]) -> None:
         self.nodes = nodes
-        self.validate()
 
     def _validate_topological(self) -> None:
         node_index: dict[int, int] = {node.id: idx for idx, node in enumerate(self.nodes)}
@@ -91,6 +90,13 @@ class DAG:
                 raise RuntimeError("[MegaKittens] DAG payload contains non-Node entry")
             if node.is_input + node.is_output + (node.itype is not None) != 1:  # XOR
                 raise RuntimeError("[MegaKittens] Node must be exactly one of: input, output, or itype")
+            if (node.is_input or node.is_output) and node.itype is not None:
+                raise RuntimeError(f"[MegaKittens] Input/output node has an IType.")
+            if not node.is_input and not node.is_output and not isinstance(node.itype, IType):
+                raise RuntimeError(
+                    f"[MegaKittens] Compute node has non-IType itype: {node.itype!r}. "
+                    f"All view ops must be folded before validation."
+                )
             if len(node.out_nodes) != len(node.out_tensors):
                 raise RuntimeError(
                     f"[MegaKittens] Node arity mismatch: out_nodes={len(node.out_nodes)} out_tensors={len(node.out_tensors)}"

@@ -144,7 +144,7 @@ class TensorRange(BaseModel):
     def effective_shape(self) -> Tuple[int, ...]:
         return tuple(d.size for d in self.ranges)
 
-    @classmethod
+    @staticmethod
     def compose(first: "TensorRange", second: "TensorRange") -> "TensorRange":
         """Compose two ranges: first is applied first (closer to source tensor), 
            second is relative to first's effective_shape."""
