@@ -1,3 +1,4 @@
+from functools import cached_property
 from typing import ClassVar, Literal, Tuple
 
 import torch
@@ -16,6 +17,13 @@ class TensorMeta(BaseModel, frozen=True):  # frozen=True needed to be hashable
     @property
     def full_range(self) -> "TensorRange":
         return TensorRange(ranges=tuple(DimRange(start=0, stop=d) for d in self.shape))
+
+    @cached_property
+    def numel(self) -> int:
+        n = 1
+        for d in self.shape:
+            n *= d
+        return n
 
     @classmethod
     def from_torch(

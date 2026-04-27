@@ -21,6 +21,7 @@ class Node(BaseModel):
 
     in_nodes: Tuple[Tuple[Node, NonNegativeInt], ...]  # [[source_node, output_slot_idx], ...]
     in_ranges: Tuple[TensorRange, ...]
+    in_tensors: Tuple[TensorMeta, ...]  # may differ from source node out_tensor due to view ops!
     out_tensors: Tuple[TensorMeta, ...]
     out_ranges: Tuple[TensorRange, ...]
     out_nodes: Tuple[List[Node], ...]  # [[destination_node, ...], ...]
@@ -105,13 +106,32 @@ class DAG:
                 raise RuntimeError(
                     f"[MegaKittens] Node arity mismatch: in_ranges={len(node.in_ranges)} in_nodes={len(node.in_nodes)}"
                 )
+            if len(node.in_tensors) != len(node.in_nodes):
+                raise RuntimeError(
+                    f"[MegaKittens] Node arity mismatch: in_tensors={len(node.in_tensors)} in_nodes={len(node.in_nodes)}"
+                )
             if len(node.out_ranges) != len(node.out_tensors):
                 raise RuntimeError(
                     f"[MegaKittens] Node arity mismatch: out_ranges={len(node.out_ranges)} out_tensors={len(node.out_tensors)}"
                 )
-            for label, edges in [("in_node", list(zip(node.in_nodes, node.in_ranges))), ("out_tensor", list(zip(node.out_tensors, node.out_ranges)))]:
-                for i, (src, range) in enumerate(edges):
-                    src_shape = src[0].out_tensors[src[1]].shape if label == "in_node" else src.shape
+            for i, ((in_node, in_slot), in_tensor) in enumerate(zip(node.in_nodes, node.in_tensors)):
+                src_tensor = in_node.out_tensors[in_slot]
+                if src_tensor.numel != in_tensor.numel:
+                    raise RuntimeError(
+                        f"[MegaKittens] in_tensors[{i}] shape {in_tensor.shape} (numel={in_tensor.numel}) "
+                        f"does not match source out_tensors[{in_slot}] shape {src_tensor.shape} (numel={src_tensor.numel})"
+                    )
+                if in_tensor.dtype != src_tensor.dtype:
+                    raise RuntimeError(
+                        f"[MegaKittens] in_tensors[{i}] dtype {in_tensor.dtype} does not match "
+                        f"source out_tensors[{in_slot}] dtype {src_tensor.dtype}"
+                    )
+            for label, edges in [
+                ("in_tensor", list(zip(node.in_tensors, node.in_ranges))),
+                ("out_tensor", list(zip(node.out_tensors, node.out_ranges))),
+            ]:
+                for i, (tensor_meta, range) in enumerate(edges):
+                    src_shape = tensor_meta.shape
                     pad = len(range) - len(src_shape)
                     for d, dim_range in enumerate(range.ranges[:pad]):
                         if dim_range.start != 0 or dim_range.stop != 1 or dim_range.stride != 1:

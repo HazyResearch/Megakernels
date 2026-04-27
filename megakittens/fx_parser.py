@@ -141,6 +141,7 @@ def resolve_and_build_call_node(
 
     in_nodes: list[tuple[Node, int]] = []
     in_ranges: list[TensorRange] = []
+    in_tensors: list[TensorMeta] = []
     for input_fx_node in input_fx_nodes:
         if input_fx_node.op == "output":
             raise RuntimeError(f"[MegaKittens] Invalid input graph edge: node '{fx_node.name}' consumes output node '{input_fx_node.name}'")
@@ -154,11 +155,13 @@ def resolve_and_build_call_node(
             )
         in_nodes.append((dag_input, 0))
         in_ranges.append(dag_input.out_tensors[0].full_range)
+        in_tensors.append(dag_input.out_tensors[0])
 
     return Node(
         itype=itype,
         in_nodes=in_nodes,
         in_ranges=in_ranges,
+        in_tensors=in_tensors,
         out_tensors=out_tensors,
         out_ranges=tuple(tm.full_range for tm in out_tensors),
         out_nodes=tuple([] for _ in out_tensors),
@@ -179,6 +182,7 @@ def parse_placeholder_node(fx_node: torch.fx.Node, ctx: dict) -> Node:
         is_input=True,
         in_nodes=(),
         in_ranges=(),
+        in_tensors=(),
         out_tensors=out_tensors,
         out_ranges=tuple(tm.full_range for tm in out_tensors),
         out_nodes=tuple([] for _ in out_tensors),
@@ -200,6 +204,7 @@ def parse_get_attr_node(fx_node: torch.fx.Node, ctx: dict) -> Node:
         is_input=True,
         in_nodes=(),
         in_ranges=(),
+        in_tensors=(),
         out_tensors=out_tensors,
         out_ranges=tuple(tm.full_range for tm in out_tensors),
         out_nodes=tuple([] for _ in out_tensors),
@@ -232,6 +237,7 @@ def parse_getitem_node(fx_node: torch.fx.Node, ctx: dict) -> Node:
         itype="getitem",
         in_nodes=((source_node, output_idx),),
         in_ranges=(source_node.out_tensors[output_idx].full_range,),
+        in_tensors=(source_node.out_tensors[output_idx],),
         out_tensors=out_tensors,
         out_ranges=tuple(tm.full_range for tm in out_tensors),
         out_nodes=tuple([] for _ in out_tensors),
@@ -259,6 +265,7 @@ def parse_select_node(fx_node: torch.fx.Node, ctx: dict) -> Node:
         itype="select",
         in_nodes=((source_node, 0),),
         in_ranges=(in_range,),
+        in_tensors=(source_node.out_tensors[0],),
         out_tensors=out_tensors,
         out_ranges=tuple(tm.full_range for tm in out_tensors),
         out_nodes=tuple([] for _ in out_tensors),
@@ -293,6 +300,7 @@ def parse_slice_node(fx_node: torch.fx.Node, ctx: dict) -> Node:
         itype="slice",
         in_nodes=((source_node, 0),),
         in_ranges=(in_range,),
+        in_tensors=(source_node.out_tensors[0],),
         out_tensors=out_tensors,
         out_ranges=tuple(tm.full_range for tm in out_tensors),
         out_nodes=tuple([] for _ in out_tensors),
@@ -354,6 +362,7 @@ def parse_output_node(fx_node: torch.fx.Node, ctx: dict) -> Node:
         raise RuntimeError("[MegaKittens] Output fx_node has no args")
     in_nodes: list[tuple[Node, int]] = []
     in_ranges: list[TensorRange] = []
+    in_tensors: list[TensorMeta] = []
     stack = list(fx_node.args)
     while stack:
         val = stack.pop()
@@ -370,6 +379,7 @@ def parse_output_node(fx_node: torch.fx.Node, ctx: dict) -> Node:
                 )
             in_nodes.append((dag_input, 0))
             in_ranges.append(dag_input.out_tensors[0].full_range)
+            in_tensors.append(dag_input.out_tensors[0])
         elif isinstance(val, (list, tuple)):
             stack.extend(val)
         elif isinstance(val, dict):
@@ -378,7 +388,43 @@ def parse_output_node(fx_node: torch.fx.Node, ctx: dict) -> Node:
             raise RuntimeError(f"[MegaKittens] Unsupported output arg type '{type(val).__name__}'")
     in_nodes.reverse()
     in_ranges.reverse()
-    return Node(is_output=True, in_nodes=in_nodes, in_ranges=in_ranges, out_tensors=(), out_ranges=(), out_nodes=())
+    in_tensors.reverse()
+    return Node(
+        is_output=True,
+        in_nodes=in_nodes,
+        in_ranges=in_ranges,
+        in_tensors=in_tensors,
+        out_tensors=(),
+        out_ranges=(),
+        out_nodes=()
+    )
+
+
+def parse_view_node(fx_node: torch.fx.Node, ctx: dict) -> Node:
+    args = fx_node.args
+    if len(args) < 2:
+        raise RuntimeError(f"[MegaKittens] view op expects at least 2 args for node '{fx_node.name}', got {len(args)}")
+    if not isinstance(args[0], torch.fx.Node):
+        raise RuntimeError(f"[MegaKittens] view op source is not an FX node for '{fx_node.name}'")
+    source_fx_node = args[0]
+    if source_fx_node.name not in ctx["fx_name_to_node"]:
+        raise RuntimeError(f"[MegaKittens] No source node '{source_fx_node.name}' for view op '{fx_node.name}'")
+    source_node = ctx["fx_name_to_node"][source_fx_node.name]
+    if len(source_node.out_tensors) != 1:
+        raise RuntimeError(
+            f"[MegaKittens] view op '{fx_node.name}' directly consumes multi-output node '{source_fx_node.name}'"
+            f" (expected getitem in between)"
+        )
+    out_tensors = extract_fx_node_outputs(fx_node)
+    return Node(
+        itype="view",
+        in_nodes=((source_node, 0),),
+        in_ranges=(source_node.out_tensors[0].full_range,),
+        in_tensors=(source_node.out_tensors[0],),
+        out_tensors=out_tensors,
+        out_ranges=tuple(tm.full_range for tm in out_tensors),
+        out_nodes=tuple([] for _ in out_tensors),
+    )
 
 
 def extract_dag_from_fx_graph(gm: torch.fx.GraphModule, example_inputs: List[Any]) -> DAG:
@@ -413,6 +459,10 @@ def extract_dag_from_fx_graph(gm: torch.fx.GraphModule, example_inputs: List[Any
             node = parse_select_node(fx_node, ctx)
         elif fx_node.op == "call_function" and fx_node.target == torch.ops.aten.slice.Tensor:
             node = parse_slice_node(fx_node, ctx)
+        elif fx_node.op == "call_function" and fx_node.target in {
+            torch.ops.aten.view.default, torch.ops.aten.reshape.default, torch.ops.aten._unsafe_view.default,
+        }:
+            node = parse_view_node(fx_node, ctx)
         elif fx_node.op == "call_function" and fx_node.target is auto_functionalized_v2:
             node = parse_auto_functionalized_node(fx_node, ctx)
         elif fx_node.op in {"call_function", "call_method"}:

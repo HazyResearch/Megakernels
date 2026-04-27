@@ -58,6 +58,14 @@ def save_dag_as_png_as_json(
                     [[dim_range.start, dim_range.stop, dim_range.stride] for dim_range in tensor_range]
                     for tensor_range in node.in_ranges
                 ],
+                "in_tensors": [
+                    {
+                        "dtype": tensor.dtype.value,
+                        "shape": [int(dim) for dim in tensor.shape],
+                        "device": tensor.device.model_dump(),
+                    }
+                    for tensor in node.in_tensors
+                ],
                 "out_nodes": [
                     [node_index_by_id[out_node.id] for out_node in out_nodes]
                     for out_nodes in node.out_nodes
@@ -124,8 +132,6 @@ def save_dag_as_png(
     dot.attr("node", shape="record", style="filled", fillcolor="#e8e8e8", fontname="Menlo")
     dot.attr("edge", fontname="Menlo")
 
-    nodes_by_id = {node["id"]: node for node in dag_json["nodes"]}
-
     for node in dag_json["nodes"]:
         nid = str(node["id"])
         itype = node["itype"]
@@ -149,8 +155,8 @@ def save_dag_as_png(
 
     for node in dag_json["nodes"]:
         for edge_i, (src_id, input_slot) in enumerate(node["in_nodes"]):
-            src_shape = nodes_by_id[src_id]["out_tensors"][input_slot]["shape"]
-            in_range_str = format_range(node["in_ranges"][edge_i], src_shape)
+            edge_shape = node["in_tensors"][edge_i]["shape"]
+            in_range_str = format_range(node["in_ranges"][edge_i], edge_shape)
             label = f" {input_slot} " if in_range_str is None else f" {input_slot}{in_range_str} "
             dot.edge(str(src_id), str(node["id"]), label=label)
 
