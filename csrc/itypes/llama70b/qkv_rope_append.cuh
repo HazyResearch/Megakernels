@@ -27,6 +27,8 @@ struct QkvRopeAppend {
     static constexpr int Nb = 256;
     static constexpr int Kb = 64;
     static constexpr int EPI_PIPE_DEPTH = 8;
+    static constexpr int NUM_CONSUMERS = 2;
+    static constexpr int M_INST = NUM_CONSUMERS * Mb;
     static constexpr int ROWS_PER_CONSUMER = Mb / 2;
     static constexpr int COLS_PER_CHUNK = Nb / EPI_PIPE_DEPTH;
     static constexpr int Q_DIM = HIDDEN_DIM;
@@ -34,6 +36,8 @@ struct QkvRopeAppend {
 
     using out_st_t = kittens::st_bf<ROWS_PER_CONSUMER, COLS_PER_CHUNK>;
     using out_rt_bf_t = kittens::rt_bf<ROWS_PER_CONSUMER / 4, COLS_PER_CHUNK>;
+    using head_sv_t = kittens::sv<float, HEAD_DIM>;
+    using append_sv_t = kittens::sv<int, M_INST>;
 
     struct parsed_instruction {
         int layer_idx, base_page, m, n;
@@ -55,17 +59,13 @@ struct QkvRopeAppend {
 
     template <typename Pipeline>
     __device__ static inline void apply_rope_tile(
-            const Globals &g,
             const parsed_instruction &pi,
             out_st_t &tile,
+            const head_sv_t &cos_smem,
+            const head_sv_t &sin_smem,
             int global_col_start) {
-        auto &pos_gl = g.template gls<SRC_POS_IDS>();
-        auto &cos_gl = g.template gls<SRC_ROPE_COS>();
-        auto &sin_gl = g.template gls<SRC_ROPE_SIN>();
-
         const int cta_rank = kittens::cluster_ctarank();
         const int cid = kittens::warpgroup::groupid();
-        const int row_base = row_tile_idx(pi, cta_rank, cid) * ROWS_PER_CONSUMER;
         const int wg_tid = kittens::warpgroup::warpid() * kittens::WARP_THREADS + kittens::laneid();
 
         #pragma unroll
@@ -73,17 +73,15 @@ struct QkvRopeAppend {
              elem += kittens::WARPGROUP_WARPS * kittens::WARP_THREADS) {
             const int row = elem / (COLS_PER_CHUNK / 2);
             const int pair_col = 2 * (elem % (COLS_PER_CHUNK / 2));
-            const int global_row = row_base + row;
             const int dim_even = (global_col_start + pair_col) % HEAD_DIM;
             const int dim_odd = dim_even + 1;
-            const int pos = static_cast<int>(pos_gl.raw_ptr[global_row]);
 
             const float x_even = float(tile[{row, pair_col}]);
             const float x_odd = float(tile[{row, pair_col + 1}]);
-            const float cos_even = cos_gl[{0, 0, pos, dim_even}];
-            const float sin_even = sin_gl[{0, 0, pos, dim_even}];
-            const float cos_odd = cos_gl[{0, 0, pos, dim_odd}];
-            const float sin_odd = sin_gl[{0, 0, pos, dim_odd}];
+            const float cos_even = cos_smem[dim_even];
+            const float sin_even = sin_smem[dim_even];
+            const float cos_odd = cos_smem[dim_odd];
+            const float sin_odd = sin_smem[dim_odd];
 
             tile[{row, pair_col}] = __float2bfloat16_rn(x_even * cos_even - x_odd * sin_even);
             tile[{row, pair_col + 1}] = __float2bfloat16_rn(x_odd * cos_odd + x_even * sin_odd);
@@ -95,9 +93,9 @@ struct QkvRopeAppend {
             const Globals &g,
             const parsed_instruction &pi,
             out_st_t &tile,
+            const append_sv_t &append_smem,
             int global_col_start,
             bool is_k) {
-        auto &append_gl = g.template gls<SRC_APPEND_IDS>();
         auto &kv_gl = is_k ? g.template gls<SRC_K_CACHE>() : g.template gls<SRC_V_CACHE>();
 
         const int cta_rank = kittens::cluster_ctarank();
@@ -108,16 +106,28 @@ struct QkvRopeAppend {
         const int head_idx = kv_col_start / HEAD_DIM;
         const int dim_start = kv_col_start % HEAD_DIM;
 
-        for (int elem = wg_tid; elem < ROWS_PER_CONSUMER * COLS_PER_CHUNK;
+        constexpr int VEC = 8;
+        for (int elem = wg_tid; elem < ROWS_PER_CONSUMER * (COLS_PER_CHUNK / VEC);
              elem += kittens::WARPGROUP_WARPS * kittens::WARP_THREADS) {
-            const int row = elem / COLS_PER_CHUNK;
-            const int col = elem % COLS_PER_CHUNK;
+            const int row = elem / (COLS_PER_CHUNK / VEC);
+            const int col = (elem % (COLS_PER_CHUNK / VEC)) * VEC;
             const int global_row = row_base + row;
-            const int append_idx = static_cast<int>(append_gl.raw_ptr[global_row]);
+            const int append_idx = append_smem[global_row];
             const int page = append_idx / PAGE_SIZE;
             const int offset = append_idx % PAGE_SIZE;
             const int cache_page = pi.base_page + page;
-            kv_gl[{cache_page, offset, head_idx, dim_start + col}] = tile[{row, col}];
+            uint4 v;
+            __nv_bfloat162 p0, p1, p2, p3;
+            p0.x = tile[{row, col}];     p0.y = tile[{row, col + 1}];
+            p1.x = tile[{row, col + 2}]; p1.y = tile[{row, col + 3}];
+            p2.x = tile[{row, col + 4}]; p2.y = tile[{row, col + 5}];
+            p3.x = tile[{row, col + 6}]; p3.y = tile[{row, col + 7}];
+            v.x = *reinterpret_cast<uint32_t *>(&p0);
+            v.y = *reinterpret_cast<uint32_t *>(&p1);
+            v.z = *reinterpret_cast<uint32_t *>(&p2);
+            v.w = *reinterpret_cast<uint32_t *>(&p3);
+            *reinterpret_cast<uint4 *>(
+                &kv_gl[{cache_page, offset, head_idx, dim_start + col}]) = v;
         }
     }
 
@@ -135,6 +145,20 @@ struct QkvRopeAppend {
             kittens::wait(Pipeline::outputs_arrived(s), 0);
 
             if (consumer_group::elect_leader()) all_reuse_barrier_wait<Config>(g, s.instruction());
+            consumer_group::sync(4);
+
+            uint8_t *scratch_b0 = static_cast<uint8_t *>(
+                s.pages[s.lid_to_pid(Pipeline::B_LIDS[0])].ptr(0));
+            head_sv_t &cos_smem = *reinterpret_cast<head_sv_t *>(scratch_b0);
+            head_sv_t &sin_smem = *reinterpret_cast<head_sv_t *>(scratch_b0 + sizeof(head_sv_t));
+            append_sv_t &append_smem = *reinterpret_cast<append_sv_t *>(
+                s.pages[s.lid_to_pid(Pipeline::B_LIDS[1])].ptr(0));
+            const int pos_id = static_cast<int>(g.template gls<SRC_POS_IDS>().raw_ptr[0]);
+            if (kittens::warpid() % kittens::WARPGROUP_WARPS == 0) {
+                kittens::warp::load(cos_smem, g.template gls<SRC_ROPE_COS>(), {pos_id, 0});
+                kittens::warp::load(sin_smem, g.template gls<SRC_ROPE_SIN>(), {pos_id, 0});
+                kittens::warp::load(append_smem, g.template gls<SRC_APPEND_IDS>(), {0});
+            }
             consumer_group::sync(4);
 
             #pragma unroll
@@ -157,18 +181,18 @@ struct QkvRopeAppend {
                 kittens::warpgroup::sync(cid + 1);
 
                 if (global_col_start < Q_DIM) {
-                    apply_rope_tile<Pipeline>(g, pi, out_tile, global_col_start);
+                    apply_rope_tile<Pipeline>(pi, out_tile, cos_smem, sin_smem, global_col_start);
                     kittens::warpgroup::sync(cid + 1);
                     kittens::warpgroup::tma::store_async(
                         q_gl, out_tile,
                         {0, 0, row_tile_idx(pi, cta_rank, cid), global_chunk});
                 } else if (global_col_start < Q_DIM + KV_DIM) {
-                    apply_rope_tile<Pipeline>(g, pi, out_tile, global_col_start);
+                    apply_rope_tile<Pipeline>(pi, out_tile, cos_smem, sin_smem, global_col_start);
                     kittens::warpgroup::sync(cid + 1);
-                    scatter_kv_tile<Pipeline>(g, pi, out_tile, global_col_start, true);
+                    scatter_kv_tile<Pipeline>(g, pi, out_tile, append_smem, global_col_start, true);
                     kittens::warpgroup::sync(cid + 1);
                 } else {
-                    scatter_kv_tile<Pipeline>(g, pi, out_tile, global_col_start, false);
+                    scatter_kv_tile<Pipeline>(g, pi, out_tile, append_smem, global_col_start, false);
                     kittens::warpgroup::sync(cid + 1);
                 }
             }
