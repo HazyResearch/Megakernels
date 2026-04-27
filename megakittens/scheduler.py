@@ -10,7 +10,7 @@ from .utils import timed
 from .itypes.noop import Noop
 from .jit.cuda_utils import get_sm_count
 from .schema.dag import DAG
-from .schema.tensor import TensorMeta
+from .schema.tensor import TensorMeta, TensorStorage
 from .schema.instruction import (
     IType,
     Instruction,
@@ -51,8 +51,7 @@ def get_instruction_count_and_offset(
             raise RuntimeError(
                 f"[MegaKittens] Node has {len(node.out_tensors)} dst tensors (max {Instruction.MAX_DST_TENSORS})"
             )
-        src_metas = tuple(in_node.out_tensors[slot_idx] for in_node, slot_idx in node.in_nodes)
-        count = node.itype.num_instructions(src_metas, node.out_tensors, src_ranges=node.in_ranges, dst_ranges=node.out_ranges)
+        count = node.itype.num_instructions(node.in_tensors, node.out_tensors, src_ranges=node.in_ranges, dst_ranges=node.out_ranges)
         node_inst_count[node.id] = count
         node_inst_offset[node.id] = cumulative_offset
         cumulative_offset += count + (-count) % cluster_size  # CTA pairs must get same instruction type
@@ -84,7 +83,7 @@ def assign_tensors(
     tensor_index: Dict[Tuple[int, int], int] = {}
     input_tensor_indices: List[int] = []
     output_tensor_indices: List[int] = []
-    tensor_pool: Dict[TensorMeta, List[Tuple[List[int], int, int, int]]] = {}
+    storage_pool: Dict[TensorStorage, List[Tuple[List[int], int, int, int]]] = {}
     release_barriers: List[Tuple[List[int], int, int]] = []
 
     for node in dag.nodes:
@@ -107,10 +106,12 @@ def assign_tensors(
                         num_other_consumer_insts = sum(node_inst_count[cid] for cid in other_consumer_ids)
                         release_barriers.append((other_consumer_ids, num_other_consumer_insts, node.id))
                 else:
-                    free_tensors = tensor_pool.get(tensor_meta, [])
+                    pool_key = TensorStorage(size=tensor_meta.size_bytes, device=tensor_meta.device)
+                    free_tensors = storage_pool.get(pool_key, [])
                     for i, (consumer_node_ids, last_consumer_inst, num_consumer_insts, tid) in enumerate(free_tensors):
                         if node_inst_offset[node.id] - last_consumer_inst >= get_sm_count():
                             tensor_index[(node.id, out_idx)] = tid
+                            tensor_metas[tid] = TensorMeta(dtype=tensor_meta.dtype, shape=tensor_meta.shape, device=tensor_meta.device, storage=tensor_metas[tid].storage)
                             free_tensors.pop(i)
                             release_barriers.append((consumer_node_ids, num_consumer_insts, node.id))
                             reused = True
@@ -121,6 +122,8 @@ def assign_tensors(
                     raise RuntimeError(
                         f"[MegaKittens] The given compute graph requires tensor count exceeding {MAX_TENSOR_ALLOCATIONS}."
                     )
+                storage = TensorStorage(size=tensor_meta.size_bytes, device=tensor_meta.device)
+                tensor_meta = TensorMeta(dtype=tensor_meta.dtype, shape=tensor_meta.shape, device=tensor_meta.device, storage=storage)
                 tensor_index[(node.id, out_idx)] = len(tensor_metas)
                 tensor_metas.append(tensor_meta)
 
@@ -136,7 +139,7 @@ def assign_tensors(
             consumer_node_ids = [c.id for c in consumer_nodes]
             num_consumer_insts = sum(node_inst_count[cid] for cid in consumer_node_ids)
             last_consumer_inst = max(node_inst_offset[c.id] + node_inst_count[c.id] + (-node_inst_count[c.id]) % cluster_size for c in consumer_nodes)
-            tensor_pool.setdefault(tensor_meta, []).append((consumer_node_ids, last_consumer_inst, num_consumer_insts, tensor_index[(node.id, out_idx)]))
+            storage_pool.setdefault(tensor_metas[tensor_index[(node.id, out_idx)]].storage, []).append((consumer_node_ids, last_consumer_inst, num_consumer_insts, tensor_index[(node.id, out_idx)]))
 
         if node.is_input:
             if len(node.out_tensors) != 1:
@@ -190,11 +193,10 @@ def assign_barriers(
     for node in dag.nodes:
         if node.is_input or node.is_output:
             continue
-        src_metas = tuple(in_node.out_tensors[slot_idx] for in_node, slot_idx in node.in_nodes)
-        block_indices = node.itype.block_indices(src_metas, node.out_tensors, src_ranges=node.in_ranges, dst_ranges=node.out_ranges)
+        block_indices = node.itype.block_indices(node.in_tensors, node.out_tensors, src_ranges=node.in_ranges, dst_ranges=node.out_ranges)
         node_block_indices[node.id] = block_indices
         node_regions[node.id] = [
-            node.itype.access_regions(block_index, src_metas, node.out_tensors)
+            node.itype.access_regions(block_index, node.in_tensors, node.out_tensors)
             for block_index in block_indices
         ]
 
@@ -338,9 +340,7 @@ def generate_instructions(
             for slot in range(len(node.out_tensors))
         )
 
-        src_metas = tuple(in_node.out_tensors[slot_idx] for in_node, slot_idx in node.in_nodes)
-        dst_metas = node.out_tensors
-        node.itype.validate(src_metas, dst_metas, src_ranges=node.in_ranges, dst_ranges=node.out_ranges)
+        node.itype.validate(node.in_tensors, node.out_tensors, src_ranges=node.in_ranges, dst_ranges=node.out_ranges)
 
         key = (node.itype, src_tensors, dst_tensors)
         if key not in icode_map:

@@ -1,4 +1,3 @@
-from functools import cached_property
 from typing import ClassVar, Literal, Tuple
 
 import torch
@@ -9,21 +8,32 @@ from .dtype import DType
 from ..jit.pykittens import st, sv
 
 
-class TensorMeta(BaseModel, frozen=True):  # frozen=True needed to be hashable
+class TensorStorage(BaseModel, frozen=True):
+    """Backing memory block. Multiple TensorMetas can share the same TensorStorage instance."""
+    size: NonNegativeInt  # bytes
+    device: Device
+
+
+class TensorMeta(BaseModel):
     dtype: DType
     shape: Tuple[NonNegativeInt, ...] = Field(max_length=4)  # TODO: support dynamic shapes
     device: Device
+    storage: TensorStorage | None = None  # set by the scheduler
 
     @property
     def full_range(self) -> "TensorRange":
         return TensorRange(ranges=tuple(DimRange(start=0, stop=d) for d in self.shape))
 
-    @cached_property
+    @property
     def numel(self) -> int:
         n = 1
         for d in self.shape:
             n *= d
         return n
+
+    @property
+    def size_bytes(self) -> int:
+        return self.numel * self.dtype.size
 
     @classmethod
     def from_torch(
