@@ -85,6 +85,7 @@ def assign_tensors(
     input_tensor_indices: List[int] = []
     output_tensor_indices: List[int] = []
     storage_pool: Dict[Tuple[int, Device], List[Tuple[List[int], int, int, int]]] = {}
+    storage_users: Dict[int, List[int]] = {}  # storage.id -> list of tensor_meta indices
     release_barriers: List[Tuple[List[int], int, int]] = []
 
     for node in dag.nodes:
@@ -109,10 +110,23 @@ def assign_tensors(
                 else:
                     pool_key = (tensor_meta.size_bytes, tensor_meta.device)
                     free_tensors = storage_pool.get(pool_key, [])
-                    for i, (consumer_node_ids, last_consumer_inst, num_consumer_insts, tid) in enumerate(free_tensors):
+                    for i, (consumer_node_ids, last_consumer_inst, num_consumer_insts, storage_id) in enumerate(free_tensors):
                         if node_inst_offset[node.id] - last_consumer_inst >= get_sm_count():
-                            tensor_index[(node.id, "out", out_idx)] = tid
-                            tensor_metas[tid] = TensorMeta(dtype=tensor_meta.dtype, shape=tensor_meta.shape, device=tensor_meta.device, storage=tensor_metas[tid].storage)
+                            matched_tid = None
+                            for t in storage_users[storage_id]:
+                                if (tensor_metas[t].dtype == tensor_meta.dtype and tensor_metas[t].shape == tensor_meta.shape and tensor_metas[t].device == tensor_meta.device):
+                                    matched_tid = t
+                                    break
+                            if matched_tid is not None:
+                                tensor_index[(node.id, "out", out_idx)] = matched_tid
+                            else:
+                                if len(tensor_metas) >= MAX_TENSOR_ALLOCATIONS:
+                                    raise RuntimeError(
+                                        f"[MegaKittens] The given compute graph requires tensor count exceeding {MAX_TENSOR_ALLOCATIONS}."
+                                    )
+                                tensor_index[(node.id, "out", out_idx)] = len(tensor_metas)
+                                storage_users[storage_id].append(len(tensor_metas))
+                                tensor_metas.append(TensorMeta(dtype=tensor_meta.dtype, shape=tensor_meta.shape, device=tensor_meta.device, storage=tensor_metas[storage_users[storage_id][0]].storage))
                             free_tensors.pop(i)
                             release_barriers.append((consumer_node_ids, num_consumer_insts, node.id))
                             reused = True
@@ -126,6 +140,7 @@ def assign_tensors(
                 storage = TensorStorage(size=tensor_meta.size_bytes, device=tensor_meta.device)
                 tensor_meta = TensorMeta(dtype=tensor_meta.dtype, shape=tensor_meta.shape, device=tensor_meta.device, storage=storage)
                 tensor_index[(node.id, "out", out_idx)] = len(tensor_metas)
+                storage_users[storage.id] = [len(tensor_metas)]
                 tensor_metas.append(tensor_meta)
 
             consumer_nodes = [node] + node.out_nodes[out_idx]
@@ -141,7 +156,8 @@ def assign_tensors(
             num_consumer_insts = sum(node_inst_count[cid] for cid in consumer_node_ids)
             last_consumer_inst = max(node_inst_offset[c.id] + node_inst_count[c.id] + (-node_inst_count[c.id]) % cluster_size for c in consumer_nodes)
             pool_key = (tensor_meta.size_bytes, tensor_meta.device)
-            storage_pool.setdefault(pool_key, []).append((consumer_node_ids, last_consumer_inst, num_consumer_insts, tensor_index[(node.id, "out", out_idx)]))
+            storage_id = tensor_metas[tensor_index[(node.id, "out", out_idx)]].storage.id
+            storage_pool.setdefault(pool_key, []).append((consumer_node_ids, last_consumer_inst, num_consumer_insts, storage_id))
 
         if not node.is_input:
             for edge_idx, ((source_node, source_out_slot), in_tensor) in enumerate(zip(node.in_nodes, node.in_tensors)):
@@ -151,11 +167,10 @@ def assign_tensors(
                 else:
                     if len(tensor_metas) >= MAX_TENSOR_ALLOCATIONS:
                         raise RuntimeError(f"[MegaKittens] Tensor count exceeds {MAX_TENSOR_ALLOCATIONS}.")
+                    storage = tensor_metas[source_tensor_meta].storage
                     tensor_index[(node.id, "in", edge_idx)] = len(tensor_metas)
-                    tensor_metas.append(TensorMeta(
-                        dtype=in_tensor.dtype, shape=in_tensor.shape, device=in_tensor.device,
-                        storage=tensor_metas[source_tensor_meta].storage,
-                    ))
+                    storage_users[storage.id].append(len(tensor_metas))
+                    tensor_metas.append(TensorMeta(dtype=in_tensor.dtype, shape=in_tensor.shape, device=in_tensor.device, storage=storage))
         else:
             if len(node.out_tensors) != 1:
                 raise RuntimeError(f"[MegaKittens] Input node has {len(node.out_tensors)} outputs (expected 1)")
