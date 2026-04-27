@@ -124,8 +124,8 @@ struct QkvRopeAppend {
              elem += kittens::WARPGROUP_WARPS * kittens::WARP_THREADS) {
             const int row = elem / (COLS_PER_CHUNK / VEC);
             const int col = (elem % (COLS_PER_CHUNK / VEC)) * VEC;
-            const int global_row = row_base + row;
-            const int append_idx = append_smem[global_row];
+            const int local_row = row_base - pi.m * M_INST + row;
+            const int append_idx = append_smem[local_row];
             const int page = append_idx / PAGE_SIZE;
             const int offset = append_idx % PAGE_SIZE;
             const int cache_page = pi.base_page + page;
@@ -170,7 +170,7 @@ struct QkvRopeAppend {
             if (kittens::warpid() % kittens::WARPGROUP_WARPS == 0) {
                 kittens::warp::load(cos_smem, g.template gls<SRC_ROPE_COS>(), {pos_id, 0});
                 kittens::warp::load(sin_smem, g.template gls<SRC_ROPE_SIN>(), {pos_id, 0});
-                kittens::warp::load(append_smem, g.template gls<SRC_APPEND_IDS>(), {0});
+                kittens::warp::load(append_smem, g.template gls<SRC_APPEND_IDS>(), {pi.m});
             }
             consumer_group::sync(4);
 
@@ -217,6 +217,8 @@ struct QkvRopeAppend {
             if (consumer_group::elect_leader()) {
                 __threadfence();
                 s.page_finish(s.lid_to_pid(Pipeline::A_LIDS[0]));
+                s.page_finish(s.lid_to_pid(Pipeline::B_LIDS[0]));
+                s.page_finish(s.lid_to_pid(Pipeline::B_LIDS[1]));
                 all_barrier_arrive<Config>(g, s.instruction());
             }
         }
@@ -238,8 +240,48 @@ struct QkvRopeAppend {
     };
 
     struct loader {
+        // b_lids are reused as cos/sin/append smem scratch and finished by the consumer.
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
-            pipeline::loader_loop(g, s);
+            parsed_instruction pi{s};
+            const int cta_rank = kittens::cluster_ctarank();
+            auto &a_gl = g.template gls<SRC_X>();
+            auto &b_gl = g.template gls<SRC_QKV_W>();
+            const int num_iters = a_gl.cols() / Kb;
+
+            if (kittens::warp::elect_leader()) {
+                all_input_barrier_wait<Config>(g, s.instruction());
+                for (int i = 0; i < num_iters + pipeline::LOAD_PIPE_DEPTH; i++) {
+                    const int stage = i % pipeline::LOAD_PIPE_DEPTH;
+                    if (i < pipeline::LOAD_PIPE_DEPTH) {
+                        s.page_wait(s.lid_to_pid(pipeline::A_LIDS[stage]));
+                        if (stage % 2 == 0) s.page_wait(s.lid_to_pid(pipeline::B_LIDS[stage / 2]));
+                    } else {
+                        kittens::wait(pipeline::inputs_finished(s, stage),
+                                      ((i + pipeline::LOAD_PIPE_DEPTH) / pipeline::LOAD_PIPE_DEPTH) & 0b1);
+                    }
+                    if (i < num_iters) {
+                        #pragma unroll
+                        for (int cid = 0; cid < pipeline::NUM_CONSUMERS; cid++) {
+                            kittens::tma::cluster::load_async(
+                                pipeline::a_st(s, stage, cid), a_gl,
+                                {0, 0, (2 * pi.m + cta_rank) * pipeline::NUM_CONSUMERS + cid, i},
+                                pipeline::inputs_arrived(s, stage), (uint16_t)(1 << cta_rank), 0);
+                        }
+                        kittens::tma::cluster::load_async(
+                            pipeline::b_st(s, stage), b_gl,
+                            {0, pi.layer_idx, 2 * pi.n + cta_rank, i},
+                            pipeline::inputs_arrived(s, stage), (uint16_t)(1 << cta_rank), 0);
+                    } else {
+                        if (stage != 0) s.page_finish(s.lid_to_pid(pipeline::A_LIDS[stage]));
+                    }
+                }
+            } else if (kittens::warp::elect_leader_from_active()) {
+                #pragma unroll
+                for (int i = pipeline::NUM_USED_PAGES; i < Config::NUM_PAGES; i++) {
+                    s.page_wait(s.lid_to_pid(i));
+                    s.page_finish(s.lid_to_pid(i));
+                }
+            }
         }
     };
 
