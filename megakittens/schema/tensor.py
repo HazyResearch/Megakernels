@@ -1,3 +1,4 @@
+import builtins
 from typing import ClassVar, Literal, Tuple
 
 import torch
@@ -8,10 +9,14 @@ from .dtype import DType
 from ..jit.pykittens import st, sv
 
 
-class TensorStorage(BaseModel, frozen=True):
+class TensorStorage(BaseModel):
     """Backing memory block. Multiple TensorMetas can share the same TensorStorage instance."""
     size: NonNegativeInt  # bytes
     device: Device
+    id: int = 0
+
+    def model_post_init(self, _) -> None:
+        self.id = builtins.id(self)
 
 
 class TensorMeta(BaseModel):

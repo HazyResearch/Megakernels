@@ -10,6 +10,7 @@ from .utils import timed
 from .itypes.noop import Noop
 from .jit.cuda_utils import get_sm_count
 from .schema.dag import DAG
+from .schema.device import Device
 from .schema.tensor import TensorMeta, TensorStorage
 from .schema.instruction import (
     IType,
@@ -63,7 +64,7 @@ def assign_tensors(
     cluster_size: int,
     node_inst_count: Dict[int, int],
     node_inst_offset: Dict[int, int],
-) -> Tuple[List[TensorMeta], Dict[Tuple[int, int], int], List[int], List[int], List[Tuple[List[int], int, int]]]:
+) -> Tuple[List[TensorMeta], Dict[Tuple[int, str, int], int], List[int], List[int], List[Tuple[List[int], int, int]]]:
     """Phase 2: Assign tensor indices, reuse memory where possible, collect I/O indices.
 
     Args:
@@ -74,23 +75,23 @@ def assign_tensors(
     Returns:
         (tensor_metas, tensor_index, input_tensor_indices, output_tensor_indices, release_barriers) where:
         - tensor_metas: List[TensorMeta], flat list of unique tensor metadata.
-        - tensor_index: Dict[Tuple[int, int], int], (node_id, output_slot) -> index into tensor_metas.
+        - tensor_index: Dict[Tuple[int, str, int], int], (node_id, "in"/"out", slot_idx) -> index into tensor_metas.
         - input_tensor_indices: List[int], tensor_metas indices for graph inputs, in order.
         - output_tensor_indices: List[int], tensor_metas indices for graph outputs, in order.
         - release_barriers: List[Tuple[List[int], int, int]], each is (consumer_node_ids, num_consumer_insts, reuser_node_id) for tensor reuse.
     """
     tensor_metas: List[TensorMeta] = []
-    tensor_index: Dict[Tuple[int, int], int] = {}
+    tensor_index: Dict[Tuple[int, str, int], int] = {}
     input_tensor_indices: List[int] = []
     output_tensor_indices: List[int] = []
-    storage_pool: Dict[TensorStorage, List[Tuple[List[int], int, int, int]]] = {}
+    storage_pool: Dict[Tuple[int, Device], List[Tuple[List[int], int, int, int]]] = {}
     release_barriers: List[Tuple[List[int], int, int]] = []
 
     for node in dag.nodes:
         if node.is_output:
             if len(output_tensor_indices) != 0:
                 raise RuntimeError("[MegaKittens] Expected 1 output node")
-            output_tensor_indices.extend(tensor_index[(in_node.id, slot_idx)] for in_node, slot_idx in node.in_nodes)
+            output_tensor_indices.extend(tensor_index[(in_node.id, "out", slot_idx)] for in_node, slot_idx in node.in_nodes)
             continue  # no need to allocate tensors for the output node
 
         inplace_mapping = node.itype.inplace_mapping if node.itype is not None else None
@@ -99,18 +100,18 @@ def assign_tensors(
             if not node.is_input:
                 if inplace_mapping is not None and out_idx in inplace_mapping:
                     in_node, in_slot = node.in_nodes[inplace_mapping[out_idx]]
-                    tensor_index[(node.id, out_idx)] = tensor_index[(in_node.id, in_slot)]
+                    tensor_index[(node.id, "out", out_idx)] = tensor_index[(in_node.id, "out", in_slot)]
                     reused = True
                     other_consumer_ids = ([in_node.id] if not in_node.is_input else []) + [consumer.id for consumer in in_node.out_nodes[in_slot] if consumer.id != node.id and not consumer.is_output]
                     if other_consumer_ids:
                         num_other_consumer_insts = sum(node_inst_count[cid] for cid in other_consumer_ids)
                         release_barriers.append((other_consumer_ids, num_other_consumer_insts, node.id))
                 else:
-                    pool_key = TensorStorage(size=tensor_meta.size_bytes, device=tensor_meta.device)
+                    pool_key = (tensor_meta.size_bytes, tensor_meta.device)
                     free_tensors = storage_pool.get(pool_key, [])
                     for i, (consumer_node_ids, last_consumer_inst, num_consumer_insts, tid) in enumerate(free_tensors):
                         if node_inst_offset[node.id] - last_consumer_inst >= get_sm_count():
-                            tensor_index[(node.id, out_idx)] = tid
+                            tensor_index[(node.id, "out", out_idx)] = tid
                             tensor_metas[tid] = TensorMeta(dtype=tensor_meta.dtype, shape=tensor_meta.shape, device=tensor_meta.device, storage=tensor_metas[tid].storage)
                             free_tensors.pop(i)
                             release_barriers.append((consumer_node_ids, num_consumer_insts, node.id))
@@ -124,7 +125,7 @@ def assign_tensors(
                     )
                 storage = TensorStorage(size=tensor_meta.size_bytes, device=tensor_meta.device)
                 tensor_meta = TensorMeta(dtype=tensor_meta.dtype, shape=tensor_meta.shape, device=tensor_meta.device, storage=storage)
-                tensor_index[(node.id, out_idx)] = len(tensor_metas)
+                tensor_index[(node.id, "out", out_idx)] = len(tensor_metas)
                 tensor_metas.append(tensor_meta)
 
             consumer_nodes = [node] + node.out_nodes[out_idx]
@@ -139,12 +140,26 @@ def assign_tensors(
             consumer_node_ids = [c.id for c in consumer_nodes]
             num_consumer_insts = sum(node_inst_count[cid] for cid in consumer_node_ids)
             last_consumer_inst = max(node_inst_offset[c.id] + node_inst_count[c.id] + (-node_inst_count[c.id]) % cluster_size for c in consumer_nodes)
-            storage_pool.setdefault(tensor_metas[tensor_index[(node.id, out_idx)]].storage, []).append((consumer_node_ids, last_consumer_inst, num_consumer_insts, tensor_index[(node.id, out_idx)]))
+            pool_key = (tensor_meta.size_bytes, tensor_meta.device)
+            storage_pool.setdefault(pool_key, []).append((consumer_node_ids, last_consumer_inst, num_consumer_insts, tensor_index[(node.id, "out", out_idx)]))
 
-        if node.is_input:
+        if not node.is_input:
+            for edge_idx, ((source_node, source_out_slot), in_tensor) in enumerate(zip(node.in_nodes, node.in_tensors)):
+                source_tensor_meta = tensor_index[(source_node.id, "out", source_out_slot)]
+                if in_tensor.shape == tensor_metas[source_tensor_meta].shape:
+                    tensor_index[(node.id, "in", edge_idx)] = source_tensor_meta
+                else:
+                    if len(tensor_metas) >= MAX_TENSOR_ALLOCATIONS:
+                        raise RuntimeError(f"[MegaKittens] Tensor count exceeds {MAX_TENSOR_ALLOCATIONS}.")
+                    tensor_index[(node.id, "in", edge_idx)] = len(tensor_metas)
+                    tensor_metas.append(TensorMeta(
+                        dtype=in_tensor.dtype, shape=in_tensor.shape, device=in_tensor.device,
+                        storage=tensor_metas[source_tensor_meta].storage,
+                    ))
+        else:
             if len(node.out_tensors) != 1:
                 raise RuntimeError(f"[MegaKittens] Input node has {len(node.out_tensors)} outputs (expected 1)")
-            input_tensor_indices.append(tensor_index[(node.id, 0)])
+            input_tensor_indices.append(tensor_index[(node.id, "out", 0)])
 
     if not input_tensor_indices:
         raise RuntimeError("[MegaKittens] Graph has no input tensors")
@@ -293,7 +308,7 @@ def assign_barriers(
 def generate_instructions(
     dag: DAG,
     cluster_size: int,
-    tensor_index: Dict[Tuple[int, int], int],
+    tensor_index: Dict[Tuple[int, str, int], int],
     node_block_indices: Dict[int, list],
     inst_dst_barriers: Dict[Tuple[int, int], List[int]],
     inst_src_barriers: Dict[Tuple[int, int], List[Tuple[int, int]]],
@@ -306,7 +321,7 @@ def generate_instructions(
 
     Args:
         dag: validated DAG of input, and output, and compute nodes.
-        tensor_index: Dict[Tuple[int, int], int], (node_id, output_slot) -> index into tensor_metas.
+        tensor_index: Dict[Tuple[int, str, int], int], (node_id, "in"/"out", slot_idx) -> index into tensor_metas.
         node_block_indices: Dict[int, list], node_id -> list of per-instruction tile coordinate tuples from block_indices().
         inst_dst_barriers: Dict[Tuple[int, int], List[int]], (node_id, local_inst_idx) -> barrier IDs this instruction arrives on after completion.
         inst_src_barriers: Dict[Tuple[int, int], List[Tuple[int, int]]], (node_id, local_inst_idx) -> (barrier_id, target_count) pairs to wait on before starting.
@@ -330,13 +345,10 @@ def generate_instructions(
         if node.is_input or node.is_output:
             continue
 
-        src_tensors = tuple(
-            tensor_index[(in_node.id, slot_idx)]
-            for in_node, slot_idx in node.in_nodes
-        )
+        src_tensors = tuple(tensor_index[(node.id, "in", edge_idx)] for edge_idx in range(len(node.in_nodes)))
 
         dst_tensors = tuple(
-            tensor_index[(node.id, slot)]
+            tensor_index[(node.id, "out", slot)]
             for slot in range(len(node.out_tensors))
         )
 
