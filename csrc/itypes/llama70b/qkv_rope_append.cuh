@@ -57,34 +57,47 @@ struct QkvRopeAppend {
         return (2 * pi.m + cta_rank) * 2 + cid;
     }
 
+    // row-layout rt_bf packs (col 2k, col 2k+1) per bf16x2 reg, so rope is per-register without shuffles.
     template <typename Pipeline>
-    __device__ static inline void apply_rope_tile(
-            const parsed_instruction &pi,
-            out_st_t &tile,
+    __device__ static inline void apply_rope_reg(
+            out_rt_bf_t &d_reg,
             const head_sv_t &cos_smem,
             const head_sv_t &sin_smem,
             int global_col_start) {
-        const int cta_rank = kittens::cluster_ctarank();
-        const int cid = kittens::warpgroup::groupid();
-        const int wg_tid = kittens::warpgroup::warpid() * kittens::WARP_THREADS + kittens::laneid();
+        const int even_base = 2 * (kittens::laneid() % 4);
 
         #pragma unroll
-        for (int elem = wg_tid; elem < ROWS_PER_CONSUMER * (COLS_PER_CHUNK / 2);
-             elem += kittens::WARPGROUP_WARPS * kittens::WARP_THREADS) {
-            const int row = elem / (COLS_PER_CHUNK / 2);
-            const int pair_col = 2 * (elem % (COLS_PER_CHUNK / 2));
-            const int dim_even = (global_col_start + pair_col) % HEAD_DIM;
-            const int dim_odd = dim_even + 1;
+        for (int j = 0; j < out_rt_bf_t::width; j++) {
+            const int low_e  = (global_col_start + j * 16 + even_base) % HEAD_DIM;
+            const int high_e = (global_col_start + j * 16 + even_base + 8) % HEAD_DIM;
+            const float cl_e = cos_smem[low_e];
+            const float sl_e = sin_smem[low_e];
+            const float cl_o = cos_smem[low_e + 1];
+            const float sl_o = sin_smem[low_e + 1];
+            const float ch_e = cos_smem[high_e];
+            const float sh_e = sin_smem[high_e];
+            const float ch_o = cos_smem[high_e + 1];
+            const float sh_o = sin_smem[high_e + 1];
 
-            const float x_even = float(tile[{row, pair_col}]);
-            const float x_odd = float(tile[{row, pair_col + 1}]);
-            const float cos_even = cos_smem[dim_even];
-            const float sin_even = sin_smem[dim_even];
-            const float cos_odd = cos_smem[dim_odd];
-            const float sin_odd = sin_smem[dim_odd];
-
-            tile[{row, pair_col}] = __float2bfloat16_rn(x_even * cos_even - x_odd * sin_even);
-            tile[{row, pair_col + 1}] = __float2bfloat16_rn(x_odd * cos_odd + x_even * sin_odd);
+            #pragma unroll
+            for (int i = 0; i < out_rt_bf_t::height; i++) {
+                #pragma unroll
+                for (int k = 0; k < 2; k++) {
+                    auto &r = d_reg.tiles[i][j].data[k];
+                    const float xe = __bfloat162float(r.x);
+                    const float xo = __bfloat162float(r.y);
+                    r.x = __float2bfloat16_rn(xe * cl_e - xo * sl_e);
+                    r.y = __float2bfloat16_rn(xo * cl_o + xe * sl_o);
+                }
+                #pragma unroll
+                for (int k = 2; k < 4; k++) {
+                    auto &r = d_reg.tiles[i][j].data[k];
+                    const float xe = __bfloat162float(r.x);
+                    const float xo = __bfloat162float(r.y);
+                    r.x = __float2bfloat16_rn(xe * ch_e - xo * sh_e);
+                    r.y = __float2bfloat16_rn(xo * ch_o + xe * sh_o);
+                }
+            }
         }
     }
 
@@ -174,6 +187,10 @@ struct QkvRopeAppend {
                         0, COLS_PER_CHUNK * i));
                 kittens::tensor_load_wait();
 
+                if (global_col_start < Q_DIM + KV_DIM) {
+                    apply_rope_reg<Pipeline>(d_reg, cos_smem, sin_smem, global_col_start);
+                }
+
                 kittens::warpgroup::tma::store_async_read_wait<Pipeline::NUM_D_TILES - 1>();
                 kittens::warpgroup::sync(cid + 1);
                 out_st_t &out_tile = Pipeline::d_st(s, cid, slot);
@@ -181,14 +198,10 @@ struct QkvRopeAppend {
                 kittens::warpgroup::sync(cid + 1);
 
                 if (global_col_start < Q_DIM) {
-                    apply_rope_tile<Pipeline>(pi, out_tile, cos_smem, sin_smem, global_col_start);
-                    kittens::warpgroup::sync(cid + 1);
                     kittens::warpgroup::tma::store_async(
                         q_gl, out_tile,
                         {0, 0, row_tile_idx(pi, cta_rank, cid), global_chunk});
                 } else if (global_col_start < Q_DIM + KV_DIM) {
-                    apply_rope_tile<Pipeline>(pi, out_tile, cos_smem, sin_smem, global_col_start);
-                    kittens::warpgroup::sync(cid + 1);
                     scatter_kv_tile<Pipeline>(g, pi, out_tile, append_smem, global_col_start, true);
                     kittens::warpgroup::sync(cid + 1);
                 } else {
