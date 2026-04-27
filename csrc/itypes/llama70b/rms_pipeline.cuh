@@ -53,6 +53,7 @@ struct rms_pipeline {
 
         if (lane == 0) {
             all_input_barrier_wait<Config>(g, s.instruction());
+
             int weight_pid = s.lid_to_pid(WEIGHTS_PAGE);
             s.page_wait(weight_pid);
             row_vec &weight_smem = *reinterpret_cast<row_vec*>(s.pages[weight_pid].ptr());
@@ -60,16 +61,14 @@ struct rms_pipeline {
             kittens::tma::expect_bytes(weights_arrived(s), sizeof(row_vec));
             kittens::tma::load_async(weight_smem, w_gl, {0, 0, inst.layer_idx, 0}, weights_arrived(s));
 
-            auto &x_gl = g.template gls<SRC_X>();
             for (int i = 0; i < inst.num_rows; i++) {
                 int page_idx = 1 + i / 2;
                 int pos_in_page = i % 2;
-                int row_pid = s.lid_to_pid(page_idx);
-                if (pos_in_page == 0) s.page_wait(row_pid);
-                row_vec &row_smem = row_at(s, i);
-                auto &sem = activations_arrived(s, i);
-                kittens::tma::expect_bytes(sem, sizeof(row_vec));
-                kittens::tma::load_async(row_smem, x_gl, {0, 0, inst.row_start + i, 0}, sem);
+                if (pos_in_page == 0) {
+                    int row_pid = s.lid_to_pid(page_idx);
+                    s.page_wait(row_pid);
+                }
+                kittens::arrive(activations_arrived(s, i));
             }
         } else if (lane >= num_used_pages && lane < Config::NUM_PAGES) {
             int pid = s.lid_to_pid(lane);
@@ -94,10 +93,17 @@ struct rms_pipeline {
         float *rms_scratch = static_cast<float *>(s.pages[weight_pid].ptr(RMS_SCRATCH_OFFSET));
         float eps = g.template gls<SCALAR_EPS>().raw_ptr[0];
 
+        auto &x_gl = g.template gls<SRC_X>();
+
         for (int i = 0; i < inst.num_rows; i++) {
             kittens::wait(activations_arrived(s, i), 0);
 
             row_vec &row_smem = row_at(s, i);
+
+            kittens::group<Config::NUM_CONSUMER_WARPS>::load_async(
+                row_smem, x_gl, {0, 0, inst.row_start + i, 0});
+            kittens::group<Config::NUM_CONSUMER_WARPS>::load_async_wait<0>(2);
+
             sv_slice_t &row_slice = reinterpret_cast<sv_slice_t *>(&row_smem)[kittens::warpid()];
 
             kittens::rv_fl<ELEMS_PER_WARP> act_vec;
