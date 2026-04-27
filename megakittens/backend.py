@@ -42,6 +42,9 @@ def megakittens_backend(
         with timed("Optimized DAG", verbose):
             dag = optimize_dag(dag)
 
+        with timed("Validated DAG", verbose):
+            dag.validate()
+
         if save_dag:
             with timed("Saved DAG as JSON", verbose):
                 dag_json = save_dag_as_png_as_json(dag, base_path)
