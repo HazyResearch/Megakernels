@@ -202,6 +202,9 @@ def load_hf_weights(
                 elif name.startswith("model.layers."):
                     parts = name.split(".")
                     layer = int(parts[2])
+                    if layer >= NUM_LAYERS:
+                        del t
+                        continue
                     suffix = ".".join(parts[3:])
                     if suffix == "input_layernorm.weight":
                         weights["attn_norm_weights"][layer].copy_(t)
@@ -364,7 +367,10 @@ if __name__ == "__main__":
     parser.add_argument("--max-new-tokens", type=int, default=64)
     parser.add_argument("--num-samples", type=int, default=3)
     parser.add_argument("--warmup", type=int, default=2)
+    parser.add_argument("--num-layers", type=int, default=NUM_LAYERS)
     args = parser.parse_args()
+
+    NUM_LAYERS = args.num_layers
 
     benchmark_tok_per_sec(
         prompt=args.prompt,

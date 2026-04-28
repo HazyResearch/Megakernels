@@ -13,6 +13,15 @@ from ...jit.cuda_utils import get_sm_count
 MAX_ROWS_PER_INST = 2 * (Dispatcher.NUM_PAGES - 1)  # page 0 holds weight; remaining pages hold 2 rows each
 
 
+def _rms70b_n_inst(B: int) -> int:
+    sm_count = get_sm_count()
+    if B <= sm_count:
+        return B
+    # Round up to a multiple of sm_count so rows_per_inst <= MAX_ROWS_PER_INST.
+    k = (B + MAX_ROWS_PER_INST * sm_count - 1) // (MAX_ROWS_PER_INST * sm_count)
+    return sm_count * k
+
+
 @torch.library.custom_op("megakittens::rms70b", mutates_args=())
 def rms70b_op(x: torch.Tensor, weight: torch.Tensor, eps: torch.Tensor) -> torch.Tensor:
     return torch.rms_norm(x, [x.shape[-1]], weight, eps.item())
@@ -106,7 +115,7 @@ class Rms70b(IType):
         src_ranges: Tuple[TensorRange, ...],
         dst_ranges: Tuple[TensorRange, ...],
     ) -> int:
-        return min(src_ranges[0][-2].size, get_sm_count())
+        return _rms70b_n_inst(src_ranges[0][-2].size)
 
     def block_indices(
         self,
@@ -120,8 +129,7 @@ class Rms70b(IType):
         # Weight base is (L, C); the layer dim lands at axis -2 after 4D padding.
         layer_idx = w_range[-2].start
         B = x_range[-2].size
-        sm_count = get_sm_count()
-        n_inst = min(B, sm_count)
+        n_inst = _rms70b_n_inst(B)
         return [
             (layer_idx, 0,
              x_range[-2].start + round(i * B / n_inst),
@@ -159,12 +167,10 @@ class Rms70b(IType):
             )
 
         B = src_ranges[0][-2].size
-        sm_count = get_sm_count()
-        n_inst = min(B, sm_count)
+        n_inst = _rms70b_n_inst(B)
         rows_per_inst = (B + n_inst - 1) // n_inst if n_inst > 0 else 0
         if rows_per_inst > MAX_ROWS_PER_INST:
             raise RuntimeError(
                 f"[MegaKittens] Rms70b batch size B={B} gives rows_per_inst={rows_per_inst}, "
-                f"exceeds MAX_ROWS_PER_INST={MAX_ROWS_PER_INST}. "
-                f"Max supported B for this layout is {MAX_ROWS_PER_INST * sm_count}."
+                f"exceeds MAX_ROWS_PER_INST={MAX_ROWS_PER_INST}."
             )
