@@ -44,6 +44,7 @@ class Rms70b(IType):
     test_atol = 1e-2
     test_rtol = 1e-2
     bench_cases = [
+        ((8192,), (512, 8192)),
         ((8192,), (1024, 8192)),
     ]
 

@@ -141,7 +141,8 @@ class QkvRopeAppend70b(IType):
     test_atol = 1e-1
     test_rtol = 1e-2
     bench_cases = [
-        ((1024,), (1024, 256, 127)),
+        ((512,), (512, 128, 127)),
+        ((1024,), (1024, 128, 127)),
     ]
 
     def __init__(self, batch_size: int = 0):

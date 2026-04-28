@@ -65,6 +65,7 @@ class OProjResidualHalfTmem70b(IType):
     test_atol = 1e-5
     test_rtol = 1e-5
     bench_cases = [
+        ((512, 8192, 8192), (512, 8192, 8192)),
         ((1024, 8192, 8192), (1024, 8192, 8192)),
     ]
 
