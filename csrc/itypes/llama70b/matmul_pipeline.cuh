@@ -12,7 +12,9 @@ template <typename Config, typename Globals,
           int M, int N, int K,
           int Mb, int Nb, int Kb, int EPI_PIPE_DEPTH,
           typename parsed_instruction, typename pipeline_specifics,
-          int SRC_A, int SRC_B>
+          int SRC_A, int SRC_B,
+          kittens::cache_policy POLICY_A = kittens::cache_policy::NORMAL,
+          kittens::cache_policy POLICY_B = kittens::cache_policy::EVICT_FIRST>
 struct matmul_pipeline {
     static_assert(Config::CLUSTER_SIZE == 2, "matmul_pipeline requires CLUSTER_SIZE == 2");
 
@@ -92,12 +94,12 @@ struct matmul_pipeline {
                 if (i < num_iters) {
                     #pragma unroll
                     for (int cid = 0; cid < NUM_CONSUMERS; cid++) {
-                        kittens::tma::cluster::load_async(
+                        kittens::tma::cluster::load_async<kittens::dim::ROW, POLICY_A>(
                             a_st(s, stage, cid), a_gl,
                             {0, 0, (2 * pi.m + cta_rank) * NUM_CONSUMERS + cid, i},
                             inputs_arrived(s, stage), (uint16_t)(1 << cta_rank), 0);
                     }
-                    kittens::tma::cluster::load_async(
+                    kittens::tma::cluster::load_async<kittens::dim::ROW, POLICY_B>(
                         b_st(s, stage), b_gl,
                         {0, pi.layer_idx, 2 * pi.n + cta_rank, i},
                         inputs_arrived(s, stage), (uint16_t)(1 << cta_rank), 0);

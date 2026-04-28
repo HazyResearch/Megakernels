@@ -78,7 +78,9 @@ struct GateSilu {
     using pipeline = matmul_pipeline<Config, Globals, M, N, K,
                                      Mb, Nb, Kb, EPI_PIPE_DEPTH,
                                      parsed_instruction, pipeline_specifics,
-                                     SRC_X, SRC_W>;
+                                     SRC_X, SRC_W,
+                                     kittens::cache_policy::EVICT_LAST,
+                                     kittens::cache_policy::EVICT_FIRST>;
 
     struct controller {
         __device__ __forceinline__ static int lid_release_order(const Globals &g, state_t<Config> &s, int query) {
