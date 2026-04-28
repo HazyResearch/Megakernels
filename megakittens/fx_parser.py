@@ -400,6 +400,46 @@ def parse_output_node(fx_node: torch.fx.Node, ctx: dict) -> Node:
     )
 
 
+def parse_transpose_node(fx_node: torch.fx.Node, ctx: dict) -> Node:
+    args = fx_node.args
+    if len(args) < 1:
+        raise RuntimeError(f"[MegaKittens] transpose op expects at least 1 arg for node '{fx_node.name}', got {len(args)}")
+    if not isinstance(args[0], torch.fx.Node):
+        raise RuntimeError(f"[MegaKittens] transpose op source is not an FX node for '{fx_node.name}'")
+    source_fx_node = args[0]
+    if source_fx_node.name not in ctx["fx_name_to_node"]:
+        raise RuntimeError(f"[MegaKittens] No source node '{source_fx_node.name}' for transpose op '{fx_node.name}'")
+    source_node = ctx["fx_name_to_node"][source_fx_node.name]
+    if len(source_node.out_tensors) != 1:
+        raise RuntimeError(
+            f"[MegaKittens] transpose op '{fx_node.name}' directly consumes multi-output node '{source_fx_node.name}'"
+            f" (expected getitem in between)"
+        )
+    src_meta = source_node.out_tensors[0]
+    ndim = len(src_meta.shape)
+    pad = TensorRange.NUM_DIMS - ndim
+    if fx_node.target == torch.ops.aten.t.default:
+        if ndim != 2:
+            raise RuntimeError(f"[MegaKittens] aten.t requires 2D tensor, got {ndim}D")
+        permutation = (1, 0)
+    elif fx_node.target == torch.ops.aten.permute.default:
+        permutation = tuple(args[1])
+    else:
+        raise RuntimeError(f"[MegaKittens] Unknown transpose op: {fx_node.target}")
+    transposed_shape = tuple(src_meta.shape[p] for p in permutation)
+    perm_4d = tuple(range(pad)) + tuple(pad + p for p in permutation)
+    out_tensors = (TensorMeta(dtype=src_meta.dtype, shape=transposed_shape, device=src_meta.device),)
+    return Node(
+        itype=f"transpose:{','.join(str(p) for p in perm_4d)}",
+        in_nodes=((source_node, 0),),
+        in_ranges=(source_node.out_tensors[0].full_range,),
+        in_tensors=(source_node.out_tensors[0],),
+        out_tensors=out_tensors,
+        out_ranges=tuple(tm.full_range for tm in out_tensors),
+        out_nodes=tuple([] for _ in out_tensors),
+    )
+
+
 def parse_view_node(fx_node: torch.fx.Node, ctx: dict) -> Node:
     args = fx_node.args
     if len(args) < 2:
@@ -459,6 +499,10 @@ def extract_dag_from_fx_graph(gm: torch.fx.GraphModule, example_inputs: List[Any
             node = parse_select_node(fx_node, ctx)
         elif fx_node.op == "call_function" and fx_node.target == torch.ops.aten.slice.Tensor:
             node = parse_slice_node(fx_node, ctx)
+        elif fx_node.op == "call_function" and fx_node.target in {
+            torch.ops.aten.t.default, torch.ops.aten.permute.default,
+        }:
+            node = parse_transpose_node(fx_node, ctx)
         elif fx_node.op == "call_function" and fx_node.target in {
             torch.ops.aten.view.default, torch.ops.aten.reshape.default, torch.ops.aten._unsafe_view.default,
         }:

@@ -92,7 +92,16 @@ def assign_tensors(
         if node.is_output:
             if len(output_tensor_indices) != 0:
                 raise RuntimeError("[MegaKittens] Expected 1 output node")
-            output_tensor_indices.extend(tensor_index[(in_node.id, "out", slot_idx)] for in_node, slot_idx in node.in_nodes)
+            for edge_idx, ((in_node, slot_idx), in_tensor) in enumerate(zip(node.in_nodes, node.in_tensors)):
+                src_tid = tensor_index[(in_node.id, "out", slot_idx)]
+                if in_tensor.shape != tensor_metas[src_tid].shape:  # cases where there is view op right before the output node
+                    storage = tensor_metas[src_tid].storage
+                    view_tid = len(tensor_metas)
+                    storage_users.setdefault(storage.id, []).append(view_tid)
+                    tensor_metas.append(TensorMeta(dtype=in_tensor.dtype, shape=in_tensor.shape, device=in_tensor.device, storage=storage))
+                    output_tensor_indices.append(view_tid)
+                else:
+                    output_tensor_indices.append(src_tid)
             continue  # no need to allocate tensors for the output node
 
         inplace_mapping = node.itype.inplace_mapping if node.itype is not None else None
