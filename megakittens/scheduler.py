@@ -217,6 +217,35 @@ def assign_barriers(
     inst_num_dst_input_barriers: Dict[Tuple[int, int], int] = {}
     inst_num_dst_reuse_barriers: Dict[Tuple[int, int], int] = {}
 
+    def box_to_linear_range(box, shape):
+        ndim = len(box)
+        shape = (1,) * (ndim - len(shape)) + tuple(shape)
+        strides = [0] * ndim
+        strides[-1] = 1
+        for j in range(ndim - 2, -1, -1):
+            strides[j] = strides[j + 1] * shape[j + 1]
+
+        full_from = ndim
+        for j in range(ndim - 1, -1, -1):
+            if box[j][0] == 0 and box[j][1] == shape[j]:
+                full_from = j
+            else:
+                break
+        if full_from == 0:
+            return [(0, strides[0] * shape[0])]
+
+        merge_dim = full_from - 1
+        lo_off = box[merge_dim][0] * strides[merge_dim]
+        hi_off = box[merge_dim][1] * strides[merge_dim]
+        if merge_dim == 0:
+            return [(lo_off, hi_off)]
+
+        ranges = []
+        for combo in itertools.product(*(range(box[j][0], box[j][1]) for j in range(merge_dim))):
+            base = sum(combo[j] * strides[j] for j in range(merge_dim))
+            ranges.append((base + lo_off, base + hi_off))
+        return ranges
+
     # Step 1. Collect per-instruction tile regions for each compute node
     node_regions: Dict[int, list] = {}  # node_id -> list of (src_regions, dst_regions) per instruction
     node_block_indices: Dict[int, list] = {}
@@ -235,42 +264,47 @@ def assign_barriers(
     for node in dag.nodes:
         if node.is_input or node.is_output:
             continue
-        for edge_idx, (in_node, slot_idx) in enumerate(node.in_nodes):  # Combined with the outer loop, O(num_edges)
+        for edge_idx, ((in_node, slot_idx), in_tensor) in enumerate(zip(node.in_nodes, node.in_tensors)):  # Combined with the outer loop, O(num_edges)
             if in_node.is_input or in_node.is_output:
                 continue
 
-            # Collect all regions produced/consumed by this edge
             producer_regions = [dst_regions[slot_idx] for _, dst_regions in node_regions[in_node.id]]
             consumer_regions = [src_regions[edge_idx] for src_regions, _ in node_regions[node.id]]
 
-            ndim = len(producer_regions[0][0])
-            unit_region: List[int] = []
-            for d in range(ndim):
-                all_sizes: set[int] = set()
-                for boxes in producer_regions:
-                    for box in boxes:
-                        all_sizes.add(box[d][1] - box[d][0])
-                for boxes in consumer_regions:
-                    for box in boxes:
-                        all_sizes.add(box[d][1] - box[d][0])
-                unit_region.append(reduce(gcd, all_sizes))
+            # Build per-instruction unit-region keys
+            if in_tensor.shape != in_node.out_tensors[slot_idx].shape:  # view op applied
+                p_shape = in_node.out_tensors[slot_idx].shape
+                c_shape = in_tensor.shape
+                p_linear = [sorted(r for box in boxes for r in box_to_linear_range(box, p_shape)) for boxes in producer_regions]
+                c_linear = [sorted(r for box in boxes for r in box_to_linear_range(box, c_shape)) for boxes in consumer_regions]
+                unit = reduce(gcd, {hi - lo for ranges in p_linear + c_linear for lo, hi in ranges})
+                p_unit_keys = [[u for lo, hi in linear_range for u in range(lo // unit, hi // unit)] for linear_range in p_linear]
+                c_unit_keys = [[u for lo, hi in linear_range for u in range(lo // unit, hi // unit)] for linear_range in c_linear]
+                c_cache_keys = [tuple(linear_range) for linear_range in c_linear]
+            else:
+                ndim = len(producer_regions[0][0])
+                unit_region: List[int] = []
+                for d in range(ndim):
+                    all_sizes = {box[d][1] - box[d][0] for boxes in producer_regions for box in boxes}
+                    all_sizes |= {box[d][1] - box[d][0] for boxes in consumer_regions for box in boxes}
+                    unit_region.append(reduce(gcd, all_sizes))
+                p_unit_keys = [[k for box in boxes for k in itertools.product(*(range(box[d][0] // unit_region[d], box[d][1] // unit_region[d]) for d in range(ndim)))] for boxes in producer_regions]
+                c_unit_keys = [[k for box in boxes for k in itertools.product(*(range(box[d][0] // unit_region[d], box[d][1] // unit_region[d]) for d in range(ndim)))] for boxes in consumer_regions]
+                c_cache_keys = [tuple(sorted(boxes)) for boxes in consumer_regions]
 
-            unit_region_index_to_p_local_index: Dict[tuple, List[int]] = defaultdict(list)
-            for p_local_index, boxes in enumerate(producer_regions):
-                for box in boxes:
-                    for unit_region_index in itertools.product(*[range(box[d][0] // unit_region[d], box[d][1] // unit_region[d]) for d in range(ndim)]):
-                        unit_region_index_to_p_local_index[unit_region_index].append(p_local_index)
+            unit_key_to_p_local_index: dict = defaultdict(list)
+            for p_local_index, keys in enumerate(p_unit_keys):
+                for key in keys:
+                    unit_key_to_p_local_index[key].append(p_local_index)
 
             c_region_cache: Dict[tuple, frozenset[int]] = {}
-            for c_local_index, boxes in enumerate(consumer_regions):
-                cache_key = tuple(sorted(boxes))
+            for c_local_index, (keys, cache_key) in enumerate(zip(c_unit_keys, c_cache_keys)):
                 if cache_key not in c_region_cache:
                     matching_p_local_indices: set[int] = set()
-                    for box in boxes:
-                        for unit_region_index in itertools.product(*[range(box[d][0] // unit_region[d], box[d][1] // unit_region[d]) for d in range(ndim)]):
-                            if unit_region_index not in unit_region_index_to_p_local_index:
-                                raise RuntimeError("[MegaKittens] Matching producer region not found.")
-                            matching_p_local_indices.update(unit_region_index_to_p_local_index[unit_region_index])
+                    for key in keys:
+                        if key not in unit_key_to_p_local_index:
+                            raise RuntimeError("[MegaKittens] Matching producer region not found.")
+                        matching_p_local_indices.update(unit_key_to_p_local_index[key])
                     c_region_cache[cache_key] = frozenset(matching_p_local_indices)
                 dependency_map.setdefault((in_node.id, c_region_cache[cache_key]), {}).setdefault(node.id, []).append(c_local_index)
 
