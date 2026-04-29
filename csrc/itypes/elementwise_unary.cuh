@@ -4,9 +4,9 @@
 
 namespace megakittens {
 
-enum class UnaryOp { IDENTITY, RELU, ABS, EXP, EXP2, LOG, LOG2, NEG, SQRT, RSQRT };
+enum class UnaryOp { IDENTITY, RELU, ABS, EXP, EXP2, LOG, LOG2, NEG, SQRT, RSQRT, ADD_SCALAR, MUL_SCALAR, SUB_SCALAR, DIV_SCALAR, MAX_SCALAR, MIN_SCALAR };
 
-template <UnaryOp op, typename Group, kittens::ducks::rt::all RT>
+template <UnaryOp op, unsigned int ScalarBits, typename ElemType, typename Group, kittens::ducks::rt::all RT>
 __device__ static __forceinline__ void apply_unary_op(RT &reg) {
     if      constexpr (op == UnaryOp::IDENTITY) {}
     else if constexpr (op == UnaryOp::RELU)  Group::relu(reg, reg);
@@ -18,10 +18,16 @@ __device__ static __forceinline__ void apply_unary_op(RT &reg) {
     else if constexpr (op == UnaryOp::NEG)   Group::neg(reg, reg);
     else if constexpr (op == UnaryOp::SQRT)  Group::sqrt(reg, reg);
     else if constexpr (op == UnaryOp::RSQRT) Group::rsqrt(reg, reg);
+    else if constexpr (op == UnaryOp::ADD_SCALAR) Group::add(reg, reg, std::bit_cast<ElemType>(sizeof(ElemType) == 2 ? static_cast<uint16_t>(ScalarBits) : ScalarBits););
+    else if constexpr (op == UnaryOp::MUL_SCALAR) Group::mul(reg, reg, std::bit_cast<ElemType>(sizeof(ElemType) == 2 ? static_cast<uint16_t>(ScalarBits) : ScalarBits););
+    else if constexpr (op == UnaryOp::SUB_SCALAR) Group::sub(reg, reg, std::bit_cast<ElemType>(sizeof(ElemType) == 2 ? static_cast<uint16_t>(ScalarBits) : ScalarBits););
+    else if constexpr (op == UnaryOp::DIV_SCALAR) Group::div(reg, reg, std::bit_cast<ElemType>(sizeof(ElemType) == 2 ? static_cast<uint16_t>(ScalarBits) : ScalarBits););
+    else if constexpr (op == UnaryOp::MAX_SCALAR) Group::max(reg, reg, std::bit_cast<ElemType>(sizeof(ElemType) == 2 ? static_cast<uint16_t>(ScalarBits) : ScalarBits););
+    else if constexpr (op == UnaryOp::MIN_SCALAR) Group::min(reg, reg, std::bit_cast<ElemType>(sizeof(ElemType) == 2 ? static_cast<uint16_t>(ScalarBits) : ScalarBits););
     else static_assert(false, "Unsupported UnaryOp");
 }
 
-template <typename Config, typename Globals, typename ElemType, int SRC, int DST, UnaryOp... Ops>
+template <typename Config, typename Globals, typename ElemType, int SRC, int DST, unsigned int ScalarBits, UnaryOp... Ops>
 struct ElementwiseUnary {
     static constexpr int TILE_ROWS = 128;
     static constexpr int TILE_COLS = Config::PAGE_SIZE / (TILE_ROWS * sizeof(ElemType));
@@ -104,7 +110,7 @@ struct ElementwiseUnary {
 
                 reg_tile_t src_reg;
                 consumer_group::load(src_reg, src_smem);
-                (apply_unary_op<Ops, consumer_group>(src_reg), ...);
+                (apply_unary_op<Ops, ScalarBits, ElemType, consumer_group>(src_reg), ...);
                 consumer_group::store(src_smem, src_reg);
                 consumer_group::sync(1);
 

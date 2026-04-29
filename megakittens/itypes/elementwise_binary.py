@@ -3,6 +3,7 @@ from typing import List, Tuple
 
 import torch
 
+from .elementwise_unary import ElementwiseUnary, _detect_dtype as _unary_detect_dtype
 from ..dispatcher import Dispatcher
 from ..schema.dtype import DType
 from ..schema.itype import IType
@@ -43,22 +44,37 @@ def _resolve_from_custom_op(args, kwargs):
     ops_str = args[1] if len(args) > 1 else kwargs.get("ops", "add")
     return ElementwiseBinary(ops=tuple(ops_str.split(",")))
 
+def _scalar_unary(op_name, args):
+    return ElementwiseUnary(ops=(op_name,), dtype=_unary_detect_dtype(args), scalar_val=float(args[1]))
+
 def _resolve_add(args, kwargs):
+    if len(args) == 2 and isinstance(args[1], (int, float)) and not isinstance(args[1], bool):
+        return _scalar_unary("add_scalar", args)
     return ElementwiseBinary(ops=("add",), dtype=_detect_dtype(args))
 
 def _resolve_sub(args, kwargs):
+    if len(args) == 2 and isinstance(args[1], (int, float)) and not isinstance(args[1], bool):
+        return _scalar_unary("sub_scalar", args)
     return ElementwiseBinary(ops=("sub",), dtype=_detect_dtype(args))
 
 def _resolve_mul(args, kwargs):
+    if len(args) == 2 and isinstance(args[1], (int, float)) and not isinstance(args[1], bool):
+        return _scalar_unary("mul_scalar", args)
     return ElementwiseBinary(ops=("mul",), dtype=_detect_dtype(args))
 
 def _resolve_div(args, kwargs):
+    if len(args) == 2 and isinstance(args[1], (int, float)) and not isinstance(args[1], bool):
+        return _scalar_unary("div_scalar", args)
     return ElementwiseBinary(ops=("div",), dtype=_detect_dtype(args))
 
 def _resolve_max(args, kwargs):
+    if len(args) == 2 and isinstance(args[1], (int, float)) and not isinstance(args[1], bool):
+        return _scalar_unary("max_scalar", args)
     return ElementwiseBinary(ops=("max",), dtype=_detect_dtype(args))
 
 def _resolve_min(args, kwargs):
+    if len(args) == 2 and isinstance(args[1], (int, float)) and not isinstance(args[1], bool):
+        return _scalar_unary("min_scalar", args)
     return ElementwiseBinary(ops=("min",), dtype=_detect_dtype(args))
 
 

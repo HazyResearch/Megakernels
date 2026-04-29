@@ -1,3 +1,4 @@
+import struct
 from typing import List, Tuple
 
 import torch
@@ -69,16 +70,22 @@ class ElementwiseUnary(IType):
     MAX_TILES_PER_INST = 2
 
     UNARY_OPS = {
-        "identity": ("UnaryOp::IDENTITY", torch.clone),
-        "relu":     ("UnaryOp::RELU",     torch.relu),
-        "abs":      ("UnaryOp::ABS",      torch.abs),
-        "exp":      ("UnaryOp::EXP",      torch.exp),
-        "exp2":     ("UnaryOp::EXP2",     torch.exp2),
-        "log":      ("UnaryOp::LOG",      torch.log),
-        "log2":     ("UnaryOp::LOG2",     torch.log2),
-        "neg":      ("UnaryOp::NEG",      torch.neg),
-        "sqrt":     ("UnaryOp::SQRT",     torch.sqrt),
-        "rsqrt":    ("UnaryOp::RSQRT",    torch.rsqrt),
+        "identity":   ("UnaryOp::IDENTITY",   torch.clone),
+        "relu":       ("UnaryOp::RELU",       torch.relu),
+        "abs":        ("UnaryOp::ABS",        torch.abs),
+        "exp":        ("UnaryOp::EXP",        torch.exp),
+        "exp2":       ("UnaryOp::EXP2",       torch.exp2),
+        "log":        ("UnaryOp::LOG",        torch.log),
+        "log2":       ("UnaryOp::LOG2",       torch.log2),
+        "neg":        ("UnaryOp::NEG",        torch.neg),
+        "sqrt":       ("UnaryOp::SQRT",       torch.sqrt),
+        "rsqrt":      ("UnaryOp::RSQRT",      torch.rsqrt),
+        "add_scalar": ("UnaryOp::ADD_SCALAR", None),
+        "mul_scalar": ("UnaryOp::MUL_SCALAR", None),
+        "sub_scalar": ("UnaryOp::SUB_SCALAR", None),
+        "div_scalar": ("UnaryOp::DIV_SCALAR", None),
+        "max_scalar": ("UnaryOp::MAX_SCALAR", None),
+        "min_scalar": ("UnaryOp::MIN_SCALAR", None),
     }
 
     torch_functions_map = {
@@ -126,9 +133,10 @@ class ElementwiseUnary(IType):
     test_rtol = 1e-2
     bench_cases = [((("relu",),), (4096, 4096)), ((("relu",),), (131072, 4096)), ((("relu",),), (4096, 131072)), ((("relu",),), (16384, 16384)), ((("relu",),), (131072, 131072)),]
 
-    def __init__(self, ops: tuple[str, ...] = ("relu",), dtype: DType = DType.bf16):
+    def __init__(self, ops: tuple[str, ...] = ("relu",), dtype: DType = DType.bf16, scalar_val: float | None = None):
         self.ops = ops
         self.dtype = dtype
+        self.scalar_val = scalar_val
 
     @property
     def tile_cols(self) -> int:
@@ -147,7 +155,17 @@ class ElementwiseUnary(IType):
     @property
     def cpp_template(self) -> str:
         ops_str = ", ".join(self.UNARY_OPS[op][0] for op in self.ops)
-        return f"ElementwiseUnary<MKConfig, MKGlobals, {self.dtype.cpp_dtype}, {{tensors}}, {ops_str}>"
+        scalar_bits = 0
+        if self.scalar_val is not None:
+            if self.dtype == DType.fp32:
+                scalar_bits = struct.unpack('I', struct.pack('f', self.scalar_val))[0]
+            elif self.dtype == DType.bf16:
+                scalar_bits = torch.tensor(self.scalar_val, dtype=torch.bfloat16, device='cpu').view(torch.int16).item() & 0xFFFF
+            elif self.dtype == DType.half:
+                scalar_bits = struct.unpack('H', struct.pack('e', self.scalar_val))[0]
+            else:
+                raise RuntimeError(f"[MegaKittens] Unsupported dtype for scalar op: {self.dtype}")
+        return f"ElementwiseUnary<MKConfig, MKGlobals, {self.dtype.cpp_dtype}, {{tensors}}, {scalar_bits}u, {ops_str}>"
 
     @property
     def inputs(self) -> list[TensorSpec]:
