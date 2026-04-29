@@ -1,3 +1,5 @@
+// TODO: very naive version. Must optimize
+
 #pragma once
 
 #include "kittens.cuh"
