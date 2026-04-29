@@ -67,11 +67,13 @@ struct Reduce {
                     acc += static_cast<float>(src_gl[{src_batch, src_depth, src_row_start + row_offset, src_col_start + col}]);
                 }
 
+                ElemType result;
                 if constexpr (Op == ReduceOp::MEAN) {
-                    dst_gl[{dst_batch, dst_depth, dst_row, dst_col_start + row_offset}] = static_cast<ElemType>(acc / static_cast<float>(num_cols));
+                    result = static_cast<ElemType>(acc / static_cast<float>(num_cols));
                 } else {
                     static_assert(Op == ReduceOp::MEAN, "Unsupported ReduceOp");
                 }
+                dst_gl[{dst_batch, dst_depth, dst_row, dst_col_start + row_offset}] = result;
             }
 
             __threadfence();

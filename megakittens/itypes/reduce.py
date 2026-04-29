@@ -34,6 +34,13 @@ def _resolve_from_custom_op(args, kwargs):
     return Reduce(op=op, dtype=_detect_dtype(args))
 
 
+def _resolve_aten_mean_dim(args, kwargs):
+    dims = args[1] if len(args) > 1 else kwargs.get("dim", [-1])
+    if dims != [-1] and dims != (-1,):
+        raise RuntimeError(f"[MegaKittens] Reduce: only dim=[-1] is supported, got {dims}")
+    return Reduce(op="mean", dtype=_detect_dtype(args))
+
+
 class Reduce(IType):
     TILE_ROWS = 128
     REDUCE_GRANULARITY = 16
@@ -45,6 +52,7 @@ class Reduce(IType):
     torch_functions_map = {
         torch.ops.megakittens.reduce: _resolve_from_custom_op,
         torch.ops.megakittens.reduce.default: _resolve_from_custom_op,
+        torch.ops.aten.mean.dim: _resolve_aten_mean_dim,
     }
 
     test_cases = [
@@ -110,10 +118,11 @@ class Reduce(IType):
         for b in range(src_range[0].size):
             for d in range(src_range[1].size):
                 for r in range(0, src_range[2].size, self.TILE_ROWS):
+                    num_rows = min(self.TILE_ROWS, src_range[2].size - r)
                     indices.append((
                         src_range[0].start + b, src_range[1].start + d, src_range[2].start + r, src_range[3].start,
                         dst_range[0].start, dst_range[1].start + b, dst_range[2].start + d, dst_range[3].start + r,
-                        self.TILE_ROWS, src_range[3].size,
+                        num_rows, src_range[3].size,
                     ))
         return indices
 
@@ -125,7 +134,7 @@ class Reduce(IType):
         dst_ranges: Tuple[TensorRange, ...],
     ) -> int:
         src_range = src_ranges[0]
-        return src_range[0].size * src_range[1].size * (src_range[2].size // self.TILE_ROWS)
+        return src_range[0].size * src_range[1].size * ((src_range[2].size + self.TILE_ROWS - 1) // self.TILE_ROWS)
 
     def access_regions(
         self,
