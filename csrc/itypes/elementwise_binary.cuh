@@ -4,17 +4,7 @@
 
 namespace megakittens {
 
-enum class BinaryOp { ADD, SUB, MUL, DIV, MAX, MIN, ATAN2 };
-
-template <BinaryOp op, typename T>
-__device__ static __forceinline__ void apply_binary(T &dst, const T &a, const T &b) {
-    if constexpr (op == BinaryOp::ATAN2) {
-        dst = __floats2bfloat162_rn(
-            atan2f(__bfloat162float(a.x), __bfloat162float(b.x)), 
-            atan2f(__bfloat162float(a.y), __bfloat162float(b.y))
-        );
-    }
-}
+enum class BinaryOp { ADD, SUB, MUL, DIV, MAX, MIN };
 
 template <BinaryOp op, typename Group, kittens::ducks::rt::all RT>
 __device__ static __forceinline__ void apply_binary_op(RT &dst, const RT &a, const RT &b) {
@@ -24,15 +14,7 @@ __device__ static __forceinline__ void apply_binary_op(RT &dst, const RT &a, con
     else if constexpr (op == BinaryOp::DIV) Group::div(dst, a, b);
     else if constexpr (op == BinaryOp::MAX) Group::max(dst, a, b);
     else if constexpr (op == BinaryOp::MIN) Group::min(dst, a, b);
-    else {
-        #pragma unroll
-        for (int i = 0; i < RT::height; i++)
-            #pragma unroll
-            for (int j = 0; j < RT::width; j++)
-                #pragma unroll
-                for (int k = 0; k < RT::packed_per_tile; k++)
-                    apply_binary<op>(dst.tiles[i][j].data[k], a.tiles[i][j].data[k], b.tiles[i][j].data[k]);
-    }
+    else static_assert(false, "Unsupported BinaryOp");
 }
 
 // Get I-th value from an int parameter pack
@@ -59,14 +41,16 @@ struct BinaryOps {
     }
 };
 
-// Example: ElementwiseBinary<Config, Globals, BinaryOps<Op0, Op1, ...>, SRC0, SRC1, ..., SRCN, DST>
-template <typename Config, typename Globals, typename Ops, int... TensorIndices>
+// Example: ElementwiseBinary<Config, Globals, ElemType, BinaryOps<Op0, Op1, ...>, SRC0, SRC1, ..., SRCN, DST>
+template <typename Config, typename Globals, typename ElemType, typename Ops, int... TensorIndices>
 struct ElementwiseBinary {
     static constexpr int NUM_OPS = Ops::NUM_OPS;
     static constexpr int NUM_INPUTS = NUM_OPS + 1;
     static_assert(NUM_OPS >= 1);
     static_assert(sizeof...(TensorIndices) == NUM_INPUTS + 1, "Need N + 1 tensor indices for N ops (N inputs + 1 output)");
     static constexpr int DST = last_int<TensorIndices...>::value;
+    static constexpr int TILE_ROWS = 128;
+    static constexpr int TILE_COLS = Config::PAGE_SIZE / (TILE_ROWS * sizeof(ElemType));
     static constexpr int MAX_TILES_PER_INST = 2;
     static constexpr int TILES_PER_INST = (Config::NUM_PAGES / NUM_INPUTS < MAX_TILES_PER_INST) ? Config::NUM_PAGES / NUM_INPUTS : MAX_TILES_PER_INST;
     static_assert(TILES_PER_INST >= 1, "Not enough pages for this many inputs");
@@ -74,7 +58,7 @@ struct ElementwiseBinary {
     static constexpr int NUM_TILES_IDX = (NUM_INPUTS + 1) * 4;
     static_assert(NUM_TILES_IDX < 16, "Instruction indices slot overflow for this NUM_INPUTS");
 
-    using tile_t = kittens::st<kittens::bf16, 128, 128>;
+    using tile_t = kittens::st<ElemType, TILE_ROWS, TILE_COLS>;
 
     __device__ static __forceinline__ kittens::semaphore &inputs_arrived(state_t<Config> &s, int i) { return s.semaphores()[i]; }
 
@@ -150,7 +134,7 @@ struct ElementwiseBinary {
 
     struct consumer {
         using consumer_group = kittens::group<Config::NUM_CONSUMER_WARPS>;
-        using reg_tile_t = kittens::rt_bf<16, 128>;
+        using reg_tile_t = kittens::rt<ElemType, TILE_ROWS / Config::NUM_CONSUMER_WARPS, TILE_COLS>;
 
         template <int... Is>
         __device__ __forceinline__ static void apply_all_binary_ops(reg_tile_t *reg_tiles, std::integer_sequence<int, Is...>) {

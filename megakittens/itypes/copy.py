@@ -10,13 +10,13 @@ from ..jit.pykittens import st
 
 
 @torch.library.custom_op("megakittens::copy", mutates_args=())
-def copy_op(x: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
-    return x.to(dtype)
+def copy_op(x: torch.Tensor, dtype: str) -> torch.Tensor:
+    return x.to(DType(dtype).torch_dtype)
 
 
 @copy_op.register_fake
-def _copy_fake(x: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
-    return torch.empty_like(x, dtype=dtype)
+def _copy_fake(x: torch.Tensor, dtype: str) -> torch.Tensor:
+    return torch.empty_like(x, dtype=DType(dtype).torch_dtype)
 
 
 def _resolve_from_custom_op(args, kwargs):
@@ -47,14 +47,16 @@ class Copy(IType):
     }
 
     test_cases = [
-        ((DType.bf16, DType.fp32), shape)
-        for shape in [(128, 64), (512, 256), (2, 128, 128), (2, 3, 128, 256)]
-    ] + [
-        ((DType.fp32, DType.bf16), shape)
+        ((src, dst), shape)
+        for src, dst in [(DType.bf16, DType.fp32), (DType.fp32, DType.bf16), (DType.bf16, DType.bf16), (DType.fp32, DType.fp32)]
         for shape in [(128, 64), (512, 256), (2, 128, 128), (2, 3, 128, 256)]
     ]
     test_atol = 0.0
     test_rtol = 0.0
+    bench_cases = [
+        ((DType.bf16, DType.fp32), (4096, 4096)),
+        ((DType.fp32, DType.bf16), (4096, 4096)),
+    ]
 
     def __init__(self, src_dtype: DType = DType.bf16, dst_dtype: DType = DType.fp32):
         self.src_dtype = src_dtype
@@ -74,7 +76,7 @@ class Copy(IType):
 
     def test_args(self, case: tuple) -> tuple:
         x = torch.randn(*case, dtype=self.src_dtype.torch_dtype, device="cuda")
-        return (x, self.dst_dtype.torch_dtype)
+        return (x, self.dst_dtype.value)
 
     @property
     def cpp_template(self) -> str:
