@@ -440,6 +440,48 @@ def parse_transpose_node(fx_node: torch.fx.Node, ctx: dict) -> Node:
     )
 
 
+def parse_reduce_node(fx_node: torch.fx.Node, ctx: dict) -> list[Node]:
+    """Generic handler for reduction ops. When keepdim=True, decomposes into reduce + view."""
+    args, kwargs = fx_node.args, fx_node.kwargs
+    keepdim = args[2] if len(args) > 2 else kwargs.get("keepdim", False)
+
+    reduce_node = resolve_and_build_call_node(
+        fx_node, ctx, fx_node.target, args, kwargs, list(fx_node.all_input_nodes),
+    )
+
+    if not keepdim:
+        return [reduce_node]
+
+    else:
+        keepdim_tms = extract_fx_node_outputs(fx_node)
+        if len(keepdim_tms) != 1:
+            raise RuntimeError(
+                f"[MegaKittens] Reduce with keepdim expects 1 output, got {len(keepdim_tms)} for node '{fx_node.name}'"
+            )
+        dims = args[1] if len(args) > 1 else kwargs.get("dim", [-1])
+        ndim = len(keepdim_tms[0].shape)
+        reduced_dims = {d % ndim for d in (dims if isinstance(dims, (list, tuple)) else [dims])}  # convert negative indices
+        no_keepdim_shape = tuple(s for i, s in enumerate(keepdim_tms[0].shape) if i not in reduced_dims)
+        reduce_meta = TensorMeta(dtype=keepdim_tms[0].dtype, shape=no_keepdim_shape, device=keepdim_tms[0].device)
+
+        # Modify reduce node to have no keepdim output
+        reduce_node.out_tensors = (reduce_meta,)
+        reduce_node.out_ranges = (reduce_meta.full_range,)
+        reduce_node.out_nodes = ([],)
+
+        view_node = Node(
+            itype="view",
+            in_nodes=((reduce_node, 0),),
+            in_ranges=(reduce_meta.full_range,),
+            in_tensors=(reduce_meta,),
+            out_tensors=keepdim_tms,
+            out_ranges=tuple(tm.full_range for tm in keepdim_tms),
+            out_nodes=tuple([] for _ in keepdim_tms),
+        )
+
+        return [reduce_node, view_node]
+
+
 def parse_view_node(fx_node: torch.fx.Node, ctx: dict) -> Node:
     args = fx_node.args
     if len(args) < 2:
@@ -507,6 +549,13 @@ def extract_dag_from_fx_graph(gm: torch.fx.GraphModule, example_inputs: List[Any
             torch.ops.aten.view.default, torch.ops.aten.reshape.default, torch.ops.aten._unsafe_view.default,
         }:
             node = parse_view_node(fx_node, ctx)
+        elif fx_node.op == "call_function" and fx_node.target in {
+            torch.ops.aten.mean.dim, torch.ops.aten.sum.dim_IntList, torch.ops.aten.amax.default, torch.ops.aten.amin.default,
+        }:
+            nodes = parse_reduce_node(fx_node, ctx)
+            for n in nodes[:-1]:
+                dag_nodes.append(n)
+            node = nodes[-1]  # to make `dag_nodes.append(node)` below work
         elif fx_node.op == "call_function" and fx_node.target is auto_functionalized_v2:
             node = parse_auto_functionalized_node(fx_node, ctx)
         elif fx_node.op in {"call_function", "call_method"}:
