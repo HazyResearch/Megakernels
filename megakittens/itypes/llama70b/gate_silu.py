@@ -9,10 +9,26 @@ from ...jit.pykittens import st
 
 
 Mb = 256
-Nb = 256
 Kb = 64
-EPI_PIPE_DEPTH = 8
+DEFAULT_NB = 256
+COLS_PER_CHUNK = 32
+TUNED_NB = 224
 NUM_CONSUMERS = 2
+
+
+def _default_nb(m: int, n: int) -> int:
+    return TUNED_NB if m == 512 and n == 28672 else DEFAULT_NB
+
+
+def _resolve_nb(m: int, n: int, nb: int = 0) -> int:
+    nb = int(nb)
+    if nb == 0:
+        nb = _default_nb(m, n)
+    if nb <= 0 or nb > 256 or nb % 32 != 0:
+        raise RuntimeError(f"[MegaKittens] GateSilu70b expected nb in 32..256 step 32, got {nb}")
+    if n and n % nb != 0:
+        raise RuntimeError(f"[MegaKittens] GateSilu70b requires N divisible by nb, got N={n}, nb={nb}")
+    return nb
 
 
 @torch.library.custom_op("megakittens::gate_silu70b", mutates_args=())
@@ -45,15 +61,12 @@ def _resolve_gate_silu70b(args, kwargs):
 class GateSilu70b(IType):
 
     Mb = Mb
-    Nb = Nb
     Kb = Kb
-    EPI_PIPE_DEPTH = EPI_PIPE_DEPTH
+    COLS_PER_CHUNK = COLS_PER_CHUNK
     NUM_CONSUMERS = NUM_CONSUMERS
     M_INST = NUM_CONSUMERS * Mb
 
     A_TMA = st(dtype=DType.bf16, rows=Mb // 2, cols=Kb)
-    B_TMA = st(dtype=DType.bf16, rows=Nb // 2, cols=Kb)
-    D_TMA = st(dtype=DType.bf16, rows=Mb // 2, cols=Nb // EPI_PIPE_DEPTH)
 
     torch_functions_map = {
         torch.ops.megakittens.gate_silu70b: _resolve_gate_silu70b,
@@ -79,10 +92,27 @@ class GateSilu70b(IType):
     def test_fn(x, gate_weights):
         return torch.ops.megakittens.gate_silu70b(x, gate_weights)
 
-    def __init__(self, m: int = 0, n: int = 0, k: int = 0):
+    def __init__(self, m: int = 0, n: int = 0, k: int = 0, nb: int = 0):
         self.m = m
         self.n = n
         self.k = k
+        self.nb = _resolve_nb(m, n, nb)
+
+    @property
+    def Nb(self) -> int:
+        return self.nb
+
+    @property
+    def EPI_PIPE_DEPTH(self) -> int:
+        return self.nb // self.COLS_PER_CHUNK
+
+    @property
+    def B_TMA(self):
+        return st(dtype=DType.bf16, rows=self.Nb // 2, cols=self.Kb)
+
+    @property
+    def D_TMA(self):
+        return st(dtype=DType.bf16, rows=self.Mb // 2, cols=self.COLS_PER_CHUNK)
 
     @property
     def cpp_template(self) -> str:
