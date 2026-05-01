@@ -186,16 +186,19 @@ def assign_barriers(
 
     # Step 1. Collect per-instruction tile regions for each compute node
     node_regions: Dict[int, list] = {}  # node_id -> list of (src_regions, dst_regions) per instruction
-    node_block_indices: Dict[int, list] = {}
+    node_block_entries: Dict[int, list] = {}
     for node in dag.nodes:
         if node.is_input or node.is_output:
             continue
         src_metas = tuple(in_node.out_tensors[slot_idx] for in_node, slot_idx in node.in_nodes)
         block_indices = node.itype.block_indices(src_metas, node.out_tensors, src_ranges=node.in_ranges, dst_ranges=node.out_ranges)
-        node_block_indices[node.id] = block_indices
-        node_regions[node.id] = [
-            node.itype.access_regions(block_index, src_metas, node.out_tensors)
+        node_block_entries[node.id] = [
+            (node.itype.block_itype(block_index, src_metas, node.out_tensors), block_index)
             for block_index in block_indices
+        ]
+        node_regions[node.id] = [
+            itype.access_regions(block_index, src_metas, node.out_tensors)
+            for itype, block_index in node_block_entries[node.id]
         ]
 
     # Step 2. Input dependency barriers
@@ -285,14 +288,14 @@ def assign_barriers(
                 f"[MegaKittens] Instruction {key} has {len(barriers)} src barriers (max {Instruction.MAX_SRC_BARRIERS})"
             )
 
-    return node_block_indices, inst_dst_barriers, inst_src_barriers, inst_num_src_input_barriers, inst_num_src_reuse_barriers, inst_num_dst_input_barriers, inst_num_dst_reuse_barriers, barrier_counter
+    return node_block_entries, inst_dst_barriers, inst_src_barriers, inst_num_src_input_barriers, inst_num_src_reuse_barriers, inst_num_dst_input_barriers, inst_num_dst_reuse_barriers, barrier_counter
 
 
 def generate_instructions(
     dag: DAG,
     cluster_size: int,
     tensor_index: Dict[Tuple[int, int], int],
-    node_block_indices: Dict[int, list],
+    node_block_entries: Dict[int, list],
     inst_dst_barriers: Dict[Tuple[int, int], List[int]],
     inst_src_barriers: Dict[Tuple[int, int], List[Tuple[int, int]]],
     inst_num_src_input_barriers: Dict[Tuple[int, int], int],
@@ -305,7 +308,7 @@ def generate_instructions(
     Args:
         dag: validated DAG of input, and output, and compute nodes.
         tensor_index: Dict[Tuple[int, int], int], (node_id, output_slot) -> index into tensor_metas.
-        node_block_indices: Dict[int, list], node_id -> list of per-instruction tile coordinate tuples from block_indices().
+        node_block_entries: Dict[int, list], node_id -> list of (itype, block_index) entries.
         inst_dst_barriers: Dict[Tuple[int, int], List[int]], (node_id, local_inst_idx) -> barrier IDs this instruction arrives on after completion.
         inst_src_barriers: Dict[Tuple[int, int], List[Tuple[int, int]]], (node_id, local_inst_idx) -> (barrier_id, target_count) pairs to wait on before starting.
         inst_num_src_input_barriers: Dict[Tuple[int, int], int], (node_id, local_inst_idx) -> how many of src_barriers are data dependency barriers.
@@ -340,18 +343,17 @@ def generate_instructions(
 
         src_metas = tuple(in_node.out_tensors[slot_idx] for in_node, slot_idx in node.in_nodes)
         dst_metas = node.out_tensors
-        node.itype.validate(src_metas, dst_metas, src_ranges=node.in_ranges, dst_ranges=node.out_ranges)
 
-        key = (node.itype, src_tensors, dst_tensors)
-        if key not in icode_map:
-            icode = icode_counter
-            icode_counter += 1
-            icode_map[key] = icode
-            instruction_metas.append(InstructionMeta(icode=icode, itype=node.itype, src_tensors=src_tensors, dst_tensors=dst_tensors))
-        else:
-            icode = icode_map[key]
-
-        for local_idx, block_index in enumerate(node_block_indices[node.id]):
+        for local_idx, (itype, block_index) in enumerate(node_block_entries[node.id]):
+            key = (itype, src_tensors, dst_tensors)
+            if key not in icode_map:
+                itype.validate(src_metas, dst_metas, src_ranges=node.in_ranges, dst_ranges=node.out_ranges)
+                icode = icode_counter
+                icode_counter += 1
+                icode_map[key] = icode
+                instruction_metas.append(InstructionMeta(icode=icode, itype=itype, src_tensors=src_tensors, dst_tensors=dst_tensors))
+            else:
+                icode = icode_map[key]
             src_bar_list = inst_src_barriers.get((node.id, local_idx), [])
             dst_bariers = inst_dst_barriers.get((node.id, local_idx), [])
             num_src_input_barriers = inst_num_src_input_barriers.get((node.id, local_idx), 0)
@@ -404,9 +406,9 @@ def schedule(
     with timed("[Scheduler] Assigned tensors", verbose):
         tensor_metas, tensor_index, input_tensor_indices, output_tensor_indices, release_barriers = assign_tensors(dag, cluster_size, node_inst_count, node_inst_offset)
     with timed("[Scheduler] Assigned barriers", verbose):
-        node_block_indices, inst_dst_barriers, inst_src_barriers, inst_num_src_input_barriers, inst_num_src_reuse_barriers, inst_num_dst_input_barriers, inst_num_dst_reuse_barriers, barrier_counter = assign_barriers(dag, node_inst_count, release_barriers)
+        node_block_entries, inst_dst_barriers, inst_src_barriers, inst_num_src_input_barriers, inst_num_src_reuse_barriers, inst_num_dst_input_barriers, inst_num_dst_reuse_barriers, barrier_counter = assign_barriers(dag, node_inst_count, release_barriers)
     with timed("[Scheduler] Generated instructions", verbose):
-        instruction_metas, instructions = generate_instructions(dag, cluster_size, tensor_index, node_block_indices, inst_dst_barriers, inst_src_barriers, inst_num_src_input_barriers, inst_num_src_reuse_barriers, inst_num_dst_input_barriers, inst_num_dst_reuse_barriers)
+        instruction_metas, instructions = generate_instructions(dag, cluster_size, tensor_index, node_block_entries, inst_dst_barriers, inst_src_barriers, inst_num_src_input_barriers, inst_num_src_reuse_barriers, inst_num_dst_input_barriers, inst_num_dst_reuse_barriers)
 
     return (
         instruction_metas,

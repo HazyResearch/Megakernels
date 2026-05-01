@@ -115,6 +115,14 @@ class IType(ABC):
         """Number of instructions this node generates. Override if computable without building the full list."""
         return len(self.block_indices(src_metas, dst_metas, src_ranges, dst_ranges))
 
+    def block_itype(
+        self,
+        block_index: Tuple[int, ...],
+        src_metas: Tuple[TensorMeta, ...],
+        dst_metas: Tuple[TensorMeta, ...],
+    ) -> "IType":
+        return self
+
     def validate(
         self,
         src_metas: Tuple[TensorMeta, ...],

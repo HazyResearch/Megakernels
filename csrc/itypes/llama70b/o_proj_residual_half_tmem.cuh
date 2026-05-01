@@ -12,6 +12,13 @@ template <typename Config, typename Globals,
           int Mb, int Nb, int Kb, int EPI_PIPE_DEPTH,
           int SRC_HIDDEN, int SRC_ATTN_OUT, int SRC_O_WEIGHTS, int DST_HIDDEN>
 struct OProjResidualHalfTmem {
+    static constexpr int COLS_PER_CHUNK = Nb / EPI_PIPE_DEPTH;
+    static_assert(Nb > 0, "Nb must be positive.");
+    static_assert(Nb <= 256, "OProjResidualHalfTmem70b valid Nb values are <= 256.");
+    static_assert(Nb % 32 == 0, "OProjResidualHalfTmem70b requires Nb divisible by 32.");
+    static_assert(Nb % EPI_PIPE_DEPTH == 0, "Nb must divide evenly into epilogue chunks.");
+    static_assert(COLS_PER_CHUNK == 32, "OProjResidualHalfTmem70b epilogue assumes 32-column chunks.");
+
     struct parsed_instruction {
         int layer_idx, m, n;
         __device__ inline parsed_instruction(const instruction_t &instruction) {
@@ -30,7 +37,7 @@ struct OProjResidualHalfTmem {
             const int cta_rank = kittens::cluster_ctarank();
             const int wg_id = kittens::warpgroup::groupid();
             using consumer_group = kittens::group<Config::NUM_CONSUMER_WARPS>;
-            constexpr int CHUNKS_PER_WG = EPI_PIPE_DEPTH / 2;
+            constexpr int CHUNKS_PER_WG = (EPI_PIPE_DEPTH + 1) / 2;
 
             auto &hidden_gl = g.template gls<DST_HIDDEN>();
 
@@ -41,9 +48,11 @@ struct OProjResidualHalfTmem {
             #pragma unroll
             for (int j = 0; j < CHUNKS_PER_WG; j++) {
                 const int chunk = 2 * j + wg_id;
-                kittens::warpgroup::load_async(
-                    d_reg[j],
-                    d_tt.template subtile<kittens::tt<float, Mb / 2, Nb / EPI_PIPE_DEPTH>>(0, (Nb / EPI_PIPE_DEPTH) * chunk));
+                if (chunk < EPI_PIPE_DEPTH) {
+                    kittens::warpgroup::load_async(
+                        d_reg[j],
+                        d_tt.template subtile<kittens::tt<float, Mb / 2, Nb / EPI_PIPE_DEPTH>>(0, (Nb / EPI_PIPE_DEPTH) * chunk));
+                }
             }
             kittens::tensor_load_wait();
             if (consumer_group::elect_leader()) all_reuse_barrier_wait<Config>(g, s.instruction());
@@ -54,13 +63,15 @@ struct OProjResidualHalfTmem {
             for (int j = 0; j < CHUNKS_PER_WG; j++) {
                 const int chunk = 2 * j + wg_id;
                 const int slot  = j % Pipeline::NUM_D_TILES;
-                kittens::warpgroup::tma::store_async_read_wait<Pipeline::NUM_D_TILES - 1>();
-                kittens::warpgroup::sync(wg_id + 1);
-                kittens::warpgroup::store(Pipeline::d_st(s, wg_id, slot), d_reg[j]);
-                kittens::warpgroup::sync(wg_id + 1);
-                kittens::warpgroup::tma::store_add_async(
-                    hidden_gl, Pipeline::d_st(s, wg_id, slot),
-                    {0, 0, 2 * pi.m + cta_rank, EPI_PIPE_DEPTH * pi.n + chunk});
+                if (chunk < EPI_PIPE_DEPTH) {
+                    kittens::warpgroup::tma::store_async_read_wait<Pipeline::NUM_D_TILES - 1>();
+                    kittens::warpgroup::sync(wg_id + 1);
+                    kittens::warpgroup::store(Pipeline::d_st(s, wg_id, slot), d_reg[j]);
+                    kittens::warpgroup::sync(wg_id + 1);
+                    kittens::warpgroup::tma::store_add_async(
+                        hidden_gl, Pipeline::d_st(s, wg_id, slot),
+                        {0, 0, 2 * pi.m + cta_rank, EPI_PIPE_DEPTH * pi.n + chunk});
+                }
             }
 
             kittens::warpgroup::tma::store_async_wait();
