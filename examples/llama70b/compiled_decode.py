@@ -13,11 +13,13 @@ sequence i owns pages [i * pages_per_seq, (i + 1) * pages_per_seq).
 from __future__ import annotations
 
 import argparse
+import ctypes
 import json
 import math
 import os
 import time
 
+import cuda.bindings.driver as cuda_driver
 import torch
 from huggingface_hub import snapshot_download
 from safetensors import safe_open
@@ -67,12 +69,6 @@ def _make_rope_table(config, max_seq_len: int, device: str) -> tuple[torch.Tenso
     return cos_hf[..., one_head_indices].contiguous(), sin_hf[..., one_head_indices].contiguous()
 
 
-def _kv_append_indices(batch_size: int, pages_per_seq: int, pos: int, device: str) -> torch.Tensor:
-    seq_ids = torch.arange(batch_size, dtype=torch.int32, device=device)
-    page = seq_ids * pages_per_seq + (pos // PAGE_SIZE)
-    return page * PAGE_SIZE + (pos % PAGE_SIZE)
-
-
 def decode(
     hidden,                # [B, HIDDEN_DIM] bf16
     qkv_weights,           # [L, QKV_DIM, HIDDEN_DIM] bf16, Q/K interleaved
@@ -93,7 +89,6 @@ def decode(
     attn_scale,            # [1] fp32
     rms_norm_eps,          # [1] fp32
 ):
-    batch_size = hidden.shape[-2]
     num_pages = k_cache.shape[-4] // NUM_LAYERS
 
     for layer_idx in range(NUM_LAYERS):
@@ -258,6 +253,10 @@ def benchmark_tok_per_sec(
 
     hidden = torch.empty(batch_size, HIDDEN_DIM, dtype=torch.bfloat16, device=device)
     kv_indices = torch.zeros(batch_size, dtype=torch.int32, device=device)
+    kv_index_base = (
+        torch.arange(batch_size, dtype=torch.int32, device=device)
+        * pages_per_seq * PAGE_SIZE
+    )
     pos_id = torch.zeros(1, dtype=torch.int32, device=device)
     attn_scale = torch.tensor([ATTN_SCALE], dtype=torch.float32, device=device)
     rms_norm_eps = torch.tensor([RMS_NORM_EPS], dtype=torch.float32, device=device)
@@ -274,6 +273,9 @@ def benchmark_tok_per_sec(
 
     compiled = megakittens.compile(decode, use_jit_cache=False, verbose=False, save_schedule=False)
 
+    _pos_id_buf = (ctypes.c_int * 1)(0)
+    _pos_id_gpu_ptr = pos_id.data_ptr()
+
     weight_tensors = [
         weights["qkv_weights"], weights["o_weights"], weights["attn_norm_weights"],
         weights["mlp_norm_weights"], weights["gate_weights"], weights["up_weights"],
@@ -289,8 +291,11 @@ def benchmark_tok_per_sec(
 
     def _decode_step(pos: int, input_tokens: torch.Tensor) -> torch.Tensor:
         hidden.copy_(weights["embed_weight"][input_tokens])
-        pos_id.fill_(pos)
-        kv_indices.copy_(_kv_append_indices(batch_size, pages_per_seq, pos, device))
+        _pos_id_buf[0] = pos
+        cuda_driver.cuMemcpyHtoDAsync(
+            _pos_id_gpu_ptr, _pos_id_buf, 4, torch.cuda.current_stream().cuda_stream,
+        )
+        torch.add(kv_index_base, pos, out=kv_indices)
         logits = compiled(*decode_args)
         return torch.argmax(logits, dim=-1)
 
