@@ -88,7 +88,6 @@ def decode(
     v_cache,               # [L * num_pages, PAGE_SIZE, NUM_KV_HEADS, HEAD_DIM] bf16
     rope_cos,              # [max_seq_len, HEAD_DIM] fp32, interleaved
     rope_sin,              # [max_seq_len, HEAD_DIM] fp32, interleaved
-    pos_ids,               # [B] int32
     kv_append_indices,     # [B] int32, page * PAGE_SIZE + offset in layer-local page space
     pos_id,                # [1] int32
     attn_scale,            # [1] fp32
@@ -110,7 +109,7 @@ def decode(
             qkv_weights[layer_idx:layer_idx + 1],
             rope_cos,
             rope_sin,
-            pos_ids,
+            pos_id,
             kv_append_indices,
             layer_k,
             layer_v,
@@ -258,7 +257,6 @@ def benchmark_tok_per_sec(
     num_pages = batch_size * pages_per_seq
 
     hidden = torch.empty(batch_size, HIDDEN_DIM, dtype=torch.bfloat16, device=device)
-    pos_ids = torch.zeros(batch_size, dtype=torch.int32, device=device)
     kv_indices = torch.zeros(batch_size, dtype=torch.int32, device=device)
     pos_id = torch.zeros(1, dtype=torch.int32, device=device)
     attn_scale = torch.tensor([ATTN_SCALE], dtype=torch.float32, device=device)
@@ -271,7 +269,7 @@ def benchmark_tok_per_sec(
         weights["gate_weights"], weights["up_weights"], weights["down_weights"],
         weights["lm_head_norm_weight"], weights["lm_head_weight"],
         weights["k_cache"], weights["v_cache"], weights["rope_cos"], weights["rope_sin"],
-        pos_ids, kv_indices, pos_id, attn_scale, rms_norm_eps,
+        kv_indices, pos_id, attn_scale, rms_norm_eps,
     )
 
     compiled = megakittens.compile(decode, use_jit_cache=False, verbose=False, save_schedule=False)
@@ -292,7 +290,6 @@ def benchmark_tok_per_sec(
     def _decode_step(pos: int, input_tokens: torch.Tensor) -> torch.Tensor:
         hidden.copy_(weights["embed_weight"][input_tokens])
         pos_id.fill_(pos)
-        pos_ids.fill_(pos)
         kv_indices.copy_(_kv_append_indices(batch_size, pages_per_seq, pos, device))
         logits = compiled(*decode_args)
         return torch.argmax(logits, dim=-1)

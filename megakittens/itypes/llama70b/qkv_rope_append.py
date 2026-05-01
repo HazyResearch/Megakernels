@@ -99,8 +99,9 @@ def qkv_rope_append70b_op(
     k = qkv[..., Q_DIM:Q_DIM + KV_DIM].view(B, NUM_KV_HEADS, HEAD_DIM).to(x.dtype)
     v = qkv[..., Q_DIM + KV_DIM:].view(B, NUM_KV_HEADS, HEAD_DIM).to(x.dtype)
 
-    cos = rope_cos[pos_ids.long()].view(B, 1, HEAD_DIM)
-    sin = rope_sin[pos_ids.long()].view(B, 1, HEAD_DIM)
+    flat_pos = pos_ids.long().reshape(-1)
+    cos = rope_cos[flat_pos].view(-1, 1, HEAD_DIM).expand(B, 1, HEAD_DIM)
+    sin = rope_sin[flat_pos].view(-1, 1, HEAD_DIM).expand(B, 1, HEAD_DIM)
     q = _apply_rope(q, cos, sin)
     k = _apply_rope(k, cos, sin)
 
@@ -207,7 +208,7 @@ class QkvRopeAppend70b(IType):
             TensorSpec(dtype=DType.bf16, granularity=(1, self.Nb, self.Kb), tma_types=[self.W_TMA]),
             TensorSpec(dtype=DType.fp32, granularity=(1, HEAD_DIM), tma_types=[self.ROPE_TMA]),
             TensorSpec(dtype=DType.fp32, granularity=(1, HEAD_DIM), tma_types=[self.ROPE_TMA]),
-            TensorSpec(dtype=DType.int32, granularity=(self.M_INST,)),
+            TensorSpec(dtype=DType.int32, granularity=(1,)),
             TensorSpec(dtype=DType.int32, granularity=(self.M_INST,)),
             TensorSpec(dtype=DType.bf16, granularity=(1, 1, 1, HEAD_DIM), tma_types=[self.KV_TMA]),
             TensorSpec(dtype=DType.bf16, granularity=(1, 1, 1, HEAD_DIM), tma_types=[self.KV_TMA]),
@@ -243,7 +244,7 @@ class QkvRopeAppend70b(IType):
         qkv_weights = interleave_qkv_weights(qkv_weights)
         rope_cos = interleave_rope_table(torch.randn(max_seq_len, HEAD_DIM, dtype=torch.float32, device="cuda"))
         rope_sin = interleave_rope_table(torch.randn(max_seq_len, HEAD_DIM, dtype=torch.float32, device="cuda"))
-        pos_ids = torch.full((B,), append_pos, dtype=torch.int32, device="cuda")
+        pos_ids = torch.tensor([append_pos], dtype=torch.int32, device="cuda")
         seq_ids = torch.arange(B, dtype=torch.int32, device="cuda")
         append_page = append_pos // PAGE_SIZE
         append_offset = append_pos % PAGE_SIZE
@@ -305,7 +306,8 @@ class QkvRopeAppend70b(IType):
         x_region = ((row_start, row_stop), (0, HIDDEN_DIM))
         w_region = ((layer_idx, layer_idx + 1), (n_start, n_stop), (0, HIDDEN_DIM))
         rope_region = ((0, src_metas[2].shape[-2]), (0, HEAD_DIM))
-        ids_region = ((row_start, row_stop),)
+        pos_region = ((0, 1),)
+        append_region = ((row_start, row_stop),)
 
         empty_q = ((0, 0), (0, 0))
         empty_kv = ((0, 0), (0, 0), (0, 0), (0, 0))
@@ -353,7 +355,7 @@ class QkvRopeAppend70b(IType):
             v_regions = [empty_kv]
 
         return (
-            [[x_region], [w_region], [rope_region], [rope_region], [ids_region], [ids_region],
+            [[x_region], [w_region], [rope_region], [rope_region], [pos_region], [append_region],
              [empty_kv], [empty_kv]],
             [q_regions, k_regions, v_regions],
         )
@@ -393,10 +395,13 @@ class QkvRopeAppend70b(IType):
                 f"[MegaKittens] QkvRopeAppend70b expected RoPE tables last dim={HEAD_DIM}, "
                 f"got cos={rope_cos_shape}, sin={rope_sin_shape}"
             )
-        if pos_shape[-1] != B or append_shape[-1] != B:
+        if pos_shape[-1] != 1:
             raise RuntimeError(
-                f"[MegaKittens] QkvRopeAppend70b expected pos_ids/append_ids shape ({B},), "
-                f"got pos={pos_shape}, append={append_shape}"
+                f"[MegaKittens] QkvRopeAppend70b expected pos_ids shape (1,), got {pos_shape}"
+            )
+        if append_shape[-1] != B:
+            raise RuntimeError(
+                f"[MegaKittens] QkvRopeAppend70b expected append_ids shape ({B},), got {append_shape}"
             )
         if k_shape != v_shape:
             raise RuntimeError(f"[MegaKittens] QkvRopeAppend70b K/V cache shape mismatch: k={k_shape}, v={v_shape}")
