@@ -18,11 +18,32 @@ QKV_DIM = Q_DIM + 2 * KV_DIM
 PAGE_SIZE = 128
 
 Mb = 256
-Nb = 256
 Kb = 64
-EPI_PIPE_DEPTH = 8
+DEFAULT_NB = 256
+EPILOGUE_CHUNK_COLS = 32
 NUM_CONSUMERS = 2
 M_INST = NUM_CONSUMERS * Mb
+
+
+def _default_nb_for_batch(batch_size: int) -> int:
+    return 160 if batch_size == 512 else DEFAULT_NB
+
+
+def _resolve_nb(batch_size: int, nb: int = 0) -> int:
+    nb = int(nb)
+    if nb == 0:
+        nb = _default_nb_for_batch(batch_size)
+    if nb <= 0:
+        raise RuntimeError(f"[MegaKittens] QkvRopeAppend70b expected positive nb, got {nb}")
+    if nb > 256 or nb % 16 != 0:
+        raise RuntimeError(f"[MegaKittens] QkvRopeAppend70b expected nb in 16..256 step 16, got {nb}")
+    if nb % 32 != 0:
+        raise RuntimeError(
+            f"[MegaKittens] QkvRopeAppend70b current 2-CTA weight loader requires nb divisible by 32, got {nb}"
+        )
+    if QKV_DIM % nb != 0:
+        raise RuntimeError(f"[MegaKittens] QkvRopeAppend70b requires QKV_DIM divisible by nb, got nb={nb}")
+    return nb
 
 
 def _apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
@@ -111,20 +132,18 @@ def _qkv_rope_append70b_fake(
 
 
 def _resolve_qkv_rope_append70b(args, kwargs):
-    return QkvRopeAppend70b(batch_size=args[0].meta["val"].shape[-2]), [0, 1, 2]
+    batch_size = args[0].meta["val"].shape[-2]
+    return QkvRopeAppend70b(batch_size=batch_size), [0, 1, 2]
 
 
 class QkvRopeAppend70b(IType):
     Mb = Mb
-    Nb = Nb
     Kb = Kb
-    EPI_PIPE_DEPTH = EPI_PIPE_DEPTH
     NUM_CONSUMERS = NUM_CONSUMERS
     M_INST = M_INST
+    COLS_PER_CHUNK = EPILOGUE_CHUNK_COLS
 
     X_TMA = st(dtype=DType.bf16, rows=Mb // 2, cols=Kb)
-    W_TMA = st(dtype=DType.bf16, rows=Nb // 2, cols=Kb)
-    Q_TMA = st(dtype=DType.bf16, rows=Mb // 2, cols=Nb // EPI_PIPE_DEPTH)
     ROPE_TMA = sv(dtype=DType.fp32, length=HEAD_DIM)
     KV_TMA = sv(dtype=DType.bf16, length=HEAD_DIM)
 
@@ -147,8 +166,25 @@ class QkvRopeAppend70b(IType):
         ((2048,), (2048, 128, 127)),
     ]
 
-    def __init__(self, batch_size: int = 0):
+    def __init__(self, batch_size: int = 0, nb: int = 0):
         self.batch_size = batch_size
+        self.nb = _resolve_nb(batch_size, nb)
+
+    @property
+    def Nb(self) -> int:
+        return self.nb
+
+    @property
+    def EPI_PIPE_DEPTH(self) -> int:
+        return self.nb // self.COLS_PER_CHUNK
+
+    @property
+    def W_TMA(self):
+        return st(dtype=DType.bf16, rows=self.Nb // 2, cols=self.Kb)
+
+    @property
+    def Q_TMA(self):
+        return st(dtype=DType.bf16, rows=self.Mb // 2, cols=self.COLS_PER_CHUNK)
 
     @property
     def cpp_template(self) -> str:
@@ -156,7 +192,8 @@ class QkvRopeAppend70b(IType):
             f"llama70b::QkvRopeAppend<MKConfig, MKGlobals, "
             f"{self.batch_size}, "
             f"{HIDDEN_DIM}, {QKV_DIM}, {HEAD_DIM}, {PAGE_SIZE}, "
-            f"{NUM_Q_HEADS}, {NUM_KV_HEADS}, {{tensors}}>"
+            f"{NUM_Q_HEADS}, {NUM_KV_HEADS}, "
+            f"{self.Nb}, {self.EPI_PIPE_DEPTH}, {{tensors}}>"
         )
 
     @property
@@ -179,9 +216,9 @@ class QkvRopeAppend70b(IType):
     @property
     def outputs(self) -> list[TensorSpec]:
         return [
-            TensorSpec(dtype=DType.bf16, granularity=(self.M_INST, self.Nb), tma_types=[self.Q_TMA]),
-            TensorSpec(dtype=DType.bf16, granularity=(1, 1, 1, HEAD_DIM), tma_types=[self.KV_TMA]),
-            TensorSpec(dtype=DType.bf16, granularity=(1, 1, 1, HEAD_DIM), tma_types=[self.KV_TMA]),
+            TensorSpec(dtype=DType.bf16, granularity=(self.M_INST, self.COLS_PER_CHUNK), tma_types=[self.Q_TMA]),
+            TensorSpec(dtype=DType.bf16, granularity=(1, 1, 1, self.COLS_PER_CHUNK), tma_types=[self.KV_TMA]),
+            TensorSpec(dtype=DType.bf16, granularity=(1, 1, 1, self.COLS_PER_CHUNK), tma_types=[self.KV_TMA]),
         ]
 
     @property
@@ -273,23 +310,47 @@ class QkvRopeAppend70b(IType):
         empty_q = ((0, 0), (0, 0))
         empty_kv = ((0, 0), (0, 0), (0, 0), (0, 0))
 
-        q_regions = [empty_q]
-        k_regions = [empty_kv]
-        v_regions = [empty_kv]
+        q_regions = []
+        k_regions = []
+        v_regions = []
 
         page_start = base_page + row_start * pages_per_seq
         page_stop = base_page + row_stop * pages_per_seq
 
-        if n_start < Q_DIM:
-            q_regions = [((row_start, row_stop), (n_start, min(n_stop, Q_DIM)))]
-        elif n_start < Q_DIM + KV_DIM:
-            head_start = (n_start - Q_DIM) // HEAD_DIM
-            head_stop = (min(n_stop, Q_DIM + KV_DIM) - Q_DIM + HEAD_DIM - 1) // HEAD_DIM
-            k_regions = [((page_start, page_stop), (0, PAGE_SIZE), (head_start, head_stop), (0, HEAD_DIM))]
-        else:
-            head_start = (n_start - Q_DIM - KV_DIM) // HEAD_DIM
-            head_stop = (min(n_stop, QKV_DIM) - Q_DIM - KV_DIM + HEAD_DIM - 1) // HEAD_DIM
-            v_regions = [((page_start, page_stop), (0, PAGE_SIZE), (head_start, head_stop), (0, HEAD_DIM))]
+        def append_kv_regions(regions, start: int, stop: int, offset: int) -> None:
+            rel_start = start - offset
+            rel_stop = stop - offset
+            head_start = rel_start // HEAD_DIM
+            head_stop = (rel_stop + HEAD_DIM - 1) // HEAD_DIM
+            for head in range(head_start, head_stop):
+                dim_start = max(rel_start - head * HEAD_DIM, 0)
+                dim_stop = min(rel_stop - head * HEAD_DIM, HEAD_DIM)
+                if dim_stop > dim_start:
+                    regions.append(
+                        ((page_start, page_stop), (0, PAGE_SIZE), (head, head + 1), (dim_start, dim_stop))
+                    )
+
+        for chunk_start in range(n_start, n_stop, self.COLS_PER_CHUNK):
+            chunk_stop = min(chunk_start + self.COLS_PER_CHUNK, n_stop)
+            if chunk_start < Q_DIM:
+                q_stop = min(chunk_stop, Q_DIM)
+                if q_stop > chunk_start:
+                    q_regions.append(((row_start, row_stop), (chunk_start, q_stop)))
+            elif chunk_start < Q_DIM + KV_DIM:
+                k_stop = min(chunk_stop, Q_DIM + KV_DIM)
+                if k_stop > chunk_start:
+                    append_kv_regions(k_regions, chunk_start, k_stop, Q_DIM)
+            else:
+                v_stop = min(chunk_stop, QKV_DIM)
+                if v_stop > chunk_start:
+                    append_kv_regions(v_regions, chunk_start, v_stop, Q_DIM + KV_DIM)
+
+        if not q_regions:
+            q_regions = [empty_q]
+        if not k_regions:
+            k_regions = [empty_kv]
+        if not v_regions:
+            v_regions = [empty_kv]
 
         return (
             [[x_region], [w_region], [rope_region], [rope_region], [ids_region], [ids_region],

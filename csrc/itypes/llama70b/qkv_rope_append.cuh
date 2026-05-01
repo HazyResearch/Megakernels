@@ -11,6 +11,7 @@ template <typename Config, typename Globals,
           int BATCH_SIZE,
           int HIDDEN_DIM, int QKV_DIM, int HEAD_DIM, int PAGE_SIZE,
           int NUM_Q_HEADS, int NUM_KV_HEADS,
+          int NB, int EPI_PIPE_DEPTH_,
           int SRC_X, int SRC_QKV_W, int SRC_ROPE_COS, int SRC_ROPE_SIN,
           int SRC_POS_IDS, int SRC_APPEND_IDS, int SRC_K_CACHE, int SRC_V_CACHE,
           int DST_Q, int DST_K_CACHE = -1, int DST_V_CACHE = -1>
@@ -24,15 +25,25 @@ struct QkvRopeAppend {
                   "QkvRopeAppend70b QKV dim mismatch.");
 
     static constexpr int Mb = 256;
-    static constexpr int Nb = 256;
+    static constexpr int Nb = NB;
     static constexpr int Kb = 64;
-    static constexpr int EPI_PIPE_DEPTH = 8;
+    static constexpr int EPI_PIPE_DEPTH = EPI_PIPE_DEPTH_;
     static constexpr int NUM_CONSUMERS = 2;
     static constexpr int M_INST = NUM_CONSUMERS * Mb;
     static constexpr int ROWS_PER_CONSUMER = Mb / 2;
     static constexpr int COLS_PER_CHUNK = Nb / EPI_PIPE_DEPTH;
     static constexpr int Q_DIM = HIDDEN_DIM;
     static constexpr int KV_DIM = NUM_KV_HEADS * HEAD_DIM;
+    static_assert(Nb > 0, "Nb must be positive.");
+    static_assert(Nb <= 256, "QkvRopeAppend70b valid Nb values are <= 256.");
+    static_assert(Nb % 16 == 0, "QkvRopeAppend70b valid Nb values are multiples of 16.");
+    static_assert(Nb % 32 == 0, "Current 2-CTA weight loader requires Nb divisible by 32.");
+    static_assert(Nb % EPI_PIPE_DEPTH == 0, "Nb must divide evenly into epilogue chunks.");
+    static_assert(QKV_DIM % Nb == 0, "QKV dim must divide evenly into Nb slabs.");
+    static_assert(COLS_PER_CHUNK == 32, "QKV epilogue assumes 32-column chunks.");
+    static_assert(Q_DIM % COLS_PER_CHUNK == 0, "Q boundary must align to epilogue chunks.");
+    static_assert(KV_DIM % COLS_PER_CHUNK == 0, "K/V boundaries must align to epilogue chunks.");
+    static_assert(COLS_PER_CHUNK % 8 == 0, "K/V scatter stores 8 bf16 values at a time.");
 
     using out_st_t = kittens::st_bf<ROWS_PER_CONSUMER, COLS_PER_CHUNK>;
     using out_rt_bf_t = kittens::rt_bf<ROWS_PER_CONSUMER / 4, COLS_PER_CHUNK>;

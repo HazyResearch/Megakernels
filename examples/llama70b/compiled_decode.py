@@ -124,7 +124,7 @@ def decode(
             attn_scale,
         )
 
-        torch.ops.megakittens.oproj_residual70b(
+        torch.ops.megakittens.oproj_residual_half_tmem70b(
             hidden, attn_out, o_weights[layer_idx:layer_idx + 1],
         )
 
@@ -140,7 +140,7 @@ def decode(
 
         # Single-GPU down_proj_reducescatter_residual collapses to the same
         # matmul + residual shape as o_proj_residual, with K=INTERMEDIATE_DIM.
-        torch.ops.megakittens.oproj_residual70b(
+        torch.ops.megakittens.oproj_residual_half_tmem70b(
             hidden, up, down_weights[layer_idx:layer_idx + 1],
         )
 
