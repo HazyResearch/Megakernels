@@ -23,6 +23,17 @@ struct GateSilu {
             : parsed_instruction(s.instruction()) {}
     };
 
+    struct silu_op {
+        template <typename T> static __device__ inline T op(const T &x) {
+            if constexpr (std::is_same_v<T, float>) {
+                return __fdividef(x, 1.f + __expf(-x));
+            } else if constexpr (std::is_same_v<T, float2>) {
+                return float2{__fdividef(x.x, 1.f + __expf(-x.x)),
+                              __fdividef(x.y, 1.f + __expf(-x.y))};
+            }
+        }
+    };
+
     struct pipeline_specifics {
         template <typename Pipeline>
         __device__ static inline void consumer_loop(const Globals &g, state_t<Config> &s) {
@@ -49,11 +60,7 @@ struct GateSilu {
                     d_tt.template subtile<kittens::tt<float, Mb / 2, Nb / EPI_PIPE_DEPTH>>(0, (Nb / EPI_PIPE_DEPTH) * i));
                 kittens::tensor_load_wait();
 
-                kittens::rt_fl<Mb / 8, Nb / EPI_PIPE_DEPTH> silu_buf;
-                kittens::warp::mul(silu_buf, d_reg, -1.f);
-                kittens::warp::exp(silu_buf, silu_buf);
-                kittens::warp::add(silu_buf, silu_buf, 1.f);
-                kittens::warp::div(d_reg, d_reg, silu_buf);
+                kittens::warp::unary_map<silu_op>(d_reg, d_reg);
 
                 kittens::warpgroup::tma::store_async_read_wait<Pipeline::NUM_D_TILES - 1>();
                 kittens::warpgroup::sync(cid + 1);
