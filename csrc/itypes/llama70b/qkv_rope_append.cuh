@@ -260,12 +260,23 @@ struct QkvRopeAppend {
             const int num_iters = a_gl.cols() / Kb;
 
             if (kittens::warp::elect_leader()) {
+                // weights have no dep on activations, so prefetch the first LOAD_PIPE_DEPTH stages before the input wait
+                #pragma unroll
+                for (int p = 0; p < pipeline::LOAD_PIPE_DEPTH / 2; p++) {
+                    s.page_wait(s.lid_to_pid(pipeline::B_LIDS[p]));
+                }
+                #pragma unroll
+                for (int stage = 0; stage < pipeline::LOAD_PIPE_DEPTH; stage++) {
+                    kittens::tma::cluster::load_async(
+                        pipeline::b_st(s, stage), b_gl,
+                        {0, pi.layer_idx, 2 * pi.n + cta_rank, stage},
+                        pipeline::inputs_arrived(s, stage), (uint16_t)(1 << cta_rank), 0);
+                }
                 all_input_barrier_wait<Config>(g, s.instruction());
                 for (int i = 0; i < num_iters + pipeline::LOAD_PIPE_DEPTH; i++) {
                     const int stage = i % pipeline::LOAD_PIPE_DEPTH;
                     if (i < pipeline::LOAD_PIPE_DEPTH) {
                         s.page_wait(s.lid_to_pid(pipeline::A_LIDS[stage]));
-                        if (stage % 2 == 0) s.page_wait(s.lid_to_pid(pipeline::B_LIDS[stage / 2]));
                     } else {
                         kittens::wait(pipeline::inputs_finished(s, stage),
                                       ((i + pipeline::LOAD_PIPE_DEPTH) / pipeline::LOAD_PIPE_DEPTH) & 0b1);
@@ -278,10 +289,12 @@ struct QkvRopeAppend {
                                 {0, 0, (2 * pi.m + cta_rank) * pipeline::NUM_CONSUMERS + cid, i},
                                 pipeline::inputs_arrived(s, stage), (uint16_t)(1 << cta_rank), 0);
                         }
-                        kittens::tma::cluster::load_async(
-                            pipeline::b_st(s, stage), b_gl,
-                            {0, pi.layer_idx, 2 * pi.n + cta_rank, i},
-                            pipeline::inputs_arrived(s, stage), (uint16_t)(1 << cta_rank), 0);
+                        if (i >= pipeline::LOAD_PIPE_DEPTH) {
+                            kittens::tma::cluster::load_async(
+                                pipeline::b_st(s, stage), b_gl,
+                                {0, pi.layer_idx, 2 * pi.n + cta_rank, i},
+                                pipeline::inputs_arrived(s, stage), (uint16_t)(1 << cta_rank), 0);
+                        }
                     } else {
                         if (stage != 0) s.page_finish(s.lid_to_pid(pipeline::A_LIDS[stage]));
                     }
