@@ -9,6 +9,7 @@ def benchmark(
     args: tuple[torch.Tensor, ...],
     warmup: int = 500,
     iters: int = 100,
+    cluster_size: int = 2,
 ) -> tuple[float, float]:
     """
     Benchmark a function with and without MegaKittens compilation.
@@ -23,7 +24,7 @@ def benchmark(
         (mk_ms, pt_ms): Average time per call in milliseconds.
     """
     torch._dynamo.reset()  # by default, dynamo limits to 8 compilations per function object
-    compiled_fn = megakittens.compile(fn, use_jit_cache=True, save_dag=False, save_schedule=False, verbose=False, global_work_queue=False)
+    compiled_fn = megakittens.compile(fn, use_jit_cache=True, save_dag=False, save_schedule=False, verbose=False, global_work_queue=False, cluster_size=cluster_size)
 
     # Warmup both
     for _ in range(warmup):

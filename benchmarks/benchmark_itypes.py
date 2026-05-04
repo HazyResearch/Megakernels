@@ -45,7 +45,7 @@ def benchmark_one(itype, bench_cases):
     print("-" * len(header))
 
     for case in bench_cases:
-        mk_ms, pt_ms = benchmark(itype.test_fn, itype.test_args(case))
+        mk_ms, pt_ms = benchmark(itype.test_fn, itype.test_args(case), cluster_size=itype.cluster_size)
         line = f"{str(case):>28}  {mk_ms*1000:>10.1f}  {pt_ms*1000:>10.1f}"
         if has_flops:
             flops = itype.bench_flops(case)
