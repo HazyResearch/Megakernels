@@ -38,7 +38,7 @@ try:
         ids=[f"{itype!r}-{case}" for itype, case in collect_test_cases()],
     )
     def test_itype(itype, case):
-        check(itype.test_fn, itype.test_args(case), atol=itype.test_atol, rtol=itype.test_rtol, cluster_size=itype.cluster_size)
+        check(itype.test_fn, itype.test_args(case), atol=itype.test_atol, rtol=itype.test_rtol)
 except ImportError:
     pass
 
@@ -46,5 +46,5 @@ except ImportError:
 if __name__ == "__main__":
     names = sys.argv[1:] or None
     for itype, case in collect_test_cases(names):
-        max_diff, mean_diff = check(itype.test_fn, itype.test_args(case), atol=itype.test_atol, rtol=itype.test_rtol, cluster_size=itype.cluster_size)
+        max_diff, mean_diff = check(itype.test_fn, itype.test_args(case), atol=itype.test_atol, rtol=itype.test_rtol)
         print(f"  PASS {itype.name} {case} | max_diff={max_diff:.6f} mean_diff={mean_diff:.6f}")

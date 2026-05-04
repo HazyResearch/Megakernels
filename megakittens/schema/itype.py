@@ -44,7 +44,6 @@ class IType(ABC):
     test_atol: float = 0.0
     test_rtol: float = 0.0
     bench_cases: list[tuple] = []
-    cluster_size: int = 2
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
