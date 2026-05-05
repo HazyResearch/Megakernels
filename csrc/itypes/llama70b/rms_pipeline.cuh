@@ -9,7 +9,7 @@ namespace megakittens {
 namespace llama70b {
 
 template <typename Config, typename Globals, int N,
-          typename parsed_instruction, typename pipeline_specifics,
+          typename parsed_instruction,
           int SRC_X, int SRC_WEIGHT, int SCALAR_EPS, int DST_Y>
 struct rms_pipeline {
     static constexpr int WEIGHTS_PAGE = 0;
@@ -17,10 +17,9 @@ struct rms_pipeline {
     static constexpr int RMS_SCRATCH_OFFSET = sizeof(kittens::sv_bf<N>);
     using row_vec = kittens::sv_bf<N>;
     using sv_slice_t = kittens::sv_bf<ELEMS_PER_WARP>;
+    using consumer_group = kittens::group<Config::NUM_CONSUMER_WARPS>;
 
-    __device__ static inline kittens::semaphore &weights_arrived(state_t<Config> &s)        { return s.semaphores()[0]; }
-    __device__ static inline kittens::semaphore &activations_arrived(state_t<Config> &s, int i) { return s.semaphores()[2 * i + 1]; }
-    __device__ static inline kittens::semaphore &outputs_arrived(state_t<Config> &s, int i)     { return s.semaphores()[2 * i + 2]; }
+    __device__ static inline kittens::semaphore &weights_arrived(state_t<Config> &s) { return s.semaphores()[0]; }
 
     __device__ static inline int lid_release_order(const Globals &g, state_t<Config> &s, int query) {
         // Must be num_rows-independent so cluster-paired CTAs agree on pid_order for the next instruction's MMA
@@ -29,30 +28,17 @@ struct rms_pipeline {
     }
 
     __device__ static inline int init_semaphores(const Globals &g, state_t<Config> &s) {
-        parsed_instruction inst{s};
         if (kittens::laneid() == 0) kittens::init_semaphore(weights_arrived(s), 1);
-        if (kittens::laneid() < inst.num_rows) {
-            kittens::init_semaphore(activations_arrived(s, kittens::laneid()), 1);
-            kittens::init_semaphore(outputs_arrived(s, kittens::laneid()), Config::NUM_CONSUMER_WARPS);
-        }
-        return 2 * inst.num_rows + 1;
-    }
-
-    __device__ static inline row_vec &row_at(state_t<Config> &s, int row_idx) {
-        int page_idx = 1 + row_idx / 2;
-        int pos_in_page = row_idx % 2;
-        int pid = s.lid_to_pid(page_idx);
-        return *reinterpret_cast<row_vec*>(
-            static_cast<uint8_t*>(s.pages[pid].ptr(pos_in_page * sizeof(row_vec))));
+        return 1;
     }
 
     __device__ static inline void loader_loop(const Globals &g, state_t<Config> &s) {
-        parsed_instruction inst{s};
         int lane = kittens::laneid();
-        int num_used_pages = 1 + (inst.num_rows + 1) / 2;
 
         if (lane == 0) {
+            parsed_instruction inst{s};
             all_input_barrier_wait<Config>(g, s.instruction());
+            all_reuse_barrier_wait<Config>(g, s.instruction());
 
             int weight_pid = s.lid_to_pid(WEIGHTS_PAGE);
             s.page_wait(weight_pid);
@@ -60,17 +46,7 @@ struct rms_pipeline {
             auto &w_gl = g.template gls<SRC_WEIGHT>();
             kittens::tma::expect_bytes(weights_arrived(s), sizeof(row_vec));
             kittens::tma::load_async(weight_smem, w_gl, {0, 0, inst.layer_idx, 0}, weights_arrived(s));
-
-            for (int i = 0; i < inst.num_rows; i++) {
-                int page_idx = 1 + i / 2;
-                int pos_in_page = i % 2;
-                if (pos_in_page == 0) {
-                    int row_pid = s.lid_to_pid(page_idx);
-                    s.page_wait(row_pid);
-                }
-                kittens::arrive(activations_arrived(s, i));
-            }
-        } else if (lane >= num_used_pages && lane < Config::NUM_PAGES) {
+        } else if (lane >= 1 && lane < Config::NUM_PAGES) {
             int pid = s.lid_to_pid(lane);
             s.page_wait(pid);
             s.page_finish(pid);
@@ -87,56 +63,35 @@ struct rms_pipeline {
         kittens::wait(weights_arrived(s), 0);
 
         int weight_pid = s.lid_to_pid(WEIGHTS_PAGE);
-        row_vec &weight_smem_full = *reinterpret_cast<row_vec*>(s.pages[weight_pid].ptr());
+        row_vec &weight_smem = *reinterpret_cast<row_vec*>(s.pages[weight_pid].ptr());
         sv_slice_t &weight_slice =
-            reinterpret_cast<sv_slice_t *>(&weight_smem_full)[kittens::warpid()];
+            reinterpret_cast<sv_slice_t *>(&weight_smem)[kittens::warpid()];
         float *rms_scratch = static_cast<float *>(s.pages[weight_pid].ptr(RMS_SCRATCH_OFFSET));
         float eps = g.template gls<SCALAR_EPS>().raw_ptr[0];
 
         auto &x_gl = g.template gls<SRC_X>();
+        auto &y_gl = g.template gls<DST_Y>();
 
         for (int i = 0; i < inst.num_rows; i++) {
-            kittens::wait(activations_arrived(s, i), 0);
-
-            row_vec &row_smem = row_at(s, i);
-
-            kittens::group<Config::NUM_CONSUMER_WARPS>::load_async(
-                row_smem, x_gl, {0, 0, inst.row_start + i, 0});
-            kittens::group<Config::NUM_CONSUMER_WARPS>::load_async_wait<0>(2);
-
-            sv_slice_t &row_slice = reinterpret_cast<sv_slice_t *>(&row_smem)[kittens::warpid()];
-
             kittens::rv_fl<ELEMS_PER_WARP> act_vec;
-            kittens::warp::load(act_vec, row_slice);
+            consumer_group::load(act_vec, x_gl, {0, 0, inst.row_start + i, 0});
+
             float *row_scratch = rms_scratch + i * Config::NUM_CONSUMER_WARPS;
             act_vec = rms_norm<Config, N>(act_vec, weight_slice, eps, row_scratch);
-            kittens::warp::store(row_slice, act_vec);
-            kittens::warp::sync();
-            kittens::warp::arrive(outputs_arrived(s, i));
-        }
-    }
 
-    __device__ static inline void storer_loop(const Globals &g, state_t<Config> &s) {
-        parsed_instruction inst{s};
-        if (kittens::warp::elect_leader()) {
-            all_reuse_barrier_wait<Config>(g, s.instruction());
-            for (int i = 0; i < inst.num_rows; i++) {
-                kittens::wait(outputs_arrived(s, i), 0);
-                row_vec &row_smem = row_at(s, i);
-                pipeline_specifics::store(s, g, inst, i, row_smem);
-                kittens::tma::store_async_read_wait();
-                int pos_in_page = i % 2;
-                if (pos_in_page == 1 || i == inst.num_rows - 1) {
-                    int page_idx = 1 + i / 2;
-                    s.page_finish(s.lid_to_pid(page_idx));
-                }
-            }
-            kittens::tma::store_async_wait();
+            consumer_group::store(y_gl, act_vec, {0, 0, inst.row_start + i, 0});
+        }
+
+        consumer_group::sync(2);
+        if (consumer_group::elect_leader()) {
+            __threadfence();
             s.page_finish(s.lid_to_pid(WEIGHTS_PAGE));
             // TODO multi-gpu??: barrier scope needs to be `sys` for cross-GPU all-gather
             all_barrier_arrive<Config>(g, s.instruction());
         }
     }
+
+    __device__ static inline void storer_loop(const Globals &g, state_t<Config> &s) {}
 };
 
 }
