@@ -140,16 +140,12 @@ struct QkvRopeAppend {
             const int page = append_idx / PAGE_SIZE;
             const int offset = append_idx % PAGE_SIZE;
             const int cache_page = pi.base_page + page;
+            const uint32_t smem_addr = static_cast<uint32_t>(
+                __cvta_generic_to_shared(&tile[{row, col}]));
             uint4 v;
-            __nv_bfloat162 p0, p1, p2, p3;
-            p0.x = tile[{row, col}];     p0.y = tile[{row, col + 1}];
-            p1.x = tile[{row, col + 2}]; p1.y = tile[{row, col + 3}];
-            p2.x = tile[{row, col + 4}]; p2.y = tile[{row, col + 5}];
-            p3.x = tile[{row, col + 6}]; p3.y = tile[{row, col + 7}];
-            v.x = *reinterpret_cast<uint32_t *>(&p0);
-            v.y = *reinterpret_cast<uint32_t *>(&p1);
-            v.z = *reinterpret_cast<uint32_t *>(&p2);
-            v.w = *reinterpret_cast<uint32_t *>(&p3);
+            asm volatile("ld.shared.v4.b32 {%0, %1, %2, %3}, [%4];\n"
+                : "=r"(v.x), "=r"(v.y), "=r"(v.z), "=r"(v.w)
+                : "r"(smem_addr));
             *reinterpret_cast<uint4 *>(
                 &kv_gl[{cache_page, offset, head_idx, dim_start + col}]) = v;
         }
