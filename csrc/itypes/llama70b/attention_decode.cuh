@@ -40,6 +40,7 @@ struct AttentionDecode {
     using o_rt = kittens::rt_fl<16, HEAD_DIM>;
     using o_sv_bf = kittens::sv_bf<HEAD_DIM>;
     using q_row_sv = kittens::sv_bf<NUM_Q_HEADS * HEAD_DIM>;
+    using o_full_sv = kittens::sv_bf<NUM_Q_HEADS * HEAD_DIM>;
 
     static constexpr int SEM_Q_ARRIVED = 0;
     static constexpr int SEM_O_ARRIVED = 1;
@@ -106,6 +107,10 @@ struct AttentionDecode {
     __device__ static inline o_sv_bf &o_smem(state_t<Config> &s, int q_head_idx) {
         return s.pages[qo_pid(s)].template as<o_sv_bf>(
             sizeof(q_row_sv) + q_head_idx * sizeof(o_sv_bf));
+    }
+
+    __device__ static inline o_full_sv &o_full_smem(state_t<Config> &s) {
+        return s.pages[qo_pid(s)].template as<o_full_sv>(sizeof(q_row_sv));
     }
 
     __device__ static inline kv_st &k_smem(state_t<Config> &s, int stage, int kv_head_idx) {
@@ -381,12 +386,9 @@ struct AttentionDecode {
                 kittens::wait(O_arrived(s), 0);
                 all_reuse_barrier_wait<Config>(g, s.instruction());
 
-                #pragma unroll
-                for (int q_head_idx = 0; q_head_idx < NUM_Q_HEADS; q_head_idx++) {
-                    kittens::tma::store_async<kittens::cache_policy::EVICT_LAST>(
-                        out_gl, o_smem(s, q_head_idx),
-                        {0, 0, inst.seq_idx, q_head_idx});
-                }
+                kittens::tma::store_async<kittens::cache_policy::EVICT_LAST>(
+                    out_gl, o_full_smem(s),
+                    kittens::coord<o_full_sv>{0, 0, inst.seq_idx, 0});
                 kittens::tma::store_async_wait();
                 s.page_finish(qo_pid(s));
                 all_barrier_arrive<Config>(g, s.instruction());

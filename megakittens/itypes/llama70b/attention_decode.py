@@ -69,6 +69,7 @@ class AttentionDecode70b(IType):
     Q_TMA = sv(dtype=DType.bf16, length=HIDDEN_DIM)
     KV_TMA = st(dtype=DType.bf16, rows=KV_BLOCK_SIZE, cols=HEAD_DIM, axis=1)
     O_TMA = sv(dtype=DType.bf16, length=HEAD_DIM)
+    O_FULL_TMA = sv(dtype=DType.bf16, length=HIDDEN_DIM)
 
     torch_functions_map = {
         torch.ops.megakittens.attention_decode70b: _resolve_attention_decode70b,
@@ -139,7 +140,7 @@ class AttentionDecode70b(IType):
     @property
     def outputs(self) -> list[TensorSpec]:
         return [
-            TensorSpec(dtype=DType.bf16, granularity=(1, HEAD_DIM), tma_types=[self.O_TMA]),
+            TensorSpec(dtype=DType.bf16, granularity=(1, HEAD_DIM), tma_types=[self.O_TMA, self.O_FULL_TMA]),
         ]
 
     def num_instructions(
