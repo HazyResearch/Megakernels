@@ -305,13 +305,12 @@ struct AttentionDecode {
             o_rt O_reg;
             attn_fl_rt attn_fl_reg;
             attn_bf_rt attn_bf_reg;
-            max_vec_rv max_vec_reg;
             max_vec_rv scaled_max_vec_reg;
             max_vec_rv last_scaled_max_vec_reg;
             max_vec_rv diff_scaled_max_vec_reg;
             norm_vec_rv norm_vec_reg;
 
-            kittens::warp::neg_infty(max_vec_reg);
+            kittens::warp::neg_infty(scaled_max_vec_reg);
             kittens::warp::neg_infty(last_scaled_max_vec_reg);
             kittens::warp::zero(norm_vec_reg);
             kittens::warp::zero(O_reg);
@@ -335,9 +334,8 @@ struct AttentionDecode {
                         kittens::base_types::constants<float>::neg_infty());
                 }
 
-                kittens::warp::row_max(max_vec_reg, attn_fl_reg, max_vec_reg);
                 kittens::warp::mul(attn_fl_reg, attn_fl_reg, softmax_temp);
-                kittens::warp::mul(scaled_max_vec_reg, max_vec_reg, softmax_temp);
+                kittens::warp::row_max(scaled_max_vec_reg, attn_fl_reg, scaled_max_vec_reg);
                 kittens::warp::sub_row(attn_fl_reg, attn_fl_reg, scaled_max_vec_reg);
                 kittens::warp::exp2(attn_fl_reg, attn_fl_reg);
                 kittens::warp::sub(diff_scaled_max_vec_reg, last_scaled_max_vec_reg, scaled_max_vec_reg);
