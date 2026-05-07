@@ -8,11 +8,9 @@ end-to-end instead of the hand-written schedule in `scheduler.py`.
 
 from __future__ import annotations
 
-import ctypes
 import math
 import time
 
-import cuda.bindings.driver as cuda_driver
 import torch
 
 import megakittens
@@ -91,6 +89,7 @@ def decode(
     logits = torch.ops.megakittens.rms_lm_head(
         hidden_states, lm_head_norm_weight, lm_head_weight, rms_norm_eps,
     )
+    torch.ops.megakittens.pos_id_increment(pos_id)
     return logits
 
 
@@ -145,10 +144,6 @@ def benchmark_tok_per_sec(prompt="Hello, my name is", max_new_tokens=200, num_sa
 
     compiled = megakittens.compile(decode, use_jit_cache=False, verbose=False, save_schedule=False, cluster_size=1)
 
-    # Pre-allocate CPU-side buffer and cache GPU address for fast pos_id updates
-    _pos_id_buf = (ctypes.c_int * 1)(0)
-    _pos_id_gpu_ptr = pos_id_tensor.data_ptr()
-
     weight_tensors = [
         weights["qkv_weights"], weights["o_weights"],
         weights["attn_norm_weights"], weights["mlp_norm_weights"],
@@ -163,23 +158,22 @@ def benchmark_tok_per_sec(prompt="Hello, my name is", max_new_tokens=200, num_sa
     num_decode_tokens = max_new_tokens - 1
     output_tokens = torch.zeros(max_new_tokens, dtype=torch.long, device=D)
 
-    def _decode_step(pos_id, input_token):
+    def _decode_step(input_token):
         hidden_states.copy_(embedding(input_token))
-        _pos_id_buf[0] = pos_id
-        stream = torch.cuda.current_stream().cuda_stream
-        cuda_driver.cuMemcpyHtoDAsync(_pos_id_gpu_ptr, _pos_id_buf, 4, stream)
         logits = compiled(*decode_args)
         return torch.argmax(logits, dim=-1)
 
+    pos_id_tensor.fill_(prompt_len)
     compiled(*decode_args)
     output_tokens[0] = first_token
     print(f"Warming up ({warmup} runs)...")
     for _ in range(warmup):
         k_cache.copy_(k_cache_snapshot)
         v_cache.copy_(v_cache_snapshot)
+        pos_id_tensor.fill_(prompt_len)
         token = first_token
         for i in range(num_decode_tokens):
-            token = _decode_step(prompt_len + i, token)
+            token = _decode_step(token)
             output_tokens[i + 1] = token
     torch.cuda.synchronize()
     print("Warmup done.")
@@ -188,11 +182,12 @@ def benchmark_tok_per_sec(prompt="Hello, my name is", max_new_tokens=200, num_sa
     for sample in range(num_samples):
         k_cache.copy_(k_cache_snapshot)
         v_cache.copy_(v_cache_snapshot)
+        pos_id_tensor.fill_(prompt_len)
         torch.cuda.synchronize()
         t0 = time.perf_counter()
         token = first_token
         for i in range(num_decode_tokens):
-            token = _decode_step(prompt_len + i, token)
+            token = _decode_step(token)
             output_tokens[i + 1] = token
         torch.cuda.synchronize()
         t1 = time.perf_counter()

@@ -13,13 +13,11 @@ sequence i owns pages [i * pages_per_seq, (i + 1) * pages_per_seq).
 from __future__ import annotations
 
 import argparse
-import ctypes
 import json
 import math
 import os
 import time
 
-import cuda.bindings.driver as cuda_driver
 import torch
 from huggingface_hub import snapshot_download
 from safetensors import safe_open
@@ -141,7 +139,9 @@ def decode(
     logits_hidden = torch.ops.megakittens.rms70b(
         hidden, lm_head_norm_weight[0], rms_norm_eps,
     )
-    return torch.ops.megakittens.lm_head70b(logits_hidden, lm_head_weight)
+    logits = torch.ops.megakittens.lm_head70b(logits_hidden, lm_head_weight)
+    torch.ops.megakittens.pos_id_increment(pos_id)
+    return logits
 
 
 def load_hf_weights(
@@ -273,9 +273,6 @@ def benchmark_tok_per_sec(
 
     compiled = megakittens.compile(decode, use_jit_cache=False, verbose=False, save_schedule=False)
 
-    _pos_id_buf = (ctypes.c_int * 1)(0)
-    _pos_id_gpu_ptr = pos_id.data_ptr()
-
     weight_tensors = [
         weights["qkv_weights"], weights["o_weights"], weights["attn_norm_weights"],
         weights["mlp_norm_weights"], weights["gate_weights"], weights["up_weights"],
@@ -291,10 +288,6 @@ def benchmark_tok_per_sec(
 
     def _decode_step(pos: int, input_tokens: torch.Tensor) -> torch.Tensor:
         hidden.copy_(weights["embed_weight"][input_tokens])
-        _pos_id_buf[0] = pos
-        cuda_driver.cuMemcpyHtoDAsync(
-            _pos_id_gpu_ptr, _pos_id_buf, 4, torch.cuda.current_stream().cuda_stream,
-        )
         torch.add(kv_index_base, pos, out=kv_indices)
         logits = compiled(*decode_args)
         return torch.argmax(logits, dim=-1)
@@ -302,6 +295,7 @@ def benchmark_tok_per_sec(
     def _run_once(save_tokens: bool = False) -> float:
         weights["k_cache"].zero_()
         weights["v_cache"].zero_()
+        pos_id.zero_()
         for pos in range(prompt_len):
             argmax = _decode_step(pos, prompt_tokens[pos])
         torch.cuda.synchronize()
