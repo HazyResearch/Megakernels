@@ -3,6 +3,7 @@ from typing import List, Tuple
 
 import torch
 
+from .elementwise_unary import ElementwiseUnary, _detect_dtype as _unary_detect_dtype
 from ..dispatcher import Dispatcher
 from ..schema.dtype import DType
 from ..schema.itype import IType
@@ -24,37 +25,64 @@ def _elementwise_binary_fake(tensors: list[torch.Tensor], ops: str) -> torch.Ten
     return torch.empty_like(tensors[0])
 
 
+def _detect_dtype(args):
+    dtypes = set()
+    for arg in args:
+        nodes = arg if isinstance(arg, (list, tuple)) else [arg]
+        for node in nodes:
+            if hasattr(node, 'meta') and 'val' in node.meta:
+                val = node.meta['val']
+                if isinstance(val, torch.Tensor):
+                    dtypes.add(val.dtype)
+    if len(dtypes) > 1:
+        raise RuntimeError(f"[MegaKittens] ElementwiseBinary: mixed dtypes among operands: {dtypes}")
+    if len(dtypes) == 1:
+        return DType.from_torch(next(iter(dtypes)))
+    raise RuntimeError(f"[MegaKittens] ElementwiseBinary: cannot detect dtype from args")
+
 def _resolve_from_custom_op(args, kwargs):
     ops_str = args[1] if len(args) > 1 else kwargs.get("ops", "add")
     return ElementwiseBinary(ops=tuple(ops_str.split(",")))
 
+def _scalar_unary(op_name, args):
+    return ElementwiseUnary(ops=(op_name,), dtype=_unary_detect_dtype(args), scalar_val=float(args[1]))
+
 def _resolve_add(args, kwargs):
-    return ElementwiseBinary(ops=("add",))
+    if len(args) == 2 and isinstance(args[1], (int, float)) and not isinstance(args[1], bool):
+        return _scalar_unary("add_scalar", args)
+    return ElementwiseBinary(ops=("add",), dtype=_detect_dtype(args))
 
 def _resolve_sub(args, kwargs):
-    return ElementwiseBinary(ops=("sub",))
+    if len(args) == 2 and isinstance(args[1], (int, float)) and not isinstance(args[1], bool):
+        return _scalar_unary("sub_scalar", args)
+    return ElementwiseBinary(ops=("sub",), dtype=_detect_dtype(args))
 
 def _resolve_mul(args, kwargs):
-    return ElementwiseBinary(ops=("mul",))
+    if len(args) == 2 and isinstance(args[1], (int, float)) and not isinstance(args[1], bool):
+        return _scalar_unary("mul_scalar", args)
+    return ElementwiseBinary(ops=("mul",), dtype=_detect_dtype(args))
 
 def _resolve_div(args, kwargs):
-    return ElementwiseBinary(ops=("div",))
+    if len(args) == 2 and isinstance(args[1], (int, float)) and not isinstance(args[1], bool):
+        return _scalar_unary("div_scalar", args)
+    return ElementwiseBinary(ops=("div",), dtype=_detect_dtype(args))
 
 def _resolve_max(args, kwargs):
-    return ElementwiseBinary(ops=("max",))
+    if len(args) == 2 and isinstance(args[1], (int, float)) and not isinstance(args[1], bool):
+        return _scalar_unary("max_scalar", args)
+    return ElementwiseBinary(ops=("max",), dtype=_detect_dtype(args))
 
 def _resolve_min(args, kwargs):
-    return ElementwiseBinary(ops=("min",))
+    if len(args) == 2 and isinstance(args[1], (int, float)) and not isinstance(args[1], bool):
+        return _scalar_unary("min_scalar", args)
+    return ElementwiseBinary(ops=("min",), dtype=_detect_dtype(args))
 
-def _resolve_atan2(args, kwargs):
-    return ElementwiseBinary(ops=("atan2",))
 
 
 class ElementwiseBinary(IType):
     MAX_OPS = 1
-    TILE_SIZE = 128
+    TILE_ROWS = 128
     MAX_TILES_PER_INST = 2
-    TMA = st(dtype=DType.bf16, rows=128, cols=128)
 
     BINARY_OPS = {
         "add":   ("BinaryOp::ADD",   torch.add),
@@ -63,7 +91,6 @@ class ElementwiseBinary(IType):
         "div":   ("BinaryOp::DIV",   torch.div),
         "max":   ("BinaryOp::MAX",   torch.maximum),
         "min":   ("BinaryOp::MIN",   torch.minimum),
-        "atan2": ("BinaryOp::ATAN2", torch.atan2),
     }
 
     torch_functions_map = {
@@ -85,13 +112,10 @@ class ElementwiseBinary(IType):
         torch.ops.aten.maximum: _resolve_max, torch.ops.aten.maximum.default: _resolve_max,
         torch.minimum: _resolve_min,
         torch.ops.aten.minimum: _resolve_min, torch.ops.aten.minimum.default: _resolve_min,
-        torch.atan2: _resolve_atan2,
-        torch.ops.aten.atan2: _resolve_atan2, torch.ops.aten.atan2.default: _resolve_atan2,
     }
     torch_methods_map = {
         "add": _resolve_add, "sub": _resolve_sub,
         "mul": _resolve_mul, "div": _resolve_div,
-        "atan2": _resolve_atan2,
     }
 
     test_cases = [
@@ -115,8 +139,13 @@ class ElementwiseBinary(IType):
     test_rtol = 1e-2
     bench_cases = [((("add",),), (4096, 4096)), ((("add",),), (131072, 4096)), ((("add",),), (4096, 131072)), ((("add",),), (16384, 16384)), ((("add",),), (131072, 131072))]
 
-    def __init__(self, ops: tuple[str, ...] = ("add",)):
+    def __init__(self, ops: tuple[str, ...] = ("add",), dtype: DType = DType.bf16):
         self.ops = ops
+        self.dtype = dtype
+
+    @property
+    def tile_cols(self) -> int:
+        return Dispatcher.PAGE_SIZE // (self.TILE_ROWS * self.dtype.size)
 
     @property
     def num_inputs(self) -> int:
@@ -142,19 +171,21 @@ class ElementwiseBinary(IType):
     @property
     def cpp_template(self) -> str:
         ops_str = ", ".join(self.BINARY_OPS[op][0] for op in self.ops)
-        return f"ElementwiseBinary<MKConfig, MKGlobals, BinaryOps<{ops_str}>, {{tensors}}>"
+        return f"ElementwiseBinary<MKConfig, MKGlobals, {self.dtype.cpp_dtype}, BinaryOps<{ops_str}>, {{tensors}}>"
 
     @property
     def inputs(self) -> list[TensorSpec]:
+        tma = st(dtype=self.dtype, rows=self.TILE_ROWS, cols=self.tile_cols)
         return [
-            TensorSpec(dtype=DType.bf16, granularity=(self.TILE_SIZE, self.TILE_SIZE), tma_types=[self.TMA])
+            TensorSpec(dtype=self.dtype, granularity=(self.TILE_ROWS, self.tile_cols), tma_types=[tma])
             for _ in range(self.num_inputs)
         ]
 
     @property
     def outputs(self) -> list[TensorSpec]:
+        tma = st(dtype=self.dtype, rows=self.TILE_ROWS, cols=self.tile_cols)
         return [
-            TensorSpec(dtype=DType.bf16, granularity=(self.TILE_SIZE, self.TILE_SIZE), tma_types=[self.TMA]),
+            TensorSpec(dtype=self.dtype, granularity=(self.TILE_ROWS, self.tile_cols), tma_types=[tma]),
         ]
 
     def block_indices(
@@ -165,16 +196,17 @@ class ElementwiseBinary(IType):
         dst_ranges: Tuple[TensorRange, ...],
     ) -> List[Tuple[int, ...]]:
         dst_range = dst_ranges[0]
+        tr, tc = self.TILE_ROWS, self.tile_cols
         indices = []
         for b in range(dst_range[0].size):
             for d in range(dst_range[1].size):
-                for r in range(dst_range[2].size // self.TILE_SIZE):
-                    for c in range(0, dst_range[3].size // self.TILE_SIZE, self.tiles_per_inst):
-                        n = min(self.tiles_per_inst, dst_range[3].size // self.TILE_SIZE - c)
+                for r in range(dst_range[2].size // tr):
+                    for c in range(0, dst_range[3].size // tc, self.tiles_per_inst):
+                        n = min(self.tiles_per_inst, dst_range[3].size // tc - c)
                         index: list[int] = []
                         for src_range in src_ranges:
-                            index.extend([src_range[0].start + b, src_range[1].start + d, src_range[2].start // self.TILE_SIZE + r, src_range[3].start // self.TILE_SIZE + c])
-                        index.extend([dst_range[0].start + b, dst_range[1].start + d, dst_range[2].start // self.TILE_SIZE + r, dst_range[3].start // self.TILE_SIZE + c])
+                            index.extend([src_range[0].start + b, src_range[1].start + d, src_range[2].start // tr + r, src_range[3].start // tc + c])
+                        index.extend([dst_range[0].start + b, dst_range[1].start + d, dst_range[2].start // tr + r, dst_range[3].start // tc + c])
                         index.append(n)
                         indices.append(tuple(index))
         return indices
@@ -187,7 +219,8 @@ class ElementwiseBinary(IType):
         dst_ranges: Tuple[TensorRange, ...],
     ) -> int:
         dst_range = dst_ranges[0]
-        return dst_range[0].size * dst_range[1].size * (dst_range[2].size // self.TILE_SIZE) * ((dst_range[3].size // self.TILE_SIZE + self.tiles_per_inst - 1) // self.tiles_per_inst)
+        tr, tc = self.TILE_ROWS, self.tile_cols
+        return dst_range[0].size * dst_range[1].size * (dst_range[2].size // tr) * ((dst_range[3].size // tc + self.tiles_per_inst - 1) // self.tiles_per_inst)
 
     def access_regions(
         self,
@@ -196,19 +229,20 @@ class ElementwiseBinary(IType):
         dst_metas: Tuple[TensorMeta, ...],
     ) -> tuple[list[list[tuple[tuple[int, int], ...]]], list[list[tuple[tuple[int, int], ...]]]]:
         n = block_index[-1]
+        tr, tc = self.TILE_ROWS, self.tile_cols
         src_regions = []
         for i in range(self.num_inputs):
             b_src, d_src, r_src, c_src = block_index[i * 4: i * 4 + 4]
             src_regions.append([(
                 (b_src, b_src + 1), (d_src, d_src + 1),
-                (r_src * self.TILE_SIZE, (r_src + 1) * self.TILE_SIZE),
-                (c_src * self.TILE_SIZE, (c_src + n) * self.TILE_SIZE),
+                (r_src * tr, (r_src + 1) * tr),
+                (c_src * tc, (c_src + n) * tc),
             )])
         b_dst, d_dst, r_dst, c_dst = block_index[self.num_inputs * 4: self.num_inputs * 4 + 4]
         dst_region = (
             (b_dst, b_dst + 1), (d_dst, d_dst + 1),
-            (r_dst * self.TILE_SIZE, (r_dst + 1) * self.TILE_SIZE),
-            (c_dst * self.TILE_SIZE, (c_dst + n) * self.TILE_SIZE),
+            (r_dst * tr, (r_dst + 1) * tr),
+            (c_dst * tc, (c_dst + n) * tc),
         )
         return src_regions, [[dst_region]]
 

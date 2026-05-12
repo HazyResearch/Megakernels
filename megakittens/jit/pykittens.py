@@ -1,3 +1,4 @@
+import functools
 import struct
 from typing import Literal
 
@@ -48,6 +49,7 @@ class st(BaseModel):
 
 class sv(BaseModel):
     """Python mirror of ThunderKittens `sv`"""
+    model_config = {"frozen": True}
 
     # Template parameters
     dtype: DType
@@ -67,6 +69,7 @@ class sv(BaseModel):
 
 class gl(BaseModel):
     """Python mirror of ThunderKittens `gl`."""
+    model_config = {"frozen": True}
 
     # Template parameters
     dtype: DType
@@ -95,7 +98,7 @@ class gl(BaseModel):
     def align(self) -> int:
         return 64 if self.tma_types else 8  # CUtensorMap: alignas(64) in NVRTC
 
-    @property
+    @functools.cached_property
     def memory_layout(self):
         offset = 8  # raw_ptr
         field_offsets = {'raw_ptr': 0}

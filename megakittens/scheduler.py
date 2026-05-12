@@ -10,7 +10,8 @@ from .utils import timed
 from .itypes.noop import Noop
 from .jit.cuda_utils import get_sm_count
 from .schema.dag import DAG
-from .schema.tensor import TensorMeta
+from .schema.device import Device
+from .schema.tensor import TensorMeta, TensorStorage
 from .schema.instruction import (
     IType,
     Instruction,
@@ -51,8 +52,7 @@ def get_instruction_count_and_offset(
             raise RuntimeError(
                 f"[MegaKittens] Node has {len(node.out_tensors)} dst tensors (max {Instruction.MAX_DST_TENSORS})"
             )
-        src_metas = tuple(in_node.out_tensors[slot_idx] for in_node, slot_idx in node.in_nodes)
-        count = node.itype.num_instructions(src_metas, node.out_tensors, src_ranges=node.in_ranges, dst_ranges=node.out_ranges)
+        count = node.itype.num_instructions(node.in_tensors, node.out_tensors, src_ranges=node.in_ranges, dst_ranges=node.out_ranges)
         node_inst_count[node.id] = count
         node_inst_offset[node.id] = cumulative_offset
         cumulative_offset += count + (-count) % cluster_size  # CTA pairs must get same instruction type
@@ -64,7 +64,7 @@ def assign_tensors(
     cluster_size: int,
     node_inst_count: Dict[int, int],
     node_inst_offset: Dict[int, int],
-) -> Tuple[List[TensorMeta], Dict[Tuple[int, int], int], List[int], List[int], List[Tuple[List[int], int, int]]]:
+) -> Tuple[List[TensorMeta], Dict[Tuple[int, str, int], int], List[int], List[int], List[Tuple[List[int], int, int]]]:
     """Phase 2: Assign tensor indices, reuse memory where possible, collect I/O indices.
 
     Args:
@@ -75,23 +75,33 @@ def assign_tensors(
     Returns:
         (tensor_metas, tensor_index, input_tensor_indices, output_tensor_indices, release_barriers) where:
         - tensor_metas: List[TensorMeta], flat list of unique tensor metadata.
-        - tensor_index: Dict[Tuple[int, int], int], (node_id, output_slot) -> index into tensor_metas.
+        - tensor_index: Dict[Tuple[int, str, int], int], (node_id, "in"/"out", slot_idx) -> index into tensor_metas.
         - input_tensor_indices: List[int], tensor_metas indices for graph inputs, in order.
         - output_tensor_indices: List[int], tensor_metas indices for graph outputs, in order.
         - release_barriers: List[Tuple[List[int], int, int]], each is (consumer_node_ids, num_consumer_insts, reuser_node_id) for tensor reuse.
     """
     tensor_metas: List[TensorMeta] = []
-    tensor_index: Dict[Tuple[int, int], int] = {}
+    tensor_index: Dict[Tuple[int, str, int], int] = {}
     input_tensor_indices: List[int] = []
     output_tensor_indices: List[int] = []
-    tensor_pool: Dict[TensorMeta, List[Tuple[List[int], int, int, int]]] = {}
+    storage_pool: Dict[Tuple[int, Device], List[Tuple[List[int], int, int, int]]] = {}
+    storage_users: Dict[int, List[int]] = {}  # storage.id -> list of tensor_meta indices
     release_barriers: List[Tuple[List[int], int, int]] = []
 
     for node in dag.nodes:
         if node.is_output:
             if len(output_tensor_indices) != 0:
                 raise RuntimeError("[MegaKittens] Expected 1 output node")
-            output_tensor_indices.extend(tensor_index[(in_node.id, slot_idx)] for in_node, slot_idx in node.in_nodes)
+            for edge_idx, ((in_node, slot_idx), in_tensor) in enumerate(zip(node.in_nodes, node.in_tensors)):
+                src_tid = tensor_index[(in_node.id, "out", slot_idx)]
+                if in_tensor.shape != tensor_metas[src_tid].shape:  # cases where there is view op right before the output node
+                    storage = tensor_metas[src_tid].storage
+                    view_tid = len(tensor_metas)
+                    storage_users.setdefault(storage.id, []).append(view_tid)
+                    tensor_metas.append(TensorMeta(dtype=in_tensor.dtype, shape=in_tensor.shape, device=in_tensor.device, storage=storage))
+                    output_tensor_indices.append(view_tid)
+                else:
+                    output_tensor_indices.append(src_tid)
             continue  # no need to allocate tensors for the output node
 
         inplace_mapping = node.itype.inplace_mapping if node.itype is not None else None
@@ -100,17 +110,32 @@ def assign_tensors(
             if not node.is_input:
                 if inplace_mapping is not None and out_idx in inplace_mapping:
                     in_node, in_slot = node.in_nodes[inplace_mapping[out_idx]]
-                    tensor_index[(node.id, out_idx)] = tensor_index[(in_node.id, in_slot)]
+                    tensor_index[(node.id, "out", out_idx)] = tensor_index[(in_node.id, "out", in_slot)]
                     reused = True
                     other_consumer_ids = ([in_node.id] if not in_node.is_input else []) + [consumer.id for consumer in in_node.out_nodes[in_slot] if consumer.id != node.id and not consumer.is_output]
                     if other_consumer_ids:
                         num_other_consumer_insts = sum(node_inst_count[cid] for cid in other_consumer_ids)
                         release_barriers.append((other_consumer_ids, num_other_consumer_insts, node.id))
                 else:
-                    free_tensors = tensor_pool.get(tensor_meta, [])
-                    for i, (consumer_node_ids, last_consumer_inst, num_consumer_insts, tid) in enumerate(free_tensors):
+                    pool_key = (tensor_meta.size_bytes, tensor_meta.device)
+                    free_tensors = storage_pool.get(pool_key, [])
+                    for i, (consumer_node_ids, last_consumer_inst, num_consumer_insts, storage_id) in enumerate(free_tensors):
                         if node_inst_offset[node.id] - last_consumer_inst >= get_sm_count():
-                            tensor_index[(node.id, out_idx)] = tid
+                            matched_tid = None
+                            for t in storage_users[storage_id]:
+                                if (tensor_metas[t].dtype == tensor_meta.dtype and tensor_metas[t].shape == tensor_meta.shape and tensor_metas[t].device == tensor_meta.device):
+                                    matched_tid = t
+                                    break
+                            if matched_tid is not None:
+                                tensor_index[(node.id, "out", out_idx)] = matched_tid
+                            else:
+                                if len(tensor_metas) >= MAX_TENSOR_ALLOCATIONS:
+                                    raise RuntimeError(
+                                        f"[MegaKittens] The given compute graph requires tensor count exceeding {MAX_TENSOR_ALLOCATIONS}."
+                                    )
+                                tensor_index[(node.id, "out", out_idx)] = len(tensor_metas)
+                                storage_users[storage_id].append(len(tensor_metas))
+                                tensor_metas.append(TensorMeta(dtype=tensor_meta.dtype, shape=tensor_meta.shape, device=tensor_meta.device, storage=tensor_metas[storage_users[storage_id][0]].storage))
                             free_tensors.pop(i)
                             release_barriers.append((consumer_node_ids, num_consumer_insts, node.id))
                             reused = True
@@ -121,7 +146,10 @@ def assign_tensors(
                     raise RuntimeError(
                         f"[MegaKittens] The given compute graph requires tensor count exceeding {MAX_TENSOR_ALLOCATIONS}."
                     )
-                tensor_index[(node.id, out_idx)] = len(tensor_metas)
+                storage = TensorStorage(size=tensor_meta.size_bytes, device=tensor_meta.device)
+                tensor_meta = TensorMeta(dtype=tensor_meta.dtype, shape=tensor_meta.shape, device=tensor_meta.device, storage=storage)
+                tensor_index[(node.id, "out", out_idx)] = len(tensor_metas)
+                storage_users[storage.id] = [len(tensor_metas)]
                 tensor_metas.append(tensor_meta)
 
             consumer_nodes = [node] + node.out_nodes[out_idx]
@@ -136,12 +164,26 @@ def assign_tensors(
             consumer_node_ids = [c.id for c in consumer_nodes]
             num_consumer_insts = sum(node_inst_count[cid] for cid in consumer_node_ids)
             last_consumer_inst = max(node_inst_offset[c.id] + node_inst_count[c.id] + (-node_inst_count[c.id]) % cluster_size for c in consumer_nodes)
-            tensor_pool.setdefault(tensor_meta, []).append((consumer_node_ids, last_consumer_inst, num_consumer_insts, tensor_index[(node.id, out_idx)]))
+            pool_key = (tensor_meta.size_bytes, tensor_meta.device)
+            storage_id = tensor_metas[tensor_index[(node.id, "out", out_idx)]].storage.id
+            storage_pool.setdefault(pool_key, []).append((consumer_node_ids, last_consumer_inst, num_consumer_insts, storage_id))
 
-        if node.is_input:
+        if not node.is_input:
+            for edge_idx, ((source_node, source_out_slot), in_tensor) in enumerate(zip(node.in_nodes, node.in_tensors)):
+                source_tensor_meta = tensor_index[(source_node.id, "out", source_out_slot)]
+                if in_tensor.shape == tensor_metas[source_tensor_meta].shape:
+                    tensor_index[(node.id, "in", edge_idx)] = source_tensor_meta
+                else:
+                    if len(tensor_metas) >= MAX_TENSOR_ALLOCATIONS:
+                        raise RuntimeError(f"[MegaKittens] Tensor count exceeds {MAX_TENSOR_ALLOCATIONS}.")
+                    storage = tensor_metas[source_tensor_meta].storage
+                    tensor_index[(node.id, "in", edge_idx)] = len(tensor_metas)
+                    storage_users[storage.id].append(len(tensor_metas))
+                    tensor_metas.append(TensorMeta(dtype=in_tensor.dtype, shape=in_tensor.shape, device=in_tensor.device, storage=storage))
+        else:
             if len(node.out_tensors) != 1:
                 raise RuntimeError(f"[MegaKittens] Input node has {len(node.out_tensors)} outputs (expected 1)")
-            input_tensor_indices.append(tensor_index[(node.id, 0)])
+            input_tensor_indices.append(tensor_index[(node.id, "out", 0)])
 
     if not input_tensor_indices:
         raise RuntimeError("[MegaKittens] Graph has no input tensors")
@@ -164,8 +206,8 @@ def assign_barriers(
         release_barriers: List[Tuple[List[int], int, int]], each is (consumer_node_ids, num_consumer_insts, reuser_node_id) for tensor reuse.
 
     Returns:
-        (node_block_indices, inst_dst_barriers, inst_src_barriers, inst_num_src_input_barriers, inst_num_src_reuse_barriers, inst_num_dst_input_barriers, inst_num_dst_reuse_barriers, barrier_counter) where:
-        - node_block_indices: Dict[int, list], node_id -> list of per-instruction tile coordinate tuples from block_indices().
+        (node_block_entries, inst_dst_barriers, inst_src_barriers, inst_num_src_input_barriers, inst_num_src_reuse_barriers, inst_num_dst_input_barriers, inst_num_dst_reuse_barriers, barrier_counter) where:
+        - node_block_entries: Dict[int, list], node_id -> list of (itype, block_index) entries.
         - inst_dst_barriers: Dict[Tuple[int, int], List[int]], (node_id, local_inst_idx) -> barrier IDs this instruction arrives on after completion.
         - inst_src_barriers: Dict[Tuple[int, int], List[Tuple[int, int]]], (node_id, local_inst_idx) -> (barrier_id, target_count) pairs to wait on before starting.
         - inst_num_src_input_barriers: Dict[Tuple[int, int], int], (node_id, local_inst_idx) -> how many of src_barriers are data dependency barriers.
@@ -184,20 +226,48 @@ def assign_barriers(
     inst_num_dst_input_barriers: Dict[Tuple[int, int], int] = {}
     inst_num_dst_reuse_barriers: Dict[Tuple[int, int], int] = {}
 
+    def box_to_linear_range(box, shape):
+        ndim = len(box)
+        shape = (1,) * (ndim - len(shape)) + tuple(shape)
+        strides = [0] * ndim
+        strides[-1] = 1
+        for j in range(ndim - 2, -1, -1):
+            strides[j] = strides[j + 1] * shape[j + 1]
+
+        full_from = ndim
+        for j in range(ndim - 1, -1, -1):
+            if box[j][0] == 0 and box[j][1] == shape[j]:
+                full_from = j
+            else:
+                break
+        if full_from == 0:
+            return [(0, strides[0] * shape[0])]
+
+        merge_dim = full_from - 1
+        lo_off = box[merge_dim][0] * strides[merge_dim]
+        hi_off = box[merge_dim][1] * strides[merge_dim]
+        if merge_dim == 0:
+            return [(lo_off, hi_off)]
+
+        ranges = []
+        for combo in itertools.product(*(range(box[j][0], box[j][1]) for j in range(merge_dim))):
+            base = sum(combo[j] * strides[j] for j in range(merge_dim))
+            ranges.append((base + lo_off, base + hi_off))
+        return ranges
+
     # Step 1. Collect per-instruction tile regions for each compute node
     node_regions: Dict[int, list] = {}  # node_id -> list of (src_regions, dst_regions) per instruction
     node_block_entries: Dict[int, list] = {}
     for node in dag.nodes:
         if node.is_input or node.is_output:
             continue
-        src_metas = tuple(in_node.out_tensors[slot_idx] for in_node, slot_idx in node.in_nodes)
-        block_indices = node.itype.block_indices(src_metas, node.out_tensors, src_ranges=node.in_ranges, dst_ranges=node.out_ranges)
+        block_indices = node.itype.block_indices(node.in_tensors, node.out_tensors, src_ranges=node.in_ranges, dst_ranges=node.out_ranges)
         node_block_entries[node.id] = [
-            (node.itype.block_itype(block_index, src_metas, node.out_tensors), block_index)
+            (node.itype.block_itype(block_index, node.in_tensors, node.out_tensors), block_index)
             for block_index in block_indices
         ]
         node_regions[node.id] = [
-            itype.access_regions(block_index, src_metas, node.out_tensors)
+            itype.access_regions(block_index, node.in_tensors, node.out_tensors)
             for itype, block_index in node_block_entries[node.id]
         ]
 
@@ -206,42 +276,47 @@ def assign_barriers(
     for node in dag.nodes:
         if node.is_input or node.is_output:
             continue
-        for edge_idx, (in_node, slot_idx) in enumerate(node.in_nodes):  # Combined with the outer loop, O(num_edges)
+        for edge_idx, ((in_node, slot_idx), in_tensor) in enumerate(zip(node.in_nodes, node.in_tensors)):  # Combined with the outer loop, O(num_edges)
             if in_node.is_input or in_node.is_output:
                 continue
 
-            # Collect all regions produced/consumed by this edge
             producer_regions = [dst_regions[slot_idx] for _, dst_regions in node_regions[in_node.id]]
             consumer_regions = [src_regions[edge_idx] for src_regions, _ in node_regions[node.id]]
 
-            ndim = len(producer_regions[0][0])
-            unit_region: List[int] = []
-            for d in range(ndim):
-                all_sizes: set[int] = set()
-                for boxes in producer_regions:
-                    for box in boxes:
-                        all_sizes.add(box[d][1] - box[d][0])
-                for boxes in consumer_regions:
-                    for box in boxes:
-                        all_sizes.add(box[d][1] - box[d][0])
-                unit_region.append(reduce(gcd, all_sizes))
+            # Build per-instruction unit-region keys
+            if in_tensor.shape != in_node.out_tensors[slot_idx].shape:  # view op applied
+                p_shape = in_node.out_tensors[slot_idx].shape
+                c_shape = in_tensor.shape
+                p_linear = [sorted(r for box in boxes for r in box_to_linear_range(box, p_shape)) for boxes in producer_regions]
+                c_linear = [sorted(r for box in boxes for r in box_to_linear_range(box, c_shape)) for boxes in consumer_regions]
+                unit = reduce(gcd, {hi - lo for ranges in p_linear + c_linear for lo, hi in ranges})
+                p_unit_keys = [[u for lo, hi in linear_range for u in range(lo // unit, hi // unit)] for linear_range in p_linear]
+                c_unit_keys = [[u for lo, hi in linear_range for u in range(lo // unit, hi // unit)] for linear_range in c_linear]
+                c_cache_keys = [tuple(linear_range) for linear_range in c_linear]
+            else:
+                ndim = len(producer_regions[0][0])
+                unit_region: List[int] = []
+                for d in range(ndim):
+                    all_sizes = {box[d][1] - box[d][0] for boxes in producer_regions for box in boxes}
+                    all_sizes |= {box[d][1] - box[d][0] for boxes in consumer_regions for box in boxes}
+                    unit_region.append(reduce(gcd, all_sizes))
+                p_unit_keys = [[k for box in boxes for k in itertools.product(*(range(box[d][0] // unit_region[d], box[d][1] // unit_region[d]) for d in range(ndim)))] for boxes in producer_regions]
+                c_unit_keys = [[k for box in boxes for k in itertools.product(*(range(box[d][0] // unit_region[d], box[d][1] // unit_region[d]) for d in range(ndim)))] for boxes in consumer_regions]
+                c_cache_keys = [tuple(sorted(boxes)) for boxes in consumer_regions]
 
-            unit_region_index_to_p_local_index: Dict[tuple, List[int]] = defaultdict(list)
-            for p_local_index, boxes in enumerate(producer_regions):
-                for box in boxes:
-                    for unit_region_index in itertools.product(*[range(box[d][0] // unit_region[d], box[d][1] // unit_region[d]) for d in range(ndim)]):
-                        unit_region_index_to_p_local_index[unit_region_index].append(p_local_index)
+            unit_key_to_p_local_index: dict = defaultdict(list)
+            for p_local_index, keys in enumerate(p_unit_keys):
+                for key in keys:
+                    unit_key_to_p_local_index[key].append(p_local_index)
 
             c_region_cache: Dict[tuple, frozenset[int]] = {}
-            for c_local_index, boxes in enumerate(consumer_regions):
-                cache_key = tuple(sorted(boxes))
+            for c_local_index, (keys, cache_key) in enumerate(zip(c_unit_keys, c_cache_keys)):
                 if cache_key not in c_region_cache:
                     matching_p_local_indices: set[int] = set()
-                    for box in boxes:
-                        for unit_region_index in itertools.product(*[range(box[d][0] // unit_region[d], box[d][1] // unit_region[d]) for d in range(ndim)]):
-                            if unit_region_index not in unit_region_index_to_p_local_index:
-                                raise RuntimeError("[MegaKittens] Matching producer region not found.")
-                            matching_p_local_indices.update(unit_region_index_to_p_local_index[unit_region_index])
+                    for key in keys:
+                        if key not in unit_key_to_p_local_index:
+                            raise RuntimeError("[MegaKittens] Matching producer region not found.")
+                        matching_p_local_indices.update(unit_key_to_p_local_index[key])
                     c_region_cache[cache_key] = frozenset(matching_p_local_indices)
                 dependency_map.setdefault((in_node.id, c_region_cache[cache_key]), {}).setdefault(node.id, []).append(c_local_index)
 
@@ -294,7 +369,7 @@ def assign_barriers(
 def generate_instructions(
     dag: DAG,
     cluster_size: int,
-    tensor_index: Dict[Tuple[int, int], int],
+    tensor_index: Dict[Tuple[int, str, int], int],
     node_block_entries: Dict[int, list],
     inst_dst_barriers: Dict[Tuple[int, int], List[int]],
     inst_src_barriers: Dict[Tuple[int, int], List[Tuple[int, int]]],
@@ -307,7 +382,7 @@ def generate_instructions(
 
     Args:
         dag: validated DAG of input, and output, and compute nodes.
-        tensor_index: Dict[Tuple[int, int], int], (node_id, output_slot) -> index into tensor_metas.
+        tensor_index: Dict[Tuple[int, str, int], int], (node_id, "in"/"out", slot_idx) -> index into tensor_metas.
         node_block_entries: Dict[int, list], node_id -> list of (itype, block_index) entries.
         inst_dst_barriers: Dict[Tuple[int, int], List[int]], (node_id, local_inst_idx) -> barrier IDs this instruction arrives on after completion.
         inst_src_barriers: Dict[Tuple[int, int], List[Tuple[int, int]]], (node_id, local_inst_idx) -> (barrier_id, target_count) pairs to wait on before starting.
@@ -331,17 +406,14 @@ def generate_instructions(
         if node.is_input or node.is_output:
             continue
 
-        src_tensors = tuple(
-            tensor_index[(in_node.id, slot_idx)]
-            for in_node, slot_idx in node.in_nodes
-        )
+        src_tensors = tuple(tensor_index[(node.id, "in", edge_idx)] for edge_idx in range(len(node.in_nodes)))
 
         dst_tensors = tuple(
-            tensor_index[(node.id, slot)]
+            tensor_index[(node.id, "out", slot)]
             for slot in range(len(node.out_tensors))
         )
 
-        src_metas = tuple(in_node.out_tensors[slot_idx] for in_node, slot_idx in node.in_nodes)
+        src_metas = node.in_tensors
         dst_metas = node.out_tensors
 
         for local_idx, (itype, block_index) in enumerate(node_block_entries[node.id]):

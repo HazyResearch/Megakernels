@@ -17,10 +17,11 @@ class Node(BaseModel):
     is_input: bool = False
     is_output: bool = False  # There should be only 1 output node
 
-    itype: IType | None = None  # None if input/output
+    itype: IType | str | None = None  # IType for compute nodes, str for intermediate ops, None for input/output
 
     in_nodes: Tuple[Tuple[Node, NonNegativeInt], ...]  # [[source_node, output_slot_idx], ...]
     in_ranges: Tuple[TensorRange, ...]
+    in_tensors: Tuple[TensorMeta, ...]  # may differ from source node out_tensor due to view ops!
     out_tensors: Tuple[TensorMeta, ...]
     out_ranges: Tuple[TensorRange, ...]
     out_nodes: Tuple[List[Node], ...]  # [[destination_node, ...], ...]
@@ -40,7 +41,6 @@ class DAG:
 
     def __init__(self, nodes: List[Node]) -> None:
         self.nodes = nodes
-        self.validate()
 
     def _validate_topological(self) -> None:
         node_index: dict[int, int] = {node.id: idx for idx, node in enumerate(self.nodes)}
@@ -91,6 +91,13 @@ class DAG:
                 raise RuntimeError("[MegaKittens] DAG payload contains non-Node entry")
             if node.is_input + node.is_output + (node.itype is not None) != 1:  # XOR
                 raise RuntimeError("[MegaKittens] Node must be exactly one of: input, output, or itype")
+            if (node.is_input or node.is_output) and node.itype is not None:
+                raise RuntimeError(f"[MegaKittens] Input/output node has an IType.")
+            if not node.is_input and not node.is_output and not isinstance(node.itype, IType):
+                raise RuntimeError(
+                    f"[MegaKittens] Compute node has non-IType itype: {node.itype!r}. "
+                    f"All view ops must be folded before validation."
+                )
             if len(node.out_nodes) != len(node.out_tensors):
                 raise RuntimeError(
                     f"[MegaKittens] Node arity mismatch: out_nodes={len(node.out_nodes)} out_tensors={len(node.out_tensors)}"
@@ -99,13 +106,32 @@ class DAG:
                 raise RuntimeError(
                     f"[MegaKittens] Node arity mismatch: in_ranges={len(node.in_ranges)} in_nodes={len(node.in_nodes)}"
                 )
+            if len(node.in_tensors) != len(node.in_nodes):
+                raise RuntimeError(
+                    f"[MegaKittens] Node arity mismatch: in_tensors={len(node.in_tensors)} in_nodes={len(node.in_nodes)}"
+                )
             if len(node.out_ranges) != len(node.out_tensors):
                 raise RuntimeError(
                     f"[MegaKittens] Node arity mismatch: out_ranges={len(node.out_ranges)} out_tensors={len(node.out_tensors)}"
                 )
-            for label, edges in [("in_node", list(zip(node.in_nodes, node.in_ranges))), ("out_tensor", list(zip(node.out_tensors, node.out_ranges)))]:
-                for i, (src, range) in enumerate(edges):
-                    src_shape = src[0].out_tensors[src[1]].shape if label == "in_node" else src.shape
+            for i, ((in_node, in_slot), in_tensor) in enumerate(zip(node.in_nodes, node.in_tensors)):
+                src_tensor = in_node.out_tensors[in_slot]
+                if src_tensor.numel != in_tensor.numel:
+                    raise RuntimeError(
+                        f"[MegaKittens] in_tensors[{i}] shape {in_tensor.shape} (numel={in_tensor.numel}) "
+                        f"does not match source out_tensors[{in_slot}] shape {src_tensor.shape} (numel={src_tensor.numel})"
+                    )
+                if in_tensor.dtype != src_tensor.dtype:
+                    raise RuntimeError(
+                        f"[MegaKittens] in_tensors[{i}] dtype {in_tensor.dtype} does not match "
+                        f"source out_tensors[{in_slot}] dtype {src_tensor.dtype}"
+                    )
+            for label, edges in [
+                ("in_tensor", list(zip(node.in_tensors, node.in_ranges))),
+                ("out_tensor", list(zip(node.out_tensors, node.out_ranges))),
+            ]:
+                for i, (tensor_meta, range) in enumerate(edges):
+                    src_shape = tensor_meta.shape
                     pad = len(range) - len(src_shape)
                     for d, dim_range in enumerate(range.ranges[:pad]):
                         if dim_range.start != 0 or dim_range.stop != 1 or dim_range.stride != 1:

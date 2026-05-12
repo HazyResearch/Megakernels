@@ -4,7 +4,7 @@
 
 namespace megakittens {
 
-template <typename Config, typename Globals, int SRC_A, int SRC_B, int DST_D>
+template <typename Config, typename Globals, int SRC_A, int SRC_B, int DST_D, bool TRANSPOSE_A = false, bool TRANSPOSE_B = false>
 struct Gemm {
     static_assert(Config::CLUSTER_SIZE == 2, "Gemm requires CLUSTER_SIZE == 2");
 
@@ -17,9 +17,9 @@ struct Gemm {
     static constexpr int NUM_D_TILES = 2;
     static constexpr int NUM_USED_PAGES = 6; // 4A2B (D reuses A0)
 
-    using a_st_t = kittens::st_bf<Mb/2, Kb>;                  // 128×64
-    using b_st_t = kittens::st_bf<Kb, Nb/2>;                  // 64×128
-    using d_st_t = kittens::st_bf<Mb/2, Nb/EPI_PIPE_DEPTH>;   // 128×64
+    using a_st_t = std::conditional_t<TRANSPOSE_A, kittens::st_bf<Kb, Mb/2>, kittens::st_bf<Mb/2, Kb>>;
+    using b_st_t = std::conditional_t<TRANSPOSE_B, kittens::st_bf<Nb/2, Kb>, kittens::st_bf<Kb, Nb/2>>;
+    using d_st_t = kittens::st_bf<Mb/2, Nb/EPI_PIPE_DEPTH>;   // 128×32
     using d_tt_t = kittens::tt<float, Mb/2, Nb>;              // 128×256 TMEM
 
     static constexpr int A_LIDS[LOAD_PIPE_DEPTH] = {0, 2, 3, 5};
@@ -36,7 +36,9 @@ struct Gemm {
     struct controller {
         __device__ __forceinline__ static int lid_release_order(const Globals &g, state_t<Config> &s, int query) {
             static_assert(Config::NUM_PAGES == 7 && LOAD_PIPE_DEPTH == 4);
-            const int num_iters = g.template gls<SRC_A>().cols() / Kb;
+            int num_iters;
+            if constexpr (TRANSPOSE_A) num_iters = g.template gls<SRC_A>().rows() / Kb;
+            else                       num_iters = g.template gls<SRC_A>().cols() / Kb;
             switch (num_iters % LOAD_PIPE_DEPTH) {
                 case 0: case 1: { constexpr int order[] = {6, 2, 1, 3, 5, 4, 0}; return order[query]; }
                 case 2:         { constexpr int order[] = {6, 3, 5, 4, 2, 1, 0}; return order[query]; }
@@ -60,14 +62,17 @@ struct Gemm {
             const auto &instruction = s.instruction();
             const int a_batch = instruction.indices[0];
             const int a_depth = instruction.indices[1];
-            const int a_tile_m = instruction.indices[2];
+            const int a_tile  = instruction.indices[2];
             const int b_batch = instruction.indices[3];
             const int b_depth = instruction.indices[4];
-            const int b_tile_n = instruction.indices[5];
+            const int b_tile  = instruction.indices[5];
             const int cta_rank = kittens::cluster_ctarank();
             auto &a_gl = g.template gls<SRC_A>();
             auto &b_gl = g.template gls<SRC_B>();
-            const int num_iters = a_gl.cols() / Kb;
+
+            int num_iters;
+            if constexpr (TRANSPOSE_A) num_iters = a_gl.rows() / Kb;
+            else                       num_iters = a_gl.cols() / Kb;
 
             if (kittens::warp::elect_leader()) {
                 all_input_barrier_wait<Config>(g, instruction);
@@ -82,9 +87,16 @@ struct Gemm {
                     }
                     if (i < num_iters) {
                         #pragma unroll
-                        for (int cid = 0; cid < NUM_CONSUMERS; cid++)
-                            kittens::tma::cluster::load_async(a_st(s, stage, cid), a_gl, {a_batch, a_depth, (a_tile_m*2+cta_rank)*NUM_CONSUMERS+cid, i}, inputs_arrived(s, stage), (uint16_t)(1<<cta_rank), 0);
-                        kittens::tma::cluster::load_async(b_st(s, stage), b_gl, {b_batch, b_depth, i, b_tile_n*2+cta_rank}, inputs_arrived(s, stage), (uint16_t)(1<<cta_rank), 0);
+                        for (int cid = 0; cid < NUM_CONSUMERS; cid++) {
+                            if constexpr (TRANSPOSE_A)
+                                kittens::tma::cluster::load_async(a_st(s, stage, cid), a_gl, {a_batch, a_depth, i, (a_tile*2+cta_rank)*NUM_CONSUMERS+cid}, inputs_arrived(s, stage), (uint16_t)(1<<cta_rank), 0);
+                            else
+                                kittens::tma::cluster::load_async(a_st(s, stage, cid), a_gl, {a_batch, a_depth, (a_tile*2+cta_rank)*NUM_CONSUMERS+cid, i}, inputs_arrived(s, stage), (uint16_t)(1<<cta_rank), 0);
+                        }
+                        if constexpr (TRANSPOSE_B)
+                            kittens::tma::cluster::load_async(b_st(s, stage), b_gl, {b_batch, b_depth, b_tile*2+cta_rank, i}, inputs_arrived(s, stage), (uint16_t)(1<<cta_rank), 0);
+                        else
+                            kittens::tma::cluster::load_async(b_st(s, stage), b_gl, {b_batch, b_depth, i, b_tile*2+cta_rank}, inputs_arrived(s, stage), (uint16_t)(1<<cta_rank), 0);
                     } else {
                         if (stage != 0) s.page_finish(s.lid_to_pid(A_LIDS[stage]));
                         if (stage%2 == 1) s.page_finish(s.lid_to_pid(B_LIDS[(stage-1)/2]));
@@ -104,7 +116,10 @@ struct Gemm {
         __device__ __forceinline__ static void run(const Globals &g, state_t<Config> &s) {
             const int cta_rank = kittens::cluster_ctarank();
             auto &a_gl = g.template gls<SRC_A>();
-            const int num_iters = a_gl.cols() / Kb;
+
+            int num_iters;
+            if constexpr (TRANSPOSE_A) num_iters = a_gl.rows() / Kb;
+            else                       num_iters = a_gl.cols() / Kb;
 
             if (cta_rank == 0 && kittens::warp::elect_leader()) {
                 d_tt_t d_tt[NUM_CONSUMERS];
@@ -118,8 +133,17 @@ struct Gemm {
                     kittens::wait(inputs_arrived(s, stage), (i/LOAD_PIPE_DEPTH)&0b1);
                     #pragma unroll
                     for (int cid = 0; cid < NUM_CONSUMERS; cid++) {
-                        if (i == 0) kittens::mm2_AB (d_tt[cid], a_st(s, stage, cid), b_st(s, stage), inputs_finished(s, stage));
-                        else        kittens::mma2_AB(d_tt[cid], a_st(s, stage, cid), b_st(s, stage), inputs_finished(s, stage));
+                        if (i == 0) {
+                            if constexpr      (TRANSPOSE_A && TRANSPOSE_B)  kittens::mm2_AtBt(d_tt[cid], a_st(s, stage, cid), b_st(s, stage), inputs_finished(s, stage));
+                            else if constexpr (TRANSPOSE_A)                 kittens::mm2_AtB (d_tt[cid], a_st(s, stage, cid), b_st(s, stage), inputs_finished(s, stage));
+                            else if constexpr (TRANSPOSE_B)                 kittens::mm2_ABt (d_tt[cid], a_st(s, stage, cid), b_st(s, stage), inputs_finished(s, stage));
+                            else                                            kittens::mm2_AB  (d_tt[cid], a_st(s, stage, cid), b_st(s, stage), inputs_finished(s, stage));
+                        } else {
+                            if constexpr      (TRANSPOSE_A && TRANSPOSE_B)  kittens::mma2_AtBt(d_tt[cid], a_st(s, stage, cid), b_st(s, stage), inputs_finished(s, stage));
+                            else if constexpr (TRANSPOSE_A)                 kittens::mma2_AtB (d_tt[cid], a_st(s, stage, cid), b_st(s, stage), inputs_finished(s, stage));
+                            else if constexpr (TRANSPOSE_B)                 kittens::mma2_ABt (d_tt[cid], a_st(s, stage, cid), b_st(s, stage), inputs_finished(s, stage));
+                            else                                            kittens::mma2_AB  (d_tt[cid], a_st(s, stage, cid), b_st(s, stage), inputs_finished(s, stage));
+                        }
                     }
                 }
                 kittens::tensor_commit<2>(outputs_arrived(s));

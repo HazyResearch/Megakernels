@@ -1,3 +1,4 @@
+import builtins
 from typing import ClassVar, Literal, Tuple
 
 import torch
@@ -8,14 +9,36 @@ from .dtype import DType
 from ..jit.pykittens import st, sv
 
 
-class TensorMeta(BaseModel, frozen=True):  # frozen=True needed to be hashable
+class TensorStorage(BaseModel):
+    """Backing memory block. Multiple TensorMetas can share the same TensorStorage instance."""
+    size: NonNegativeInt  # bytes
+    device: Device
+    id: int = 0
+
+    def model_post_init(self, _) -> None:
+        self.id = builtins.id(self)
+
+
+class TensorMeta(BaseModel):
     dtype: DType
     shape: Tuple[NonNegativeInt, ...] = Field(max_length=4)  # TODO: support dynamic shapes
     device: Device
+    storage: TensorStorage | None = None  # set by the scheduler
 
     @property
     def full_range(self) -> "TensorRange":
         return TensorRange(ranges=tuple(DimRange(start=0, stop=d) for d in self.shape))
+
+    @property
+    def numel(self) -> int:
+        n = 1
+        for d in self.shape:
+            n *= d
+        return n
+
+    @property
+    def size_bytes(self) -> int:
+        return self.numel * self.dtype.size
 
     @classmethod
     def from_torch(
@@ -144,7 +167,7 @@ class TensorRange(BaseModel):
     def effective_shape(self) -> Tuple[int, ...]:
         return tuple(d.size for d in self.ranges)
 
-    @classmethod
+    @staticmethod
     def compose(first: "TensorRange", second: "TensorRange") -> "TensorRange":
         """Compose two ranges: first is applied first (closer to source tensor), 
            second is relative to first's effective_shape."""

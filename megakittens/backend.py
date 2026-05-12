@@ -6,9 +6,10 @@ import torch
 from functorch.compile import make_boxed_func
 from torch._dynamo.backends.common import aot_autograd
 
+from .dag_optimizer import optimize_dag
 from .dispatcher import Dispatcher
+from .fx_parser import extract_dag_from_fx_graph
 from .scheduler import schedule
-from .tracer import trace
 from .utils import create_log_base_path, save_dag_as_png, save_dag_as_png_as_json, save_schedule_as_txt, timed
 
 
@@ -27,7 +28,8 @@ def megakittens_backend(
 ) -> Callable[[torch.fx.GraphModule, List[Any]], Callable[..., Any]]:
     def _megakittens_backend(gm: torch.fx.GraphModule, example_inputs: List[Any]) -> Callable[..., Any]:
         if verbose:
-            print(f"[MegaKittens] Compiling function `{fn.__qualname__}`")
+            name = getattr(fn, '__qualname__', None) or type(fn).__qualname__
+            print(f"[MegaKittens] Compiling `{name}`")
             print(f"[MegaKittens] FX graph:")
             gm.graph.print_tabular()
 
@@ -35,7 +37,13 @@ def megakittens_backend(
             base_path = create_log_base_path(fn=fn)
 
         with timed("Built DAG from FX graph", verbose):
-            dag = trace(gm, example_inputs)
+            dag = extract_dag_from_fx_graph(gm, example_inputs)
+
+        with timed("Optimized DAG", verbose):
+            dag = optimize_dag(dag)
+
+        with timed("Validated DAG", verbose):
+            dag.validate()
 
         if save_dag:
             with timed("Saved DAG as JSON", verbose):

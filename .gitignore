@@ -9,3 +9,4 @@ log/
 .vscode/
 temp/
 examples_from_old/
+checkpoints/
