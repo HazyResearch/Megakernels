@@ -1,0 +1,198 @@
+"""Pure-pytorch Llama-3.3-70B decode using the same paged KV layout and
+interleaved RoPE as compiled_decode.py. Acts as the numerics oracle and the
+"naive eager pytorch" rung of the megakernel ablation ladder.
+
+Each op is its own small helper so it can be replaced one-at-a-time with a
+custom CUDA kernel binding in a follow-up file.
+"""
+
+from __future__ import annotations
+
+import argparse
+
+import torch
+
+from .compiled_decode import (
+    HIDDEN_DIM,
+    HEAD_DIM,
+    NUM_Q_HEADS,
+    NUM_KV_HEADS,
+    GQA_RATIO,
+    Q_DIM,
+    KV_DIM,
+    PAGE_SIZE,
+    benchmark_tok_per_sec,
+)
+
+
+NUM_LAYERS = 80
+
+
+def _rms_torch(x: torch.Tensor, weight: torch.Tensor, eps: torch.Tensor) -> torch.Tensor:
+    x_f = x.float()
+    var = x_f.pow(2).mean(-1, keepdim=True)
+    return (x_f * torch.rsqrt(var + eps) * weight.float()).to(x.dtype)
+
+
+def _apply_rope_torch(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+    # x, cos, and sin are pre-interleaved as [first_half_0, second_half_0, ...].
+    x_float = x.float()
+    x_even = x_float[..., ::2]
+    x_odd = x_float[..., 1::2]
+    rotated = torch.stack((-x_odd, x_even), dim=-1).flatten(-2)
+    return (x_float * cos + rotated * sin).to(x.dtype)
+
+
+def _qkv_rope_append_torch(
+    hidden_norm: torch.Tensor,
+    qkv_w: torch.Tensor,
+    rope_cos: torch.Tensor,
+    rope_sin: torch.Tensor,
+    pos_id: torch.Tensor,
+    kv_append_indices: torch.Tensor,
+    k_cache_layer: torch.Tensor,
+    v_cache_layer: torch.Tensor,
+) -> torch.Tensor:
+    B = hidden_norm.shape[-2]
+    qkv = hidden_norm @ qkv_w[0].transpose(-1, -2)
+    q = qkv[..., :Q_DIM].view(B, NUM_Q_HEADS, HEAD_DIM)
+    k = qkv[..., Q_DIM:Q_DIM + KV_DIM].view(B, NUM_KV_HEADS, HEAD_DIM)
+    v = qkv[..., Q_DIM + KV_DIM:].view(B, NUM_KV_HEADS, HEAD_DIM)
+
+    cos = rope_cos[pos_id.long()]
+    sin = rope_sin[pos_id.long()]
+    q = _apply_rope_torch(q, cos, sin)
+    k = _apply_rope_torch(k, cos, sin)
+
+    k_flat = k_cache_layer.view(-1, NUM_KV_HEADS, HEAD_DIM)
+    v_flat = v_cache_layer.view(-1, NUM_KV_HEADS, HEAD_DIM)
+    idx = kv_append_indices.long()
+    k_flat[idx] = k
+    v_flat[idx] = v
+
+    return q.reshape(B, HIDDEN_DIM)
+
+
+def _attention_torch(
+    q_flat: torch.Tensor,
+    k_cache_layer: torch.Tensor,
+    v_cache_layer: torch.Tensor,
+    pos_id: torch.Tensor,
+    attn_scale: torch.Tensor,
+) -> torch.Tensor:
+    B = q_flat.shape[-2]
+    num_pages = k_cache_layer.shape[0]
+    pages_per_seq = num_pages // B
+    seq_len = pages_per_seq * PAGE_SIZE
+
+    q = q_flat.view(B, NUM_Q_HEADS, HEAD_DIM).float()
+    k_seq = k_cache_layer.view(B, seq_len, NUM_KV_HEADS, HEAD_DIM).float()
+    v_seq = v_cache_layer.view(B, seq_len, NUM_KV_HEADS, HEAD_DIM).float()
+
+    q_grouped = q.view(B, NUM_KV_HEADS, GQA_RATIO, HEAD_DIM)
+    k_t = k_seq.permute(0, 2, 3, 1)
+    scores = torch.matmul(q_grouped, k_t) * attn_scale
+
+    positions = torch.arange(seq_len, device=q_flat.device, dtype=pos_id.dtype)
+    mask = (positions <= pos_id).view(1, 1, 1, seq_len)
+    scores = scores.masked_fill(~mask, float("-inf"))
+
+    weights = torch.softmax(scores, dim=-1)
+    v_perm = v_seq.permute(0, 2, 1, 3)
+    out = torch.matmul(weights, v_perm)
+    return out.reshape(B, NUM_Q_HEADS * HEAD_DIM).to(q_flat.dtype)
+
+
+def _o_proj_residual_torch(hidden: torch.Tensor, attn_out: torch.Tensor, o_w: torch.Tensor) -> None:
+    hidden.add_(attn_out @ o_w[0].transpose(-1, -2))
+
+
+def _gate_silu_torch(x: torch.Tensor, gate_w: torch.Tensor) -> torch.Tensor:
+    return torch.nn.functional.silu(x @ gate_w[0].transpose(-1, -2))
+
+
+def _up_matmul_torch(x: torch.Tensor, up_w: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
+    return (x @ up_w[0].transpose(-1, -2)) * gate
+
+
+def _lm_head_torch(x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
+    return x @ w[0].transpose(-1, -2)
+
+
+def decode(
+    hidden,                # [B, HIDDEN_DIM] bf16
+    qkv_weights,           # [L, QKV_DIM, HIDDEN_DIM] bf16, Q/K interleaved
+    o_weights,             # [L, HIDDEN_DIM, HIDDEN_DIM] bf16
+    attn_norm_weights,     # [L, HIDDEN_DIM] bf16
+    mlp_norm_weights,      # [L, HIDDEN_DIM] bf16
+    gate_weights,          # [L, INTERMEDIATE_DIM, HIDDEN_DIM] bf16
+    up_weights,            # [L, INTERMEDIATE_DIM, HIDDEN_DIM] bf16
+    down_weights,          # [L, HIDDEN_DIM, INTERMEDIATE_DIM] bf16
+    lm_head_norm_weight,   # [1, HIDDEN_DIM] bf16
+    lm_head_weight,        # [1, VOCAB_SIZE, HIDDEN_DIM] bf16
+    k_cache,               # [L * num_pages, PAGE_SIZE, NUM_KV_HEADS, HEAD_DIM] bf16
+    v_cache,               # [L * num_pages, PAGE_SIZE, NUM_KV_HEADS, HEAD_DIM] bf16
+    rope_cos,              # [max_seq_len, HEAD_DIM] fp32, interleaved
+    rope_sin,              # [max_seq_len, HEAD_DIM] fp32, interleaved
+    kv_append_indices,     # [B] int32, page * PAGE_SIZE + offset in layer-local page space
+    pos_id,                # [1] int32
+    attn_scale,            # [1] fp32
+    rms_norm_eps,          # [1] fp32
+):
+    num_pages = k_cache.shape[-4] // NUM_LAYERS
+
+    for layer_idx in range(NUM_LAYERS):
+        hidden_norm = _rms_torch(hidden, attn_norm_weights[layer_idx], rms_norm_eps)
+        layer_page_start = layer_idx * num_pages
+        layer_page_stop = layer_page_start + num_pages
+        layer_k = k_cache[layer_page_start:layer_page_stop]
+        layer_v = v_cache[layer_page_start:layer_page_stop]
+        q = _qkv_rope_append_torch(
+            hidden_norm,
+            qkv_weights[layer_idx:layer_idx + 1],
+            rope_cos,
+            rope_sin,
+            pos_id,
+            kv_append_indices,
+            layer_k,
+            layer_v,
+        )
+
+        attn_out = _attention_torch(q, layer_k, layer_v, pos_id, attn_scale)
+
+        _o_proj_residual_torch(hidden, attn_out, o_weights[layer_idx:layer_idx + 1])
+
+        mlp_norm = _rms_torch(hidden, mlp_norm_weights[layer_idx], rms_norm_eps)
+        gate = _gate_silu_torch(mlp_norm, gate_weights[layer_idx:layer_idx + 1])
+        up = _up_matmul_torch(mlp_norm, up_weights[layer_idx:layer_idx + 1], gate)
+        _o_proj_residual_torch(hidden, up, down_weights[layer_idx:layer_idx + 1])
+
+    logits_hidden = _rms_torch(hidden, lm_head_norm_weight[0], rms_norm_eps)
+    logits = _lm_head_torch(logits_hidden, lm_head_weight)
+    pos_id.add_(1)
+    return logits
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--prompt", type=str, default="Hello, my name is")
+    parser.add_argument("--batch-size", type=int, default=512)
+    parser.add_argument("--max-seq-len", type=int, default=128)
+    parser.add_argument("--max-new-tokens", type=int, default=64)
+    parser.add_argument("--num-samples", type=int, default=3)
+    parser.add_argument("--warmup", type=int, default=2)
+    parser.add_argument("--num-layers", type=int, default=NUM_LAYERS)
+    args = parser.parse_args()
+
+    NUM_LAYERS = args.num_layers
+
+    benchmark_tok_per_sec(
+        decode,
+        num_layers=NUM_LAYERS,
+        prompt=args.prompt,
+        batch_size=args.batch_size,
+        max_seq_len=args.max_seq_len,
+        max_new_tokens=args.max_new_tokens,
+        num_samples=args.num_samples,
+        warmup=args.warmup,
+    )

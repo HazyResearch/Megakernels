@@ -35,6 +35,7 @@ HIDDEN_DIM = 8192
 HEAD_DIM = 128
 NUM_Q_HEADS = 64
 NUM_KV_HEADS = 8
+GQA_RATIO = NUM_Q_HEADS // NUM_KV_HEADS
 Q_DIM = NUM_Q_HEADS * HEAD_DIM
 KV_DIM = NUM_KV_HEADS * HEAD_DIM
 QKV_DIM = Q_DIM + 2 * KV_DIM
@@ -148,6 +149,7 @@ def load_hf_weights(
     batch_size: int,
     max_seq_len: int,
     device: str,
+    num_layers: int,
 ) -> tuple[dict[str, torch.Tensor], int]:
     """Stream Llama-70B safetensors shards directly into stacked GPU tensors."""
     print(f"Fetching {MODEL_ID} (cached) ...")
@@ -158,18 +160,18 @@ def load_hf_weights(
     num_pages = batch_size * pages_per_seq
 
     weights = {
-        "qkv_weights": torch.empty(NUM_LAYERS, QKV_DIM, HIDDEN_DIM, dtype=torch.bfloat16, device=device),
-        "o_weights": torch.empty(NUM_LAYERS, HIDDEN_DIM, HIDDEN_DIM, dtype=torch.bfloat16, device=device),
-        "attn_norm_weights": torch.empty(NUM_LAYERS, HIDDEN_DIM, dtype=torch.bfloat16, device=device),
-        "mlp_norm_weights": torch.empty(NUM_LAYERS, HIDDEN_DIM, dtype=torch.bfloat16, device=device),
-        "gate_weights": torch.empty(NUM_LAYERS, INTERMEDIATE_DIM, HIDDEN_DIM, dtype=torch.bfloat16, device=device),
-        "up_weights": torch.empty(NUM_LAYERS, INTERMEDIATE_DIM, HIDDEN_DIM, dtype=torch.bfloat16, device=device),
-        "down_weights": torch.empty(NUM_LAYERS, HIDDEN_DIM, INTERMEDIATE_DIM, dtype=torch.bfloat16, device=device),
+        "qkv_weights": torch.empty(num_layers, QKV_DIM, HIDDEN_DIM, dtype=torch.bfloat16, device=device),
+        "o_weights": torch.empty(num_layers, HIDDEN_DIM, HIDDEN_DIM, dtype=torch.bfloat16, device=device),
+        "attn_norm_weights": torch.empty(num_layers, HIDDEN_DIM, dtype=torch.bfloat16, device=device),
+        "mlp_norm_weights": torch.empty(num_layers, HIDDEN_DIM, dtype=torch.bfloat16, device=device),
+        "gate_weights": torch.empty(num_layers, INTERMEDIATE_DIM, HIDDEN_DIM, dtype=torch.bfloat16, device=device),
+        "up_weights": torch.empty(num_layers, INTERMEDIATE_DIM, HIDDEN_DIM, dtype=torch.bfloat16, device=device),
+        "down_weights": torch.empty(num_layers, HIDDEN_DIM, INTERMEDIATE_DIM, dtype=torch.bfloat16, device=device),
         "lm_head_norm_weight": torch.empty(1, HIDDEN_DIM, dtype=torch.bfloat16, device=device),
         "lm_head_weight": torch.empty(1, VOCAB_SIZE, HIDDEN_DIM, dtype=torch.bfloat16, device=device),
         "embed_weight": torch.empty(VOCAB_SIZE, HIDDEN_DIM, dtype=torch.bfloat16, device=device),
-        "k_cache": torch.zeros(NUM_LAYERS * num_pages, PAGE_SIZE, NUM_KV_HEADS, HEAD_DIM, dtype=torch.bfloat16, device=device),
-        "v_cache": torch.zeros(NUM_LAYERS * num_pages, PAGE_SIZE, NUM_KV_HEADS, HEAD_DIM, dtype=torch.bfloat16, device=device),
+        "k_cache": torch.zeros(num_layers * num_pages, PAGE_SIZE, NUM_KV_HEADS, HEAD_DIM, dtype=torch.bfloat16, device=device),
+        "v_cache": torch.zeros(num_layers * num_pages, PAGE_SIZE, NUM_KV_HEADS, HEAD_DIM, dtype=torch.bfloat16, device=device),
     }
 
     q_idx = _interleave_indices(NUM_Q_HEADS, HEAD_DIM, device=device)
@@ -196,7 +198,7 @@ def load_hf_weights(
                 elif name.startswith("model.layers."):
                     parts = name.split(".")
                     layer = int(parts[2])
-                    if layer >= NUM_LAYERS:
+                    if layer >= num_layers:
                         del t
                         continue
                     suffix = ".".join(parts[3:])
@@ -226,6 +228,9 @@ def load_hf_weights(
 
 @torch.inference_mode()
 def benchmark_tok_per_sec(
+    decode_fn,
+    *,
+    num_layers: int,
     prompt: str = "Hello, my name is",
     batch_size: int = 512,
     max_seq_len: int = 128,
@@ -248,7 +253,7 @@ def benchmark_tok_per_sec(
         print(f"Bumping max_seq_len: {max_seq_len} -> {needed_seq_len} to fit prompt + max_new_tokens")
         max_seq_len = needed_seq_len
 
-    weights, pages_per_seq = load_hf_weights(batch_size, max_seq_len, device)
+    weights, pages_per_seq = load_hf_weights(batch_size, max_seq_len, device, num_layers)
     num_pages = batch_size * pages_per_seq
 
     hidden = torch.empty(batch_size, HIDDEN_DIM, dtype=torch.bfloat16, device=device)
@@ -271,8 +276,6 @@ def benchmark_tok_per_sec(
         kv_indices, pos_id, attn_scale, rms_norm_eps,
     )
 
-    compiled = megakittens.compile(decode, use_jit_cache=False, verbose=False, save_schedule=False)
-
     weight_tensors = [
         weights["qkv_weights"], weights["o_weights"], weights["attn_norm_weights"],
         weights["mlp_norm_weights"], weights["gate_weights"], weights["up_weights"],
@@ -289,7 +292,7 @@ def benchmark_tok_per_sec(
     def _decode_step(pos: int, input_tokens: torch.Tensor) -> torch.Tensor:
         hidden.copy_(weights["embed_weight"][input_tokens])
         torch.add(kv_index_base, pos, out=kv_indices)
-        logits = compiled(*decode_args)
+        logits = decode_fn(*decode_args)
         return torch.argmax(logits, dim=-1)
 
     def _run_once(save_tokens: bool = False) -> float:
@@ -342,7 +345,7 @@ def benchmark_tok_per_sec(
 
     print("==========")
     print(f"Batch size: {batch_size}")
-    print(f"Layers: {NUM_LAYERS}")
+    print(f"Layers: {num_layers}")
     print(f"Prompt tokens: {prompt_len}")
     print(f"Generated tokens per sequence: {max_new_tokens}")
     print(f"Pages per sequence: {pages_per_seq}")
@@ -368,7 +371,11 @@ if __name__ == "__main__":
 
     NUM_LAYERS = args.num_layers
 
+    compiled = megakittens.compile(decode, use_jit_cache=False, verbose=False, save_schedule=False)
+
     benchmark_tok_per_sec(
+        compiled,
+        num_layers=NUM_LAYERS,
         prompt=args.prompt,
         batch_size=args.batch_size,
         max_seq_len=args.max_seq_len,
