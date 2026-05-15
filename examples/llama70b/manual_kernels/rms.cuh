@@ -5,15 +5,20 @@
 
 namespace manual_kernels {
 
-// Mirrors the megakernel's rms70b work split. At batch B, we launch
-// `rms_n_inst(B)` blocks; each block handles a contiguous slice of rows.
-// At B = 1024 this is 148 blocks (matching the megakernel's 148 instructions
-// at B=1024 on B200), giving instructions:blocks = 1:1.
+using namespace kittens;
 
-constexpr int RMS_HIDDEN_DIM   = 8192;
-constexpr int RMS_NUM_SMS      = 148;
+// Standalone port of the megakernel's llama70b RMS pipeline. The work split
+// mirrors megakittens/itypes/llama70b/rms.py: each block owns a contiguous
+// slice of rows and computes rmsnorm against a shared (per-layer) weight.
+// At B = 1024 this is 148 blocks, matching the megakernel's instructions:blocks
+// = 1:1.
+
+constexpr int RMS_HIDDEN_DIM        = 8192;
+constexpr int RMS_NUM_SMS           = 148;
+constexpr int RMS_NUM_WARPS         = 8;
+constexpr int RMS_NUM_THREADS       = RMS_NUM_WARPS * WARP_THREADS;
+constexpr int RMS_ELEMS_PER_WARP    = RMS_HIDDEN_DIM / RMS_NUM_WARPS;  // 1024
 constexpr int RMS_MAX_ROWS_PER_INST = 12;
-constexpr int RMS_NUM_THREADS  = 256;
 
 __host__ __device__ inline int rms_n_inst(int B) {
     if (B <= RMS_NUM_SMS) return B;
@@ -23,16 +28,17 @@ __host__ __device__ inline int rms_n_inst(int B) {
 }
 
 struct rms_config {
-    static constexpr int HIDDEN_DIM  = RMS_HIDDEN_DIM;
-    static constexpr int NUM_THREADS = RMS_NUM_THREADS;
-    static constexpr int DYNAMIC_SHARED_MEMORY = 0;  // bump when the kernel needs smem
+    static constexpr int HIDDEN_DIM     = RMS_HIDDEN_DIM;
+    static constexpr int NUM_WARPS      = RMS_NUM_WARPS;
+    static constexpr int NUM_THREADS    = RMS_NUM_THREADS;
+    static constexpr int ELEMS_PER_WARP = RMS_ELEMS_PER_WARP;
 };
 
 struct rms_globals {
-    using x_gl = kittens::gl<kittens::bf16, -1, -1, -1, -1>;
-    using w_gl = kittens::gl<kittens::bf16, -1, -1, -1, -1>;
-    using e_gl = kittens::gl<float,         -1, -1, -1, -1>;
-    using o_gl = kittens::gl<kittens::bf16, -1, -1, -1, -1>;
+    using x_gl = gl<bf16,  -1, -1, -1, -1>;
+    using w_gl = gl<bf16,  -1, -1, -1, -1>;
+    using e_gl = gl<float, -1, -1, -1, -1>;
+    using o_gl = gl<bf16,  -1, -1, -1, -1>;
 
     x_gl x;
     w_gl weight;
@@ -40,23 +46,65 @@ struct rms_globals {
     o_gl out;
 };
 
-// TODO(rms): implement the rmsnorm body.
-//
-// Layout: blockIdx.x in [0, n_inst), block handles rows [row_start, row_end)
-//   row_start = (long long)blockIdx.x * B / n_inst
-//   row_end   = (long long)(blockIdx.x + 1) * B / n_inst
-// where B = g.x.rows() (the dynamic batch dim).
-//
-// For each row r in [row_start, row_end):
-//   var = mean_c( x[r, c]^2 )  in fp32
-//   inv = rsqrt(var + eps[0])
-//   out[r, c] = (x[r, c] * inv) * weight[c]   (back to bf16)
-//
-// Suggested approach: 256 threads × 32 elements/thread covers the 8192-wide row
-// with 16-byte vector loads; intra-block reduction via warp-shuffle then a
-// single-warp shared-memory reduction.
+__launch_bounds__(rms_config::NUM_THREADS, 1)
 __global__ void rms_kernel(const __grid_constant__ rms_globals g) {
-    // placeholder body
+    constexpr int N  = rms_config::HIDDEN_DIM;
+    constexpr int NW = rms_config::NUM_WARPS;
+    constexpr int E  = rms_config::ELEMS_PER_WARP;
+
+    using row_vec        = sv_bf<N>;
+    using slice_vec      = sv_bf<E>;
+    using consumer_group = group<NW>;
+
+    extern __shared__ alignment_dummy __shm[];
+    shared_allocator al((int*)&__shm[0]);
+    row_vec &weight_smem = al.allocate<row_vec>();
+    __shared__ float scratch[NW];
+
+    // Row partition: this block owns rows [row_lo, row_hi). Mirrors the
+    // megakernel's block_indices split: round(i * B / n_inst) per i.
+    const int B      = g.x.rows();
+    const int n_inst = gridDim.x;
+    const int row_lo = (int)(((long long)blockIdx.x       * B) / n_inst);
+    const int row_hi = (int)(((long long)(blockIdx.x + 1) * B) / n_inst);
+    const int num_rows = row_hi - row_lo;
+
+    // Load the (single) weight row once via cp.async, reused across all rows.
+    consumer_group::load_async(weight_smem, g.weight, {0, 0, 0, 0});
+    load_async_wait();
+    consumer_group::sync(1);
+
+    slice_vec &weight_slice = reinterpret_cast<slice_vec *>(&weight_smem)[warpid()];
+    const float eps_val = g.eps.raw_ptr[0];
+
+    for (int i = 0; i < num_rows; i++) {
+        rv_fl<E> act_vec;
+        consumer_group::load(act_vec, g.x, {0, 0, row_lo + i, 0});
+
+        // partial sum of squares within this warp
+        rv_fl<E> sq;
+        warp::copy(sq, act_vec);
+        warp::mul(sq, sq, sq);
+        float partial = warp::sum(sq);
+
+        if (warp::elect_leader()) scratch[warpid()] = partial;
+        consumer_group::sync(1);
+
+        // cross-warp reduction (each thread reads all NW partials)
+        float full = 0.f;
+        #pragma unroll
+        for (int w = 0; w < NW; w++) full += scratch[w];
+        const float rms_scale = rsqrtf(full / float(N) + eps_val);
+
+        // scale * weight, then multiply into activations
+        rv_fl<E> w_vec;
+        warp::load(w_vec, weight_slice);
+        warp::mul(w_vec, w_vec, rms_scale);
+        warp::mul(act_vec, act_vec, w_vec);
+
+        consumer_group::store(g.out, act_vec, {0, 0, row_lo + i, 0});
+        consumer_group::sync(1);
+    }
 }
 
 inline void rms_dispatch(at::Tensor x, at::Tensor weight, at::Tensor eps, at::Tensor out) {
@@ -83,12 +131,10 @@ inline void rms_dispatch(at::Tensor x, at::Tensor weight, at::Tensor eps, at::Te
         kittens::py::tensor_to_gl<rms_globals::o_gl>(out),
     };
 
-    if constexpr (rms_config::DYNAMIC_SHARED_MEMORY > 0) {
-        cudaFuncSetAttribute(rms_kernel,
-                             cudaFuncAttributeMaxDynamicSharedMemorySize,
-                             rms_config::DYNAMIC_SHARED_MEMORY);
-    }
-    rms_kernel<<<n_inst, rms_config::NUM_THREADS, rms_config::DYNAMIC_SHARED_MEMORY>>>(g);
+    constexpr int dyn_smem = MAX_SHARED_MEMORY - 1024;
+    CUDACHECK(cudaFuncSetAttribute(
+        rms_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dyn_smem));
+    rms_kernel<<<n_inst, rms_config::NUM_THREADS, dyn_smem>>>(g);
 }
 
 }  // namespace manual_kernels

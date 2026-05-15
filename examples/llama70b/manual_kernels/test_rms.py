@@ -1,11 +1,4 @@
-"""Smoke test for the rms_forward binding.
-
-Verifies that _C.rms_forward is callable and produces numerics matching a
-pytorch rmsnorm reference. Until rms.cuh's kernel body is implemented, the
-dispatch function falls back to a host-side rmsnorm so this test passes as a
-binding-wiring check; once the real kernel is in, it doubles as a correctness
-test.
-"""
+"""Smoke test for the rms_forward binding."""
 
 from __future__ import annotations
 
