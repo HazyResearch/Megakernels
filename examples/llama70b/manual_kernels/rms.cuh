@@ -61,15 +61,12 @@ __global__ void rms_kernel(const __grid_constant__ rms_globals g) {
     row_vec &weight_smem = al.allocate<row_vec>();
     __shared__ float scratch[NW];
 
-    // Row partition: this block owns rows [row_lo, row_hi). Mirrors the
-    // megakernel's block_indices split: round(i * B / n_inst) per i.
     const int B      = g.x.rows();
     const int n_inst = gridDim.x;
     const int row_lo = (int)(((long long)blockIdx.x       * B) / n_inst);
     const int row_hi = (int)(((long long)(blockIdx.x + 1) * B) / n_inst);
     const int num_rows = row_hi - row_lo;
 
-    // Load the (single) weight row once via cp.async, reused across all rows.
     consumer_group::load_async(weight_smem, g.weight, {0, 0, 0, 0});
     load_async_wait();
     consumer_group::sync(1);
@@ -81,7 +78,6 @@ __global__ void rms_kernel(const __grid_constant__ rms_globals g) {
         rv_fl<E> act_vec;
         consumer_group::load(act_vec, g.x, {0, 0, row_lo + i, 0});
 
-        // partial sum of squares within this warp
         rv_fl<E> sq;
         warp::copy(sq, act_vec);
         warp::mul(sq, sq, sq);
@@ -90,13 +86,11 @@ __global__ void rms_kernel(const __grid_constant__ rms_globals g) {
         if (warp::elect_leader()) scratch[warpid()] = partial;
         consumer_group::sync(1);
 
-        // cross-warp reduction (each thread reads all NW partials)
         float full = 0.f;
         #pragma unroll
         for (int w = 0; w < NW; w++) full += scratch[w];
         const float rms_scale = rsqrtf(full / float(N) + eps_val);
 
-        // scale * weight, then multiply into activations
         rv_fl<E> w_vec;
         warp::load(w_vec, weight_slice);
         warp::mul(w_vec, w_vec, rms_scale);

@@ -23,15 +23,16 @@ from .compiled_decode import (
     PAGE_SIZE,
     benchmark_tok_per_sec,
 )
+from .manual_kernels import _C
 
 
 NUM_LAYERS = 80
 
 
-def _rms_torch(x: torch.Tensor, weight: torch.Tensor, eps: torch.Tensor) -> torch.Tensor:
-    x_f = x.float()
-    var = x_f.pow(2).mean(-1, keepdim=True)
-    return (x_f * torch.rsqrt(var + eps) * weight.float()).to(x.dtype)
+def _rms_kernel(x: torch.Tensor, weight: torch.Tensor, eps: torch.Tensor) -> torch.Tensor:
+    out = torch.empty_like(x)
+    _C.rms_forward(x, weight, eps, out)
+    return out
 
 
 def _apply_rope_torch(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
@@ -142,7 +143,7 @@ def decode(
     num_pages = k_cache.shape[-4] // NUM_LAYERS
 
     for layer_idx in range(NUM_LAYERS):
-        hidden_norm = _rms_torch(hidden, attn_norm_weights[layer_idx], rms_norm_eps)
+        hidden_norm = _rms_kernel(hidden, attn_norm_weights[layer_idx], rms_norm_eps)
         layer_page_start = layer_idx * num_pages
         layer_page_stop = layer_page_start + num_pages
         layer_k = k_cache[layer_page_start:layer_page_stop]
@@ -162,12 +163,12 @@ def decode(
 
         _o_proj_residual_torch(hidden, attn_out, o_weights[layer_idx:layer_idx + 1])
 
-        mlp_norm = _rms_torch(hidden, mlp_norm_weights[layer_idx], rms_norm_eps)
+        mlp_norm = _rms_kernel(hidden, mlp_norm_weights[layer_idx], rms_norm_eps)
         gate = _gate_silu_torch(mlp_norm, gate_weights[layer_idx:layer_idx + 1])
         up = _up_matmul_torch(mlp_norm, up_weights[layer_idx:layer_idx + 1], gate)
         _o_proj_residual_torch(hidden, up, down_weights[layer_idx:layer_idx + 1])
 
-    logits_hidden = _rms_torch(hidden, lm_head_norm_weight[0], rms_norm_eps)
+    logits_hidden = _rms_kernel(hidden, lm_head_norm_weight[0], rms_norm_eps)
     logits = _lm_head_torch(logits_hidden, lm_head_weight)
     pos_id.add_(1)
     return logits
