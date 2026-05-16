@@ -1,7 +1,7 @@
 GPU := B200
 SRC := kernels.cu
 OUT := _C$(shell python -c "import sysconfig; print(sysconfig.get_config_var('EXT_SUFFIX'))")
-CMD := python -m examples.llama70b.manual_kernels.test_rms
+CMD := python -m examples.llama70b.manual_kernels.test_qkv_rope_append
 CONFIG := pytorch
 
 # Pin python lookups to the active conda env (use `python`, not `python3`,

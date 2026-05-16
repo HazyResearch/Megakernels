@@ -35,6 +35,24 @@ def _rms_kernel(x: torch.Tensor, weight: torch.Tensor, eps: torch.Tensor) -> tor
     return out
 
 
+def _qkv_rope_append_kernel(
+    hidden_norm: torch.Tensor,
+    qkv_w: torch.Tensor,
+    rope_cos: torch.Tensor,
+    rope_sin: torch.Tensor,
+    pos_id: torch.Tensor,
+    kv_append_indices: torch.Tensor,
+    layer_k: torch.Tensor,
+    layer_v: torch.Tensor,
+) -> torch.Tensor:
+    B = hidden_norm.shape[-2]
+    q = torch.empty(B, Q_DIM, dtype=hidden_norm.dtype, device=hidden_norm.device)
+    _C.qkv_rope_append_forward(
+        hidden_norm, qkv_w, rope_cos, rope_sin, pos_id, kv_append_indices, layer_k, layer_v, q,
+    )
+    return q
+
+
 def _apply_rope_torch(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
     # x, cos, and sin are pre-interleaved as [first_half_0, second_half_0, ...].
     x_float = x.float()
@@ -108,8 +126,12 @@ def _o_proj_residual_torch(hidden: torch.Tensor, attn_out: torch.Tensor, o_w: to
     hidden.add_(attn_out @ o_w[0].transpose(-1, -2))
 
 
-def _gate_silu_torch(x: torch.Tensor, gate_w: torch.Tensor) -> torch.Tensor:
-    return torch.nn.functional.silu(x @ gate_w[0].transpose(-1, -2))
+def _gate_silu_kernel(x: torch.Tensor, gate_w: torch.Tensor) -> torch.Tensor:
+    M, _ = x.shape
+    N = gate_w.shape[-2]
+    out = torch.empty(M, N, dtype=x.dtype, device=x.device)
+    _C.gate_silu_forward(x, gate_w, out)
+    return out
 
 
 def _up_matmul_torch(x: torch.Tensor, up_w: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
@@ -148,7 +170,7 @@ def decode(
         layer_page_stop = layer_page_start + num_pages
         layer_k = k_cache[layer_page_start:layer_page_stop]
         layer_v = v_cache[layer_page_start:layer_page_stop]
-        q = _qkv_rope_append_torch(
+        q = _qkv_rope_append_kernel(
             hidden_norm,
             qkv_weights[layer_idx:layer_idx + 1],
             rope_cos,
@@ -164,7 +186,7 @@ def decode(
         _o_proj_residual_torch(hidden, attn_out, o_weights[layer_idx:layer_idx + 1])
 
         mlp_norm = _rms_kernel(hidden, mlp_norm_weights[layer_idx], rms_norm_eps)
-        gate = _gate_silu_torch(mlp_norm, gate_weights[layer_idx:layer_idx + 1])
+        gate = _gate_silu_kernel(mlp_norm, gate_weights[layer_idx:layer_idx + 1])
         up = _up_matmul_torch(mlp_norm, up_weights[layer_idx:layer_idx + 1], gate)
         _o_proj_residual_torch(hidden, up, down_weights[layer_idx:layer_idx + 1])
 
