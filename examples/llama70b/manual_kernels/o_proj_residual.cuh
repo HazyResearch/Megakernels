@@ -9,8 +9,12 @@ namespace manual_kernels {
 
 using namespace kittens;
 
+// o_proj_residual: hidden += attn_out @ o_w[0].T.
+// Atomically adds the matmul output into the residual using tma::store_add_async,
+// so the same tensor (hidden) is both an input and the destination. The matmul
+// pipeline itself is identical to gate_silu's; the epilogue just stores-with-add.
 template <typename C>
-struct gate_silu_globals {
+struct o_proj_residual_globals {
     using a_tile = typename matmul_pipeline<C>::a_tile_t;
     using b_tile = typename matmul_pipeline<C>::b_tile_t;
     using d_tile = typename matmul_pipeline<C>::d_tile_t;
@@ -19,48 +23,37 @@ struct gate_silu_globals {
     using b_gl = gl<bf16, 1, 1, -1, -1, b_tile>;
     using d_gl = gl<bf16, 1, 1, -1, -1, d_tile>;
 
-    a_gl x;
-    b_gl gate_w;
-    d_gl out;
-};
-
-struct silu_op {
-    template <typename T> static __device__ inline T op(const T &x) {
-        if constexpr (std::is_same_v<T, float>) {
-            return __fdividef(x, 1.f + __expf(-x));
-        } else if constexpr (std::is_same_v<T, float2>) {
-            return float2{__fdividef(x.x, 1.f + __expf(-x.x)),
-                          __fdividef(x.y, 1.f + __expf(-x.y))};
-        }
-    }
+    a_gl attn_out;
+    b_gl o_w;
+    d_gl hidden;
 };
 
 template <typename C>
 __cluster_dims__(C::CLUSTER_SIZE, 1, 1) __launch_bounds__(C::NUM_THREADS, 1)
-__global__ void gate_silu_kernel(const __grid_constant__ gate_silu_globals<C> g) {
+__global__ void o_proj_residual_kernel(const __grid_constant__ o_proj_residual_globals<C> g) {
     using P        = matmul_pipeline<C>;
     using a_tile_t = typename P::a_tile_t;
     using b_tile_t = typename P::b_tile_t;
     using d_tile_t = typename P::d_tile_t;
     using d_tt_t   = typename P::d_tt_t;
-    using d_reg_t  = rt_fl<C::ROWS_PER_CONSUMER / 4, C::COLS_PER_CHUNK>;
+    using d_reg_t  = rt_bf<C::ROWS_PER_CONSUMER / 4, C::COLS_PER_CHUNK>;
 
     if (threadIdx.x == 0) {
-        g.x.template      prefetch_tma<a_tile_t>();
-        g.gate_w.template prefetch_tma<b_tile_t>();
-        g.out.template    prefetch_tma<d_tile_t>();
+        g.attn_out.template prefetch_tma<a_tile_t>();
+        g.o_w.template      prefetch_tma<b_tile_t>();
+        g.hidden.template   prefetch_tma<d_tile_t>();
     }
 
     const int cta_rank   = cluster_ctarank();
-    const int num_iters  = g.x.cols() / C::Kb;
-    const int N          = g.gate_w.rows();
+    const int num_iters  = g.attn_out.cols() / C::Kb;
+    const int N          = g.o_w.rows();
     const int cblks      = N / C::Nb;
     const int cluster_id = blockIdx.x / C::CLUSTER_SIZE;
     const int m          = cluster_id / cblks;
     const int n          = cluster_id % cblks;
 
-    extern __shared__ int __shm_gs[];
-    tma_swizzle_allocator al((int*)&__shm_gs[0]);
+    extern __shared__ int __shm_op[];
+    tma_swizzle_allocator al((int*)&__shm_op[0]);
 
     auto &a_smem = al.allocate<a_tile_t, C::LOAD_PIPE_DEPTH, C::NUM_CONSUMERS>();
     auto &b_smem = al.allocate<b_tile_t, C::LOAD_PIPE_DEPTH>();
@@ -97,7 +90,7 @@ __global__ void gate_silu_kernel(const __grid_constant__ gate_silu_globals<C> g)
             int input_ring = 0;
             P::producer_load(a_smem, b_smem, inputs_arrived, inputs_finished,
                              bitfield, input_ring, num_iters, cta_rank, m, n,
-                             g.x, g.gate_w);
+                             g.attn_out, g.o_w);
         } else if (cta_rank == 0 && warpgroup::warpid() < C::NUM_CONSUMERS && warp::elect_leader()) {
             everyone::tma::cluster::wait();
             d_tt_t d_tt = tm_alloc.template allocate<d_tt_t>(warpgroup::warpid() * C::Nb);
@@ -126,8 +119,6 @@ __global__ void gate_silu_kernel(const __grid_constant__ gate_silu_globals<C> g)
                     0, C::COLS_PER_CHUNK * i));
             tensor_load_wait();
 
-            warp::unary_map<silu_op>(d_reg, d_reg);
-
             warpgroup::tma::store_async_read_wait<C::NUM_D_TILES - 1>();
             warpgroup::sync(cid + 1);
             d_tile_t &out_tile = d_smem[cid][slot];
@@ -135,52 +126,52 @@ __global__ void gate_silu_kernel(const __grid_constant__ gate_silu_globals<C> g)
             warpgroup::sync(cid + 1);
 
             const int row_tile = (2 * m + cta_rank) * C::NUM_CONSUMERS + cid;
-            warpgroup::tma::store_async(g.out, out_tile, {0, 0, row_tile, global_chunk});
+            warpgroup::tma::store_add_async(g.hidden, out_tile, {0, 0, row_tile, global_chunk});
         }
 
         warpgroup::tma::store_async_wait();
     }
 }
 
-inline void gate_silu_dispatch(
-        at::Tensor x,
-        at::Tensor gate_w,
-        at::Tensor out) {
+inline void o_proj_residual_dispatch(
+        at::Tensor attn_out,
+        at::Tensor o_w,
+        at::Tensor hidden) {
     using C = matmul_config</*Nb=*/256, /*LOAD_PIPE_DEPTH=*/4>;
 
-    CHECK_INPUT(x); CHECK_INPUT(gate_w); CHECK_INPUT(out);
-    TORCH_CHECK(x.dim() == 2, "x must be [M, K]");
-    TORCH_CHECK(gate_w.dim() == 3 && gate_w.size(0) == 1, "gate_w must be [1, N, K]");
-    TORCH_CHECK(out.dim() == 2, "out must be [M, N]");
-    TORCH_CHECK(gate_w.size(2) == x.size(1), "gate_w K must match x K");
-    TORCH_CHECK(out.size(0) == x.size(0), "out M must match x M");
-    TORCH_CHECK(out.size(1) == gate_w.size(1), "out N must match gate_w N");
-    TORCH_CHECK(x.scalar_type()      == at::ScalarType::BFloat16);
-    TORCH_CHECK(gate_w.scalar_type() == at::ScalarType::BFloat16);
-    TORCH_CHECK(out.scalar_type()    == at::ScalarType::BFloat16);
+    CHECK_INPUT(attn_out); CHECK_INPUT(o_w); CHECK_INPUT(hidden);
+    TORCH_CHECK(attn_out.dim() == 2, "attn_out must be [M, K]");
+    TORCH_CHECK(o_w.dim() == 3 && o_w.size(0) == 1, "o_w must be [1, N, K]");
+    TORCH_CHECK(hidden.dim() == 2, "hidden must be [M, N]");
+    TORCH_CHECK(o_w.size(2) == attn_out.size(1), "o_w K must match attn_out K");
+    TORCH_CHECK(hidden.size(0) == attn_out.size(0) && hidden.size(1) == o_w.size(1),
+                "hidden must be [M, N]");
+    TORCH_CHECK(attn_out.scalar_type() == at::ScalarType::BFloat16);
+    TORCH_CHECK(o_w.scalar_type()      == at::ScalarType::BFloat16);
+    TORCH_CHECK(hidden.scalar_type()   == at::ScalarType::BFloat16);
 
-    const int M = static_cast<int>(x.size(0));
-    const int N = static_cast<int>(gate_w.size(1));
-    const int K = static_cast<int>(x.size(1));
+    const int M = static_cast<int>(attn_out.size(0));
+    const int N = static_cast<int>(o_w.size(1));
+    const int K = static_cast<int>(attn_out.size(1));
     TORCH_CHECK(M % C::M_INST == 0, "M must be divisible by M_INST (=512)");
     TORCH_CHECK(N % C::Nb     == 0, "N must be divisible by Nb (=256)");
     TORCH_CHECK(K % C::Kb     == 0, "K must be divisible by Kb (=64)");
 
-    gate_silu_globals<C> g{
-        kittens::py::tensor_to_gl<typename gate_silu_globals<C>::a_gl>(x),
-        kittens::py::tensor_to_gl<typename gate_silu_globals<C>::b_gl>(gate_w),
-        kittens::py::tensor_to_gl<typename gate_silu_globals<C>::d_gl>(out),
+    o_proj_residual_globals<C> g{
+        kittens::py::tensor_to_gl<typename o_proj_residual_globals<C>::a_gl>(attn_out),
+        kittens::py::tensor_to_gl<typename o_proj_residual_globals<C>::b_gl>(o_w),
+        kittens::py::tensor_to_gl<typename o_proj_residual_globals<C>::d_gl>(hidden),
     };
 
     constexpr int dyn_smem = MAX_SHARED_MEMORY - 1024;
     CUDACHECK(cudaFuncSetAttribute(
-        gate_silu_kernel<C>, cudaFuncAttributeMaxDynamicSharedMemorySize, dyn_smem));
+        o_proj_residual_kernel<C>, cudaFuncAttributeMaxDynamicSharedMemorySize, dyn_smem));
 
     const int rblks = M / C::M_INST;
     const int cblks = N / C::Nb;
     const dim3 grid(rblks * cblks * C::CLUSTER_SIZE);
     const dim3 block(C::NUM_THREADS);
-    gate_silu_kernel<C><<<grid, block, dyn_smem>>>(g);
+    o_proj_residual_kernel<C><<<grid, block, dyn_smem>>>(g);
 }
 
 }  // namespace manual_kernels

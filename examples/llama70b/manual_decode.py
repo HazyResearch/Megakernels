@@ -122,8 +122,8 @@ def _attention_torch(
     return out.reshape(B, NUM_Q_HEADS * HEAD_DIM).to(q_flat.dtype)
 
 
-def _o_proj_residual_torch(hidden: torch.Tensor, attn_out: torch.Tensor, o_w: torch.Tensor) -> None:
-    hidden.add_(attn_out @ o_w[0].transpose(-1, -2))
+def _o_proj_residual_kernel(hidden: torch.Tensor, attn_out: torch.Tensor, o_w: torch.Tensor) -> None:
+    _C.o_proj_residual_forward(attn_out, o_w, hidden)
 
 
 def _gate_silu_kernel(x: torch.Tensor, gate_w: torch.Tensor) -> torch.Tensor:
@@ -187,12 +187,12 @@ def decode(
 
         attn_out = _attention_torch(q, layer_k, layer_v, pos_id, attn_scale)
 
-        _o_proj_residual_torch(hidden, attn_out, o_weights[layer_idx:layer_idx + 1])
+        _o_proj_residual_kernel(hidden, attn_out, o_weights[layer_idx:layer_idx + 1])
 
         mlp_norm = _rms_kernel(hidden, mlp_norm_weights[layer_idx], rms_norm_eps)
         gate = _gate_silu_kernel(mlp_norm, gate_weights[layer_idx:layer_idx + 1])
         up = _up_matmul_kernel(mlp_norm, up_weights[layer_idx:layer_idx + 1], gate)
-        _o_proj_residual_torch(hidden, up, down_weights[layer_idx:layer_idx + 1])
+        _o_proj_residual_kernel(hidden, up, down_weights[layer_idx:layer_idx + 1])
 
     logits_hidden = _rms_kernel(hidden, lm_head_norm_weight[0], rms_norm_eps)
     logits = _lm_head_torch(logits_hidden, lm_head_weight)

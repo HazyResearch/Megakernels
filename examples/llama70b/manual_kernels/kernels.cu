@@ -9,6 +9,7 @@
 #include "qkv_rope_append.cuh"
 #include "gate_silu.cuh"
 #include "up_matmul.cuh"
+#include "o_proj_residual.cuh"
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("rms_forward", &manual_kernels::rms_dispatch,
@@ -26,5 +27,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("up_matmul_forward", &manual_kernels::up_matmul_dispatch,
           "Up matmul with gate fusion: out = (x @ up_w[0].T) * gate. "
           "Args: x [M, K] bf16, up_w [1, N, K] bf16, gate [M, N] bf16, out [M, N] bf16. "
+          "M%512==0, N%256==0, K%64==0.");
+    m.def("o_proj_residual_forward", &manual_kernels::o_proj_residual_dispatch,
+          "Output projection + residual: hidden += attn_out @ o_w[0].T. "
+          "Args: attn_out [M, K] bf16, o_w [1, N, K] bf16, hidden [M, N] bf16 (mutated). "
           "M%512==0, N%256==0, K%64==0.");
 }

@@ -3,43 +3,17 @@
 #include "kittens.cuh"
 #include "pyutils/torchutils.cuh"
 
+#include "matmul_pipeline.cuh"
+
 namespace manual_kernels {
 
 using namespace kittens;
 
-template <int _Nb, int _LOAD_PIPE_DEPTH>
-struct up_matmul_config {
-    static constexpr int Mb              = 256;
-    static constexpr int Nb              = _Nb;
-    static constexpr int Kb              = 64;
-    static constexpr int COLS_PER_CHUNK  = 32;
-    static constexpr int EPI_PIPE_DEPTH  = Nb / COLS_PER_CHUNK;
-    static constexpr int NUM_D_TILES     = 2;
-
-    static constexpr int CLUSTER_SIZE      = 2;
-    static constexpr int NUM_CONSUMERS     = 2;
-    static constexpr int NUM_PRODUCERS     = 1;
-    static constexpr int NUM_WARPGROUPS    = NUM_CONSUMERS + NUM_PRODUCERS;
-    static constexpr int NUM_WARPS         = NUM_WARPGROUPS * 4;
-    static constexpr int NUM_THREADS       = NUM_WARPS * WARP_THREADS;
-    static constexpr int M_INST            = NUM_CONSUMERS * Mb;
-    static constexpr int ROWS_PER_CONSUMER = Mb / 2;
-    static constexpr int CHUNKS_PER_HALF   = EPI_PIPE_DEPTH / 2;
-
-    static constexpr int LOAD_PIPE_DEPTH = _LOAD_PIPE_DEPTH;
-
-    static_assert(COLS_PER_CHUNK == 32, "epilogue assumes 32-col chunks");
-    static_assert(Nb % 32 == 0, "Nb must be divisible by 32 (2-CTA weight loader)");
-    static_assert(Nb <= 256, "Nb <= 256");
-    static_assert(Nb % COLS_PER_CHUNK == 0);
-    static_assert(EPI_PIPE_DEPTH % 2 == 0, "gate is loaded as 2 halves so EPI_PIPE_DEPTH must be even");
-};
-
 template <typename C>
 struct up_matmul_globals {
-    using a_tile    = st_bf<C::Mb / 2, C::Kb>;
-    using b_tile    = st_bf<C::Nb / 2, C::Kb>;
-    using d_tile    = st_bf<C::Mb / 2, C::COLS_PER_CHUNK>;
+    using a_tile    = typename matmul_pipeline<C>::a_tile_t;
+    using b_tile    = typename matmul_pipeline<C>::b_tile_t;
+    using d_tile    = typename matmul_pipeline<C>::d_tile_t;
     using gate_tile = st_bf<C::Mb / 2, C::Nb / 2>;
 
     using a_gl    = gl<bf16, 1, 1, -1, -1, a_tile>;
@@ -56,13 +30,17 @@ struct up_matmul_globals {
 template <typename C>
 __cluster_dims__(C::CLUSTER_SIZE, 1, 1) __launch_bounds__(C::NUM_THREADS, 1)
 __global__ void up_matmul_kernel(const __grid_constant__ up_matmul_globals<C> g) {
-    using G           = up_matmul_globals<C>;
-    using a_tile_t    = typename G::a_tile;
-    using b_tile_t    = typename G::b_tile;
-    using d_tile_t    = typename G::d_tile;
-    using gate_tile_t = typename G::gate_tile;
-    using d_tt_t      = tt<float, C::Mb / 2, C::Nb>;
+    using P           = matmul_pipeline<C>;
+    using a_tile_t    = typename P::a_tile_t;
+    using b_tile_t    = typename P::b_tile_t;
+    using d_tile_t    = typename P::d_tile_t;
+    using d_tt_t      = typename P::d_tt_t;
+    using gate_tile_t = typename up_matmul_globals<C>::gate_tile;
     using d_reg_t     = rt_fl<C::ROWS_PER_CONSUMER / 4, C::COLS_PER_CHUNK>;
+
+    static_assert(C::EPI_PIPE_DEPTH % 2 == 0,
+                  "gate is loaded as 2 halves so EPI_PIPE_DEPTH must be even");
+    constexpr int CHUNKS_PER_HALF = C::EPI_PIPE_DEPTH / 2;
 
     if (threadIdx.x == 0) {
         g.x.template    prefetch_tma<a_tile_t>();
@@ -82,10 +60,8 @@ __global__ void up_matmul_kernel(const __grid_constant__ up_matmul_globals<C> g)
     extern __shared__ int __shm_up[];
     tma_swizzle_allocator al((int*)&__shm_up[0]);
 
-    a_tile_t (&a_smem)[C::LOAD_PIPE_DEPTH][C::NUM_CONSUMERS] =
-        al.allocate<a_tile_t, C::LOAD_PIPE_DEPTH, C::NUM_CONSUMERS>();
-    b_tile_t (&b_smem)[C::LOAD_PIPE_DEPTH]                   =
-        al.allocate<b_tile_t, C::LOAD_PIPE_DEPTH>();
+    auto &a_smem = al.allocate<a_tile_t, C::LOAD_PIPE_DEPTH, C::NUM_CONSUMERS>();
+    auto &b_smem = al.allocate<b_tile_t, C::LOAD_PIPE_DEPTH>();
     // gate_smem aliases a_smem (128 KB == 128 KB). d_smem aliases the first 32 KB of b_smem.
     // Safe because gate is loaded only after the producer drains inputs_finished for all
     // matmul stages, and d_smem / b_smem are used only after wait(outputs_arrived).
@@ -122,32 +98,10 @@ __global__ void up_matmul_kernel(const __grid_constant__ up_matmul_globals<C> g)
         if (warpgroup::warpid() == 3 && warp::elect_leader()) {
             everyone::tma::cluster::wait();
             int input_ring = 0;
-            for (int idx = 0; idx < num_iters; idx++) {
-                wait(inputs_finished[input_ring], get_phasebit<1>(bitfield, input_ring));
-                #pragma unroll
-                for (int i = 0; i < C::NUM_CONSUMERS; i++) {
-                    tma::cluster::load_async(
-                        a_smem[input_ring][i], g.x,
-                        {(2 * m + cta_rank) * C::NUM_CONSUMERS + i, idx},
-                        inputs_arrived[input_ring], (uint16_t)(1 << cta_rank), 0);
-                }
-                tma::cluster::load_async(
-                    b_smem[input_ring], g.up_w,
-                    {0, 0, 2 * n + cta_rank, idx},
-                    inputs_arrived[input_ring], (uint16_t)(1 << cta_rank), 0);
-                update_phasebit<1>(bitfield, input_ring);
-                input_ring = ring_advance<C::LOAD_PIPE_DEPTH>(input_ring);
-            }
-            // Drain: wait for the final LOAD_PIPE_DEPTH stages of MMA to retire
-            // (= a_smem and b_smem are no longer being read) before reusing them
-            // for gate_smem and d_smem in the epilogue.
-            #pragma unroll
-            for (int i = 0; i < C::LOAD_PIPE_DEPTH; i++) {
-                wait(inputs_finished[input_ring], get_phasebit<1>(bitfield, input_ring));
-                update_phasebit<1>(bitfield, input_ring);
-                input_ring = ring_advance<C::LOAD_PIPE_DEPTH>(input_ring);
-            }
-            // Issue gate loads. One semaphore per cid, batched expect_bytes for the 2 halves.
+            P::producer_load(a_smem, b_smem, inputs_arrived, inputs_finished,
+                             bitfield, input_ring, num_iters, cta_rank, m, n,
+                             g.x, g.up_w);
+            P::producer_drain(inputs_finished, bitfield, input_ring);
             #pragma unroll
             for (int cid = 0; cid < C::NUM_CONSUMERS; cid++) {
                 tma::expect_bytes(gate_arrived[cid], 2 * sizeof(gate_tile_t));
@@ -162,24 +116,9 @@ __global__ void up_matmul_kernel(const __grid_constant__ up_matmul_globals<C> g)
         } else if (cta_rank == 0 && warpgroup::warpid() < C::NUM_CONSUMERS && warp::elect_leader()) {
             everyone::tma::cluster::wait();
             d_tt_t d_tt = tm_alloc.template allocate<d_tt_t>(warpgroup::warpid() * C::Nb);
-
-            int input_ring = 0;
-            for (int idx = 0; idx < num_iters; idx++) {
-                tma::expect_bytes(
-                    inputs_arrived[input_ring],
-                    (C::CLUSTER_SIZE * C::NUM_CONSUMERS * sizeof(a_tile_t)
-                     + 2 * sizeof(b_tile_t)) / C::NUM_CONSUMERS);
-                wait(inputs_arrived[input_ring], get_phasebit<0>(bitfield, input_ring));
-                if (idx == 0)
-                    mm2_ABt (d_tt, a_smem[input_ring][warpgroup::warpid()],
-                             b_smem[input_ring], inputs_finished[input_ring]);
-                else
-                    mma2_ABt(d_tt, a_smem[input_ring][warpgroup::warpid()],
-                             b_smem[input_ring], inputs_finished[input_ring]);
-                update_phasebit<0>(bitfield, input_ring);
-                input_ring = ring_advance<C::LOAD_PIPE_DEPTH>(input_ring);
-            }
-            detail::tcgen05::commit<C::CLUSTER_SIZE>(outputs_arrived[warpgroup::warpid()]);
+            P::launcher_mma(a_smem, b_smem, inputs_arrived, inputs_finished,
+                            outputs_arrived[warpgroup::warpid()],
+                            d_tt, bitfield, num_iters, warpgroup::warpid());
         }
     } else {
         const int cid = warpgroup::groupid();
@@ -194,8 +133,8 @@ __global__ void up_matmul_kernel(const __grid_constant__ up_matmul_globals<C> g)
         #pragma unroll
         for (int i = 0; i < C::EPI_PIPE_DEPTH; i++) {
             const int slot         = i % C::NUM_D_TILES;
-            const int half         = i / C::CHUNKS_PER_HALF;
-            const int col_chunk    = i % C::CHUNKS_PER_HALF;
+            const int half         = i / CHUNKS_PER_HALF;
+            const int col_chunk    = i % CHUNKS_PER_HALF;
             const int global_chunk = C::EPI_PIPE_DEPTH * n + i;
 
             d_reg_t d_reg;
@@ -232,7 +171,7 @@ inline void up_matmul_dispatch(
         at::Tensor up_w,
         at::Tensor gate,
         at::Tensor out) {
-    using C = up_matmul_config</*Nb=*/256, /*LOAD_PIPE_DEPTH=*/4>;
+    using C = matmul_config</*Nb=*/256, /*LOAD_PIPE_DEPTH=*/4>;
 
     CHECK_INPUT(x); CHECK_INPUT(up_w); CHECK_INPUT(gate); CHECK_INPUT(out);
     TORCH_CHECK(x.dim() == 2, "x must be [M, K]");

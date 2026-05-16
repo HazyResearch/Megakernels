@@ -3,12 +3,14 @@
 #include "kittens.cuh"
 #include "pyutils/torchutils.cuh"
 
+#include "matmul_pipeline.cuh"
+
 namespace manual_kernels {
 
 using namespace kittens;
 
 template <int _Nb, int _LOAD_PIPE_DEPTH>
-struct qkv_config {
+struct qkv_config : matmul_config<_Nb, _LOAD_PIPE_DEPTH> {
     static constexpr int HIDDEN_DIM   = 8192;
     static constexpr int HEAD_DIM     = 128;
     static constexpr int NUM_Q_HEADS  = 64;
@@ -18,32 +20,10 @@ struct qkv_config {
     static constexpr int KV_DIM       = NUM_KV_HEADS * HEAD_DIM;
     static constexpr int QKV_DIM      = Q_DIM + 2 * KV_DIM;
 
-    static constexpr int Mb              = 256;
-    static constexpr int Nb              = _Nb;
-    static constexpr int Kb              = 64;
-    static constexpr int COLS_PER_CHUNK  = 32;
-    static constexpr int EPI_PIPE_DEPTH  = Nb / COLS_PER_CHUNK;
-    static constexpr int NUM_D_TILES     = 2;
-
-    static constexpr int CLUSTER_SIZE      = 2;
-    static constexpr int NUM_CONSUMERS     = 2;
-    static constexpr int NUM_PRODUCERS     = 1;
-    static constexpr int NUM_WARPGROUPS    = NUM_CONSUMERS + NUM_PRODUCERS;
-    static constexpr int NUM_WARPS         = NUM_WARPGROUPS * 4;
-    static constexpr int NUM_THREADS       = NUM_WARPS * WARP_THREADS;
-    static constexpr int M_INST            = NUM_CONSUMERS * Mb;
-    static constexpr int ROWS_PER_CONSUMER = Mb / 2;
-
-    static constexpr int LOAD_PIPE_DEPTH = _LOAD_PIPE_DEPTH;
-
     static_assert(HEAD_DIM == 128, "this kernel assumes head_dim=128");
-    static_assert(COLS_PER_CHUNK == 32, "epilogue assumes 32-col chunks");
-    static_assert(Nb % 32 == 0, "Nb must be divisible by 32 (2-CTA weight loader)");
-    static_assert(Nb <= 256, "Nb <= 256");
-    static_assert(Nb % COLS_PER_CHUNK == 0);
-    static_assert(QKV_DIM % Nb == 0);
-    static_assert(Q_DIM  % COLS_PER_CHUNK == 0);
-    static_assert(KV_DIM % COLS_PER_CHUNK == 0);
+    static_assert(QKV_DIM % _Nb == 0);
+    static_assert(Q_DIM  % matmul_config<_Nb, _LOAD_PIPE_DEPTH>::COLS_PER_CHUNK == 0);
+    static_assert(KV_DIM % matmul_config<_Nb, _LOAD_PIPE_DEPTH>::COLS_PER_CHUNK == 0);
 };
 
 template <typename C>
@@ -144,11 +124,11 @@ __device__ static inline void scatter_kv_tile(
 template <typename C>
 __cluster_dims__(C::CLUSTER_SIZE, 1, 1) __launch_bounds__(C::NUM_THREADS, 1)
 __global__ void qkv_rope_append_kernel(const __grid_constant__ qkv_globals<C> g) {
-    using G        = qkv_globals<C>;
-    using a_tile_t = typename G::a_tile;
-    using b_tile_t = typename G::b_tile;
-    using d_tile_t = typename G::d_tile;
-    using d_tt_t   = tt<float, C::Mb / 2, C::Nb>;
+    using P        = matmul_pipeline<C>;
+    using a_tile_t = typename P::a_tile_t;
+    using b_tile_t = typename P::b_tile_t;
+    using d_tile_t = typename P::d_tile_t;
+    using d_tt_t   = typename P::d_tt_t;
     using d_reg_t  = rt_bf<C::ROWS_PER_CONSUMER / 4, C::COLS_PER_CHUNK>;
 
     if (threadIdx.x == 0) {
@@ -167,17 +147,15 @@ __global__ void qkv_rope_append_kernel(const __grid_constant__ qkv_globals<C> g)
     extern __shared__ int __shm_qkv[];
     tma_swizzle_allocator al((int*)&__shm_qkv[0]);
 
-    a_tile_t (&a_smem)[C::LOAD_PIPE_DEPTH][C::NUM_CONSUMERS] =
-        al.allocate<a_tile_t, C::LOAD_PIPE_DEPTH, C::NUM_CONSUMERS>();
-    b_tile_t (&b_smem)[C::LOAD_PIPE_DEPTH]                   =
-        al.allocate<b_tile_t, C::LOAD_PIPE_DEPTH>();
-    // d_smem aliases a_smem[0] (same trick as megakernel A_LIDS[0]); safe because
-    // outputs_arrived only flips after all matmul iters finish reading a/b stages.
+    auto &a_smem = al.allocate<a_tile_t, C::LOAD_PIPE_DEPTH, C::NUM_CONSUMERS>();
+    auto &b_smem = al.allocate<b_tile_t, C::LOAD_PIPE_DEPTH>();
+    // d_smem aliases a_smem[0]; safe because outputs_arrived only flips after
+    // all matmul iters finish reading a/b stages.
     auto &d_smem = *reinterpret_cast<
         d_tile_t (*)[C::NUM_CONSUMERS][C::NUM_D_TILES]>(&a_smem[0][0]);
-    typename G::head_vec (&cos_smem) = al.allocate<typename G::head_vec>();
-    typename G::head_vec (&sin_smem) = al.allocate<typename G::head_vec>();
-    typename G::app_vec  (&app_smem) = al.allocate<typename G::app_vec>();
+    auto &cos_smem = al.allocate<typename qkv_globals<C>::head_vec>();
+    auto &sin_smem = al.allocate<typename qkv_globals<C>::head_vec>();
+    auto &app_smem = al.allocate<typename qkv_globals<C>::app_vec>();
 
     tensor_allocator<1, C::CLUSTER_SIZE> tm_alloc{};
 
@@ -207,43 +185,15 @@ __global__ void qkv_rope_append_kernel(const __grid_constant__ qkv_globals<C> g)
         if (warpgroup::warpid() == 3 && warp::elect_leader()) {
             everyone::tma::cluster::wait();
             int input_ring = 0;
-            for (int idx = 0; idx < num_iters; idx++) {
-                wait(inputs_finished[input_ring], get_phasebit<1>(bitfield, input_ring));
-                #pragma unroll
-                for (int i = 0; i < C::NUM_CONSUMERS; i++) {
-                    tma::cluster::load_async(
-                        a_smem[input_ring][i], g.x,
-                        {(2 * m + cta_rank) * C::NUM_CONSUMERS + i, idx},
-                        inputs_arrived[input_ring], (uint16_t)(1 << cta_rank), 0);
-                }
-                tma::cluster::load_async(
-                    b_smem[input_ring], g.qkv_w,
-                    {0, 0, 2 * n + cta_rank, idx},
-                    inputs_arrived[input_ring], (uint16_t)(1 << cta_rank), 0);
-                update_phasebit<1>(bitfield, input_ring);
-                input_ring = ring_advance<C::LOAD_PIPE_DEPTH>(input_ring);
-            }
+            P::producer_load(a_smem, b_smem, inputs_arrived, inputs_finished,
+                             bitfield, input_ring, num_iters, cta_rank, m, n,
+                             g.x, g.qkv_w);
         } else if (cta_rank == 0 && warpgroup::warpid() < C::NUM_CONSUMERS && warp::elect_leader()) {
             everyone::tma::cluster::wait();
             d_tt_t d_tt = tm_alloc.template allocate<d_tt_t>(warpgroup::warpid() * C::Nb);
-
-            int input_ring = 0;
-            for (int idx = 0; idx < num_iters; idx++) {
-                tma::expect_bytes(
-                    inputs_arrived[input_ring],
-                    (C::CLUSTER_SIZE * C::NUM_CONSUMERS * sizeof(a_tile_t)
-                     + 2 * sizeof(b_tile_t)) / C::NUM_CONSUMERS);
-                wait(inputs_arrived[input_ring], get_phasebit<0>(bitfield, input_ring));
-                if (idx == 0)
-                    mm2_ABt (d_tt, a_smem[input_ring][warpgroup::warpid()],
-                             b_smem[input_ring], inputs_finished[input_ring]);
-                else
-                    mma2_ABt(d_tt, a_smem[input_ring][warpgroup::warpid()],
-                             b_smem[input_ring], inputs_finished[input_ring]);
-                update_phasebit<0>(bitfield, input_ring);
-                input_ring = ring_advance<C::LOAD_PIPE_DEPTH>(input_ring);
-            }
-            detail::tcgen05::commit<C::CLUSTER_SIZE>(outputs_arrived[warpgroup::warpid()]);
+            P::launcher_mma(a_smem, b_smem, inputs_arrived, inputs_finished,
+                            outputs_arrived[warpgroup::warpid()],
+                            d_tt, bitfield, num_iters, warpgroup::warpid());
         }
     } else {
         const int cid = warpgroup::groupid();
