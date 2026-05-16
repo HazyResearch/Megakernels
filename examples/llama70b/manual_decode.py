@@ -134,8 +134,12 @@ def _gate_silu_kernel(x: torch.Tensor, gate_w: torch.Tensor) -> torch.Tensor:
     return out
 
 
-def _up_matmul_torch(x: torch.Tensor, up_w: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
-    return (x @ up_w[0].transpose(-1, -2)) * gate
+def _up_matmul_kernel(x: torch.Tensor, up_w: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
+    M, _ = x.shape
+    N = up_w.shape[-2]
+    out = torch.empty(M, N, dtype=x.dtype, device=x.device)
+    _C.up_matmul_forward(x, up_w, gate, out)
+    return out
 
 
 def _lm_head_torch(x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
@@ -187,7 +191,7 @@ def decode(
 
         mlp_norm = _rms_kernel(hidden, mlp_norm_weights[layer_idx], rms_norm_eps)
         gate = _gate_silu_kernel(mlp_norm, gate_weights[layer_idx:layer_idx + 1])
-        up = _up_matmul_torch(mlp_norm, up_weights[layer_idx:layer_idx + 1], gate)
+        up = _up_matmul_kernel(mlp_norm, up_weights[layer_idx:layer_idx + 1], gate)
         _o_proj_residual_torch(hidden, up, down_weights[layer_idx:layer_idx + 1])
 
     logits_hidden = _rms_kernel(hidden, lm_head_norm_weight[0], rms_norm_eps)
