@@ -10,6 +10,8 @@
 #include "gate_silu.cuh"
 #include "up_matmul.cuh"
 #include "o_proj_residual.cuh"
+#include "lm_head.cuh"
+#include "attention_decode.cuh"
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("rms_forward", &manual_kernels::rms_dispatch,
@@ -32,4 +34,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "Output projection + residual: hidden += attn_out @ o_w[0].T. "
           "Args: attn_out [M, K] bf16, o_w [1, N, K] bf16, hidden [M, N] bf16 (mutated). "
           "M%512==0, N%256==0, K%64==0.");
+    m.def("lm_head_forward", &manual_kernels::lm_head_dispatch,
+          "LM head: logits = hidden @ w[0].T. "
+          "Args: hidden [M, K] bf16, w [1, N, K] bf16, logits [M, N] bf16. "
+          "M%512==0, N%256==0, K%64==0.");
+    m.def("attention_decode_forward", &manual_kernels::attention_decode_dispatch,
+          "Paged GQA flash-attention decode (1 token per sequence). "
+          "Args: q [B, 8192] bf16, k_cache/v_cache [pages, 128, 8, 128] bf16, "
+          "pos_id [1] i32, attn_scale [1] fp32, out [B, 8192] bf16.");
 }

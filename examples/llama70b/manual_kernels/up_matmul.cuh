@@ -42,12 +42,6 @@ __global__ void up_matmul_kernel(const __grid_constant__ up_matmul_globals<C> g)
                   "gate is loaded as 2 halves so EPI_PIPE_DEPTH must be even");
     constexpr int CHUNKS_PER_HALF = C::EPI_PIPE_DEPTH / 2;
 
-    if (threadIdx.x == 0) {
-        g.x.template    prefetch_tma<a_tile_t>();
-        g.up_w.template prefetch_tma<b_tile_t>();
-        g.gate.template prefetch_tma<gate_tile_t>();
-        g.out.template  prefetch_tma<d_tile_t>();
-    }
 
     const int cta_rank   = cluster_ctarank();
     const int num_iters  = g.x.cols() / C::Kb;

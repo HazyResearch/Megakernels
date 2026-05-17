@@ -142,8 +142,24 @@ def _up_matmul_kernel(x: torch.Tensor, up_w: torch.Tensor, gate: torch.Tensor) -
     return out
 
 
-def _lm_head_torch(x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
-    return x @ w[0].transpose(-1, -2)
+def _attention_decode_kernel(
+    q_flat: torch.Tensor,
+    k_cache_layer: torch.Tensor,
+    v_cache_layer: torch.Tensor,
+    pos_id: torch.Tensor,
+    attn_scale: torch.Tensor,
+) -> torch.Tensor:
+    out = torch.empty_like(q_flat)
+    _C.attention_decode_forward(q_flat, k_cache_layer, v_cache_layer, pos_id, attn_scale, out)
+    return out
+
+
+def _lm_head_kernel(x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
+    M, _ = x.shape
+    N = w.shape[-2]
+    logits = torch.empty(M, N, dtype=x.dtype, device=x.device)
+    _C.lm_head_forward(x, w, logits)
+    return logits
 
 
 def decode(
@@ -185,7 +201,7 @@ def decode(
             layer_v,
         )
 
-        attn_out = _attention_torch(q, layer_k, layer_v, pos_id, attn_scale)
+        attn_out = _attention_decode_kernel(q, layer_k, layer_v, pos_id, attn_scale)
 
         _o_proj_residual_kernel(hidden, attn_out, o_weights[layer_idx:layer_idx + 1])
 
@@ -195,7 +211,7 @@ def decode(
         _o_proj_residual_kernel(hidden, up, down_weights[layer_idx:layer_idx + 1])
 
     logits_hidden = _rms_kernel(hidden, lm_head_norm_weight[0], rms_norm_eps)
-    logits = _lm_head_torch(logits_hidden, lm_head_weight)
+    logits = _lm_head_kernel(logits_hidden, lm_head_weight)
     pos_id.add_(1)
     return logits
 

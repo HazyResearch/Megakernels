@@ -38,12 +38,6 @@ __global__ void o_proj_residual_kernel(const __grid_constant__ o_proj_residual_g
     using d_tt_t   = typename P::d_tt_t;
     using d_reg_t  = rt_bf<C::ROWS_PER_CONSUMER / 4, C::COLS_PER_CHUNK>;
 
-    if (threadIdx.x == 0) {
-        g.attn_out.template prefetch_tma<a_tile_t>();
-        g.o_w.template      prefetch_tma<b_tile_t>();
-        g.hidden.template   prefetch_tma<d_tile_t>();
-    }
-
     const int cta_rank   = cluster_ctarank();
     const int num_iters  = g.attn_out.cols() / C::Kb;
     const int N          = g.o_w.rows();
