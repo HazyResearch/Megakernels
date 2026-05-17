@@ -128,7 +128,7 @@ inline void rms_dispatch(at::Tensor x, at::Tensor weight, at::Tensor eps, at::Te
     constexpr int dyn_smem = MAX_SHARED_MEMORY - 1024;
     CUDACHECK(cudaFuncSetAttribute(
         rms_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dyn_smem));
-    rms_kernel<<<n_inst, rms_config::NUM_THREADS, dyn_smem>>>(g);
+    rms_kernel<<<n_inst, rms_config::NUM_THREADS, dyn_smem, at::cuda::getCurrentCUDAStream()>>>(g);
 }
 
 }  // namespace manual_kernels

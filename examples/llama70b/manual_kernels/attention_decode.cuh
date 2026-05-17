@@ -316,7 +316,7 @@ inline void attention_decode_dispatch(
         attention_decode_kernel<C>,
         cudaFuncAttributeMaxDynamicSharedMemorySize, dyn_smem));
 
-    attention_decode_kernel<C><<<dim3(B), dim3(C::NUM_THREADS), dyn_smem>>>(g);
+    attention_decode_kernel<C><<<dim3(B), dim3(C::NUM_THREADS), dyn_smem, at::cuda::getCurrentCUDAStream()>>>(g);
 }
 
 }  // namespace manual_kernels

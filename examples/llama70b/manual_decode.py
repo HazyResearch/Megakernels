@@ -216,6 +216,46 @@ def decode(
     return logits
 
 
+class GraphedDecode:
+    # Positional indices into the decode() arg tuple.
+    K_CACHE_IDX = 10
+    V_CACHE_IDX = 11
+    POS_ID_IDX = 15
+
+    def __init__(self, decode_fn, warmup_iters: int = 3):
+        self.decode_fn = decode_fn
+        self.warmup_iters = warmup_iters
+        self.graph = None
+        self.logits = None
+
+    def __call__(self, *args):
+        if self.graph is None:
+            k_cache = args[self.K_CACHE_IDX]
+            v_cache = args[self.V_CACHE_IDX]
+            pos_id = args[self.POS_ID_IDX]
+
+            s = torch.cuda.Stream()
+            s.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(s):
+                for _ in range(self.warmup_iters):
+                    self.decode_fn(*args)
+            torch.cuda.current_stream().wait_stream(s)
+
+            self.graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(self.graph):
+                self.logits = self.decode_fn(*args)
+
+            # Warmup + capture advanced pos_id and wrote garbage into kv;
+            # reset so the triggering call returns from a clean state.
+            pos_id.zero_()
+            k_cache.zero_()
+            v_cache.zero_()
+            return self.logits
+
+        self.graph.replay()
+        return self.logits
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--prompt", type=str, default="Hello, my name is")
@@ -225,12 +265,16 @@ if __name__ == "__main__":
     parser.add_argument("--num-samples", type=int, default=3)
     parser.add_argument("--warmup", type=int, default=2)
     parser.add_argument("--num-layers", type=int, default=NUM_LAYERS)
+    parser.add_argument("--cuda-graph", action="store_true",
+                        help="Wrap decode in a CUDA graph (capture once, replay per token).")
     args = parser.parse_args()
 
     NUM_LAYERS = args.num_layers
 
+    decode_fn = GraphedDecode(decode) if args.cuda_graph else decode
+
     benchmark_tok_per_sec(
-        decode,
+        decode_fn,
         num_layers=NUM_LAYERS,
         prompt=args.prompt,
         batch_size=args.batch_size,

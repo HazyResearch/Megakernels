@@ -165,7 +165,7 @@ inline void o_proj_residual_dispatch(
     const int cblks = N / C::Nb;
     const dim3 grid(rblks * cblks * C::CLUSTER_SIZE);
     const dim3 block(C::NUM_THREADS);
-    o_proj_residual_kernel<C><<<grid, block, dyn_smem>>>(g);
+    o_proj_residual_kernel<C><<<grid, block, dyn_smem, at::cuda::getCurrentCUDAStream()>>>(g);
 }
 
 }  // namespace manual_kernels

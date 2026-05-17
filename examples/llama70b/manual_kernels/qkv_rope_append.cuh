@@ -317,7 +317,7 @@ inline void qkv_rope_append_dispatch(
     const int cblks = C::QKV_DIM / C::Nb;
     const dim3 grid(rblks * cblks * C::CLUSTER_SIZE);
     const dim3 block(C::NUM_THREADS);
-    qkv_rope_append_kernel<C><<<grid, block, dyn_smem>>>(g);
+    qkv_rope_append_kernel<C><<<grid, block, dyn_smem, at::cuda::getCurrentCUDAStream()>>>(g);
 }
 
 }  // namespace manual_kernels
