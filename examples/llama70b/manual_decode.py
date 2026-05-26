@@ -9,6 +9,7 @@ custom CUDA kernel binding in a follow-up file.
 from __future__ import annotations
 
 import argparse
+import os
 
 import torch
 
@@ -27,6 +28,37 @@ from .manual_kernels import _C
 
 
 NUM_LAYERS = 80
+
+# Per-layer kernel timing for o_proj and down. Enable with TIME_KERNELS=1.
+# Events are pre-allocated so this works inside a CUDA graph capture; after the
+# benchmark finishes we read elapsed_time off the final replay's timestamps.
+TIME_KERNELS = os.environ.get("TIME_KERNELS") == "1"
+_timing_events: dict | None = None
+
+
+def _init_timing(num_layers: int) -> None:
+    global _timing_events
+    if not TIME_KERNELS:
+        return
+    _timing_events = {
+        "o_proj_s": [torch.cuda.Event(enable_timing=True) for _ in range(num_layers)],
+        "o_proj_e": [torch.cuda.Event(enable_timing=True) for _ in range(num_layers)],
+        "down_s":   [torch.cuda.Event(enable_timing=True) for _ in range(num_layers)],
+        "down_e":   [torch.cuda.Event(enable_timing=True) for _ in range(num_layers)],
+    }
+
+
+def _report_timing() -> None:
+    if _timing_events is None:
+        return
+    torch.cuda.synchronize()
+    n = len(_timing_events["o_proj_s"])
+    o = [_timing_events["o_proj_s"][i].elapsed_time(_timing_events["o_proj_e"][i]) for i in range(n)]
+    d = [_timing_events["down_s"][i].elapsed_time(_timing_events["down_e"][i]) for i in range(n)]
+    print()
+    print(f"Per-layer in-decode kernel timings (mean over {n} layers, final replay):")
+    print(f"  o_proj : {sum(o)/n*1000:7.2f} us   (min {min(o)*1000:.2f}, max {max(o)*1000:.2f})")
+    print(f"  down   : {sum(d)/n*1000:7.2f} us   (min {min(d)*1000:.2f}, max {max(d)*1000:.2f})")
 
 
 def _rms_kernel(x: torch.Tensor, weight: torch.Tensor, eps: torch.Tensor) -> torch.Tensor:
@@ -203,12 +235,16 @@ def decode(
 
         attn_out = _attention_decode_kernel(q, layer_k, layer_v, pos_id, attn_scale)
 
+        if TIME_KERNELS: _timing_events["o_proj_s"][layer_idx].record()
         _o_proj_residual_kernel(hidden, attn_out, o_weights[layer_idx:layer_idx + 1])
+        if TIME_KERNELS: _timing_events["o_proj_e"][layer_idx].record()
 
         mlp_norm = _rms_kernel(hidden, mlp_norm_weights[layer_idx], rms_norm_eps)
         gate = _gate_silu_kernel(mlp_norm, gate_weights[layer_idx:layer_idx + 1])
         up = _up_matmul_kernel(mlp_norm, up_weights[layer_idx:layer_idx + 1], gate)
+        if TIME_KERNELS: _timing_events["down_s"][layer_idx].record()
         _o_proj_residual_kernel(hidden, up, down_weights[layer_idx:layer_idx + 1])
+        if TIME_KERNELS: _timing_events["down_e"][layer_idx].record()
 
     logits_hidden = _rms_kernel(hidden, lm_head_norm_weight[0], rms_norm_eps)
     logits = _lm_head_kernel(logits_hidden, lm_head_weight)
@@ -271,6 +307,7 @@ if __name__ == "__main__":
 
     NUM_LAYERS = args.num_layers
 
+    _init_timing(NUM_LAYERS)
     decode_fn = GraphedDecode(decode) if args.cuda_graph else decode
 
     benchmark_tok_per_sec(
@@ -283,3 +320,4 @@ if __name__ == "__main__":
         num_samples=args.num_samples,
         warmup=args.warmup,
     )
+    _report_timing()

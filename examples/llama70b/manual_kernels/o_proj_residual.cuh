@@ -9,6 +9,47 @@ namespace manual_kernels {
 
 using namespace kittens;
 
+// Local Kb-tunable config for the o_proj/down_proj kernel only. Mirrors the
+// fields matmul_pipeline<C> consumes off the shared `matmul_config`, but
+// auto-picks LOAD_PIPE_DEPTH from the smem budget so that sweeping Kb keeps
+// the deepest pipeline that still fits.
+template <int _Kb = 64>
+struct o_proj_config {
+    static constexpr int Mb              = 256;
+    static constexpr int Nb              = 256;
+    static constexpr int Kb              = _Kb;
+    static constexpr int COLS_PER_CHUNK  = 32;
+    static constexpr int EPI_PIPE_DEPTH  = Nb / COLS_PER_CHUNK;
+    static constexpr int NUM_D_TILES     = 2;
+
+    static constexpr int CLUSTER_SIZE      = 2;
+    static constexpr int NUM_CONSUMERS     = 2;
+    static constexpr int NUM_PRODUCERS     = 1;
+    static constexpr int NUM_WARPGROUPS    = NUM_CONSUMERS + NUM_PRODUCERS;
+    static constexpr int NUM_WARPS         = NUM_WARPGROUPS * 4;
+    static constexpr int NUM_THREADS       = NUM_WARPS * WARP_THREADS;
+    static constexpr int M_INST            = NUM_CONSUMERS * Mb;
+    static constexpr int ROWS_PER_CONSUMER = Mb / 2;
+
+    // Per-stage smem = a_smem + b_smem
+    //                = LPD × NUM_CONSUMERS × (Mb/2 × Kb × 2 bytes)
+    //                + LPD × (Nb/2 × Kb × 2 bytes)
+    //                = LPD × Kb × (2 × Mb + Nb).
+    // Budget matches the dispatch's `MAX_SHARED_MEMORY - 1024`.
+    // Hard ceiling at 16: the phasebit encoding in the kernel packs phases
+    // into a 32-bit `bitfield` (16 bits per phase), so ring depth > 16 would
+    // silently corrupt phase tracking.
+    static constexpr int BYTES_PER_STAGE = Kb * (2 * Mb + Nb);
+    static constexpr int SMEM_BUDGET     = MAX_SHARED_MEMORY - 1024;
+    static constexpr int LPD_FROM_SMEM   = SMEM_BUDGET / BYTES_PER_STAGE;
+    static constexpr int LOAD_PIPE_DEPTH = LPD_FROM_SMEM < 16 ? LPD_FROM_SMEM : 16;
+
+    static_assert(Kb >= 16 && Kb % 16 == 0,
+                  "Kb must be a positive multiple of 16 (tcgen05.mma bf16 K granularity)");
+    static_assert(LOAD_PIPE_DEPTH >= 2,
+                  "smem budget too small for >=2 pipeline stages");
+};
+
 // o_proj_residual: hidden += attn_out @ o_w[0].T.
 // Atomically adds the matmul output into the residual using tma::store_add_async,
 // so the same tensor (hidden) is both an input and the destination. The matmul
@@ -82,9 +123,26 @@ __global__ void o_proj_residual_kernel(const __grid_constant__ o_proj_residual_g
         if (warpgroup::warpid() == 3 && warp::elect_leader()) {
             everyone::tma::cluster::wait();
             int input_ring = 0;
-            P::producer_load(a_smem, b_smem, inputs_arrived, inputs_finished,
-                             bitfield, input_ring, num_iters, cta_rank, m, n,
-                             g.attn_out, g.o_w);
+            // Inlined producer_load with per-operand L2 cache policy:
+            //   A (attn_out): EVICT_LAST -- reused 32x across cblks within this kernel.
+            //   B (o_w / down_w): EVICT_FIRST -- only 2x reuse at ~32-cluster distance;
+            //   marking evict_first avoids polluting L2 for the next kernel.
+            for (int idx = 0; idx < num_iters; idx++) {
+                wait(inputs_finished[input_ring], get_phasebit<1>(bitfield, input_ring));
+                #pragma unroll
+                for (int i = 0; i < C::NUM_CONSUMERS; i++) {
+                    tma::cluster::load_async<dim::ROW, cache_policy::EVICT_LAST>(
+                        a_smem[input_ring][i], g.attn_out,
+                        {(2 * m + cta_rank) * C::NUM_CONSUMERS + i, idx},
+                        inputs_arrived[input_ring], (uint16_t)(1 << cta_rank), 0);
+                }
+                tma::cluster::load_async<dim::ROW, cache_policy::EVICT_FIRST>(
+                    b_smem[input_ring], g.o_w,
+                    {0, 0, 2 * n + cta_rank, idx},
+                    inputs_arrived[input_ring], (uint16_t)(1 << cta_rank), 0);
+                update_phasebit<1>(bitfield, input_ring);
+                input_ring = ring_advance<C::LOAD_PIPE_DEPTH>(input_ring);
+            }
         } else if (cta_rank == 0 && warpgroup::warpid() < C::NUM_CONSUMERS && warp::elect_leader()) {
             everyone::tma::cluster::wait();
             d_tt_t d_tt = tm_alloc.template allocate<d_tt_t>(warpgroup::warpid() * C::Nb);
@@ -120,7 +178,9 @@ __global__ void o_proj_residual_kernel(const __grid_constant__ o_proj_residual_g
             warpgroup::sync(cid + 1);
 
             const int row_tile = (2 * m + cta_rank) * C::NUM_CONSUMERS + cid;
-            warpgroup::tma::store_add_async(g.hidden, out_tile, {0, 0, row_tile, global_chunk});
+            // EVICT_LAST: `hidden` is read by rms immediately after this kernel.
+            warpgroup::tma::store_add_async<dim::ROW, cache_policy::EVICT_LAST>(
+                g.hidden, out_tile, {0, 0, row_tile, global_chunk});
         }
 
         warpgroup::tma::store_async_wait();
@@ -131,7 +191,7 @@ inline void o_proj_residual_dispatch(
         at::Tensor attn_out,
         at::Tensor o_w,
         at::Tensor hidden) {
-    using C = matmul_config</*Nb=*/256, /*LOAD_PIPE_DEPTH=*/4>;
+    using C = o_proj_config</*Kb=*/64>;
 
     CHECK_INPUT(attn_out); CHECK_INPUT(o_w); CHECK_INPUT(hidden);
     TORCH_CHECK(attn_out.dim() == 2, "attn_out must be [M, K]");
