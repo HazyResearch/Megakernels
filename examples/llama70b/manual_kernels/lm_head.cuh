@@ -9,10 +9,6 @@ namespace manual_kernels {
 
 using namespace kittens;
 
-// lm_head: logits = hidden @ w[0].T. Pure matmul + TMA store. N is the vocab
-// size (128256 for Llama-3.3-70B), so at B=1024 the grid is large enough
-// (2 × 501 × 2 = 2004 blocks ≈ 13.5 waves on B200) that no special scheduling
-// is needed.
 template <typename C>
 struct lm_head_globals {
     using a_tile = typename matmul_pipeline<C>::a_tile_t;

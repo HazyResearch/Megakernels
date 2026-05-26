@@ -7,12 +7,6 @@ namespace manual_kernels {
 
 using namespace kittens;
 
-// Standalone port of the megakernel's llama70b RMS pipeline. The work split
-// mirrors megakittens/itypes/llama70b/rms.py: each block owns a contiguous
-// slice of rows and computes rmsnorm against a shared (per-layer) weight.
-// At B = 1024 this is 148 blocks, matching the megakernel's instructions:blocks
-// = 1:1.
-
 constexpr int RMS_HIDDEN_DIM        = 8192;
 constexpr int RMS_NUM_SMS           = 148;
 constexpr int RMS_NUM_WARPS         = 8;

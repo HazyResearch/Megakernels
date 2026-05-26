@@ -56,9 +56,8 @@ __global__ void up_matmul_kernel(const __grid_constant__ up_matmul_globals<C> g)
 
     auto &a_smem = al.allocate<a_tile_t, C::LOAD_PIPE_DEPTH, C::NUM_CONSUMERS>();
     auto &b_smem = al.allocate<b_tile_t, C::LOAD_PIPE_DEPTH>();
-    // gate_smem aliases a_smem (128 KB == 128 KB). d_smem aliases the first 32 KB of b_smem.
-    // Safe because gate is loaded only after the producer drains inputs_finished for all
-    // matmul stages, and d_smem / b_smem are used only after wait(outputs_arrived).
+    // gate_smem aliases a_smem; d_smem aliases b_smem. Both are reused only after
+    // producer_drain / wait(outputs_arrived), so the matmul pipeline is done with them.
     auto &gate_smem = *reinterpret_cast<
         gate_tile_t (*)[C::NUM_CONSUMERS][2]>(&a_smem[0][0]);
     auto &d_smem = *reinterpret_cast<

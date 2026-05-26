@@ -9,10 +9,6 @@ namespace manual_kernels {
 
 using namespace kittens;
 
-// Local Kb-tunable config for the o_proj/down_proj kernel only. Mirrors the
-// fields matmul_pipeline<C> consumes off the shared `matmul_config`, but
-// auto-picks LOAD_PIPE_DEPTH from the smem budget so that sweeping Kb keeps
-// the deepest pipeline that still fits.
 template <int _Kb = 64>
 struct o_proj_config {
     static constexpr int Mb              = 256;
@@ -31,14 +27,7 @@ struct o_proj_config {
     static constexpr int M_INST            = NUM_CONSUMERS * Mb;
     static constexpr int ROWS_PER_CONSUMER = Mb / 2;
 
-    // Per-stage smem = a_smem + b_smem
-    //                = LPD × NUM_CONSUMERS × (Mb/2 × Kb × 2 bytes)
-    //                + LPD × (Nb/2 × Kb × 2 bytes)
-    //                = LPD × Kb × (2 × Mb + Nb).
-    // Budget matches the dispatch's `MAX_SHARED_MEMORY - 1024`.
-    // Hard ceiling at 16: the phasebit encoding in the kernel packs phases
-    // into a 32-bit `bitfield` (16 bits per phase), so ring depth > 16 would
-    // silently corrupt phase tracking.
+    // LPD capped at 16 (phasebit bitfield packs 16 phases into 32 bits).
     static constexpr int BYTES_PER_STAGE = Kb * (2 * Mb + Nb);
     static constexpr int SMEM_BUDGET     = MAX_SHARED_MEMORY - 1024;
     static constexpr int LPD_FROM_SMEM   = SMEM_BUDGET / BYTES_PER_STAGE;
@@ -50,10 +39,6 @@ struct o_proj_config {
                   "smem budget too small for >=2 pipeline stages");
 };
 
-// o_proj_residual: hidden += attn_out @ o_w[0].T.
-// Atomically adds the matmul output into the residual using tma::store_add_async,
-// so the same tensor (hidden) is both an input and the destination. The matmul
-// pipeline itself is identical to gate_silu's; the epilogue just stores-with-add.
 template <typename C>
 struct o_proj_residual_globals {
     using a_tile = typename matmul_pipeline<C>::a_tile_t;
@@ -123,10 +108,6 @@ __global__ void o_proj_residual_kernel(const __grid_constant__ o_proj_residual_g
         if (warpgroup::warpid() == 3 && warp::elect_leader()) {
             everyone::tma::cluster::wait();
             int input_ring = 0;
-            // Inlined producer_load with per-operand L2 cache policy:
-            //   A (attn_out): EVICT_LAST -- reused 32x across cblks within this kernel.
-            //   B (o_w / down_w): EVICT_FIRST -- only 2x reuse at ~32-cluster distance;
-            //   marking evict_first avoids polluting L2 for the next kernel.
             for (int idx = 0; idx < num_iters; idx++) {
                 wait(inputs_finished[input_ring], get_phasebit<1>(bitfield, input_ring));
                 #pragma unroll
@@ -178,7 +159,6 @@ __global__ void o_proj_residual_kernel(const __grid_constant__ o_proj_residual_g
             warpgroup::sync(cid + 1);
 
             const int row_tile = (2 * m + cta_rank) * C::NUM_CONSUMERS + cid;
-            // EVICT_LAST: `hidden` is read by rms immediately after this kernel.
             warpgroup::tma::store_add_async<dim::ROW, cache_policy::EVICT_LAST>(
                 g.hidden, out_tile, {0, 0, row_tile, global_chunk});
         }

@@ -7,11 +7,6 @@ namespace manual_kernels {
 
 using namespace kittens;
 
-// Standalone port of csrc/itypes/llama70b/attention_decode.cuh. One block per
-// sequence: 8 consumer warps (one per KV head, with GQA_RATIO=8 Q heads each)
-// + 1 producer warpgroup (TMA loader on warp 0, TMA storer on warp 1).
-// Flash-attention style, register-only (no tmem). Three-stage K/V pipeline.
-
 struct attention_decode_config {
     static constexpr int HIDDEN_DIM       = 8192;
     static constexpr int HEAD_DIM         = 128;
@@ -49,8 +44,6 @@ struct attention_decode_globals {
     o_gl     o;
 };
 
-// Copies of the helpers from csrc/itypes/llama70b/attention_decode.cuh; both
-// are pure register-/smem-level and don't depend on megakernel state.
 template <ducks::rt::row_layout RT>
 __device__ static inline void attention_right_fill(
         RT &dst, const RT &src, int col_idx,

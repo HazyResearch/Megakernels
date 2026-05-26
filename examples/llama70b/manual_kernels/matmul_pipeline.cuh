@@ -1,17 +1,5 @@
 #pragma once
 
-// Shared 2-CTA matmul pipeline for the manual-kernel ablation suite.
-//
-// Structure: each instruction is a (Mb x Nb)-tile of a [M, N] @ [N, K] -> [M, N]
-// gemm, computed by a 2-CTA cluster with mm2/mma2 into tmem, in LOAD_PIPE_DEPTH
-// stages over the K dimension. Each kernel writes its own __global__ shell and
-// epilogue body; this header owns the loader, launcher, and drain helpers that
-// are identical across all the matmul-shaped instructions (qkv_rope_append,
-// gate_silu, up_matmul, o_proj_residual, lm_head).
-//
-// Smem layout is left to each kernel because epilogues vary (some alias d_smem
-// onto a_smem, some need additional smem for gate/residual tiles, etc.).
-
 #include "kittens.cuh"
 
 namespace manual_kernels {
@@ -56,16 +44,12 @@ struct matmul_pipeline {
     using a_smem_t = a_tile_t[C::LOAD_PIPE_DEPTH][C::NUM_CONSUMERS];
     using b_smem_t = b_tile_t[C::LOAD_PIPE_DEPTH];
 
-    // Bytes the launcher expects per inputs_arrived per consumer: each consumer
-    // accounts for half the cluster's A/B bytes, since inputs_arrived has
-    // expected-arrival = NUM_CONSUMERS.
+    // Per-consumer share of the cluster's A/B bytes (inputs_arrived expects NUM_CONSUMERS arrivals).
     static constexpr int A_BYTES_PER_ARRIVAL =
         (C::CLUSTER_SIZE * C::NUM_CONSUMERS * sizeof(a_tile_t)
          + 2 * sizeof(b_tile_t)) / C::NUM_CONSUMERS;
 
-    // Producer loader: stream A and B over K with a ring of LOAD_PIPE_DEPTH
-    // stages. Call from one elected thread (typically wg3 warp 3, leader lane)
-    // inside the producer warpgroup. Advances input_ring and toggles bitfield<1>.
+    // Stream A and B over K. Call from one elected thread in the producer warpgroup.
     __device__ static inline void producer_load(
             a_smem_t &a_smem, b_smem_t &b_smem,
             semaphore *inputs_arrived, semaphore *inputs_finished,
@@ -90,11 +74,8 @@ struct matmul_pipeline {
         }
     }
 
-    // Wait for the final LOAD_PIPE_DEPTH stages of MMA to retire. Call this
-    // after producer_load when the producer needs to reuse a/b smem for
-    // something else (e.g., aliased gate/residual loads in the epilogue).
-    // Gate_silu and o_proj_residual don't need this because nothing in the
-    // producer reuses a/b smem after the matmul.
+    // Drain the final LOAD_PIPE_DEPTH MMA stages. Use after producer_load when
+    // the producer reuses a/b smem in its epilogue (e.g. aliased gate/residual loads).
     __device__ static inline void producer_drain(
             semaphore *inputs_finished, uint32_t &bitfield, int &input_ring) {
         #pragma unroll
@@ -105,10 +86,6 @@ struct matmul_pipeline {
         }
     }
 
-    // Launcher: issue mm2_ABt / mma2_ABt in lockstep with the loader. Call from
-    // one elected thread per consumer on cta_rank=0; wg_warpid (= consumer id)
-    // selects which A column of a_smem to feed and which tmem region (d_tt) to
-    // accumulate into. Each consumer owns its own outputs_arrived semaphore.
     __device__ static inline void launcher_mma(
             a_smem_t &a_smem, b_smem_t &b_smem,
             semaphore *inputs_arrived, semaphore *inputs_finished,

@@ -1,14 +1,4 @@
-"""Single-GPU batched Llama-3.3-70B decode using megakittens.compile.
-
-Loads real HF weights via streaming safetensors reads to fit on a single B200
-(192 GB). Mirrors the llama1b compiled decode example, scaled to the 70B
-single-GPU itypes and the static paged KV cache layout:
-
-    [NUM_LAYERS * num_pages, PAGE_SIZE, NUM_KV_HEADS, HEAD_DIM]
-
-where each layer owns `num_pages = batch_size * pages_per_seq` pages and
-sequence i owns pages [i * pages_per_seq, (i + 1) * pages_per_seq).
-"""
+"""Single-GPU batched Llama-3.3-70B decode using megakittens.compile."""
 
 from __future__ import annotations
 
@@ -83,7 +73,7 @@ def decode(
     v_cache,               # [L * num_pages, PAGE_SIZE, NUM_KV_HEADS, HEAD_DIM] bf16
     rope_cos,              # [max_seq_len, HEAD_DIM] fp32, interleaved
     rope_sin,              # [max_seq_len, HEAD_DIM] fp32, interleaved
-    kv_append_indices,     # [B] int32, page * PAGE_SIZE + offset in layer-local page space
+    kv_append_indices,     # [B] int32, layer-local kv slot index
     pos_id,                # [1] int32
     attn_scale,            # [1] fp32
     rms_norm_eps,          # [1] fp32
@@ -131,8 +121,6 @@ def decode(
             mlp_norm, up_weights[layer_idx:layer_idx + 1], gate,
         )
 
-        # Single-GPU down_proj_reducescatter_residual collapses to the same
-        # matmul + residual shape as o_proj_residual, with K=INTERMEDIATE_DIM.
         torch.ops.megakittens.oproj_residual_half_tmem70b(
             hidden, up, down_weights[layer_idx:layer_idx + 1],
         )
@@ -151,8 +139,7 @@ def load_hf_weights(
     device: str,
     num_layers: int,
 ) -> tuple[dict[str, torch.Tensor], int]:
-    """Stream Llama-70B safetensors shards directly into stacked GPU tensors."""
-    print(f"Fetching {MODEL_ID} (cached) ...")
+    print(f"Fetching {MODEL_ID}...")
     config = AutoConfig.from_pretrained(MODEL_ID)
     repo_dir = snapshot_download(MODEL_ID, allow_patterns=["*.safetensors", "*.json"])
 
@@ -199,7 +186,6 @@ def load_hf_weights(
                     parts = name.split(".")
                     layer = int(parts[2])
                     if layer >= num_layers:
-                        del t
                         continue
                     suffix = ".".join(parts[3:])
                     if suffix == "input_layernorm.weight":
@@ -220,7 +206,6 @@ def load_hf_weights(
                         weights["up_weights"][layer].copy_(t)
                     elif suffix == "mlp.down_proj.weight":
                         weights["down_weights"][layer].copy_(t)
-                del t
 
     weights["rope_cos"], weights["rope_sin"] = _make_rope_table(config, max_seq_len, device)
     return weights, pages_per_seq
@@ -284,7 +269,6 @@ def benchmark_tok_per_sec(
     model_size = sum(t.nelement() * t.element_size() for t in weight_tensors)
     params = sum(t.nelement() for t in weight_tensors)
 
-    # Each prompt token broadcast across the batch; all 512 sequences share the prompt.
     prompt_tokens = prompt_ids.unsqueeze(1).expand(prompt_len, batch_size).contiguous()
     num_decode_tokens = max_new_tokens - 1
     output_tokens = torch.empty(max_new_tokens, dtype=torch.long, device=device)

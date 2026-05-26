@@ -1,10 +1,4 @@
-"""Pure-pytorch Llama-3.3-70B decode using the same paged KV layout and
-interleaved RoPE as compiled_decode.py. Acts as the numerics oracle and the
-"naive eager pytorch" rung of the megakernel ablation ladder.
-
-Each op is its own small helper so it can be replaced one-at-a-time with a
-custom CUDA kernel binding in a follow-up file.
-"""
+"""Llama-3.3-70B decode using regular TK kernels, as an ablation baseline against the megakernel."""
 
 from __future__ import annotations
 
@@ -13,25 +7,13 @@ import os
 
 import torch
 
-from .compiled_decode import (
-    HIDDEN_DIM,
-    HEAD_DIM,
-    NUM_Q_HEADS,
-    NUM_KV_HEADS,
-    GQA_RATIO,
-    Q_DIM,
-    KV_DIM,
-    PAGE_SIZE,
-    benchmark_tok_per_sec,
-)
+from .compiled_decode import Q_DIM, benchmark_tok_per_sec
 from .manual_kernels import _C
 
 
 NUM_LAYERS = 80
 
-# Per-layer kernel timing for o_proj and down. Enable with TIME_KERNELS=1.
-# Events are pre-allocated so this works inside a CUDA graph capture; after the
-# benchmark finishes we read elapsed_time off the final replay's timestamps.
+# Pre-allocated events so timing works inside CUDA graph capture. TIME_KERNELS=1 to enable.
 TIME_KERNELS = os.environ.get("TIME_KERNELS") == "1"
 _timing_events: dict | None = None
 
@@ -83,75 +65,6 @@ def _qkv_rope_append_kernel(
         hidden_norm, qkv_w, rope_cos, rope_sin, pos_id, kv_append_indices, layer_k, layer_v, q,
     )
     return q
-
-
-def _apply_rope_torch(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
-    # x, cos, and sin are pre-interleaved as [first_half_0, second_half_0, ...].
-    x_float = x.float()
-    x_even = x_float[..., ::2]
-    x_odd = x_float[..., 1::2]
-    rotated = torch.stack((-x_odd, x_even), dim=-1).flatten(-2)
-    return (x_float * cos + rotated * sin).to(x.dtype)
-
-
-def _qkv_rope_append_torch(
-    hidden_norm: torch.Tensor,
-    qkv_w: torch.Tensor,
-    rope_cos: torch.Tensor,
-    rope_sin: torch.Tensor,
-    pos_id: torch.Tensor,
-    kv_append_indices: torch.Tensor,
-    k_cache_layer: torch.Tensor,
-    v_cache_layer: torch.Tensor,
-) -> torch.Tensor:
-    B = hidden_norm.shape[-2]
-    qkv = hidden_norm @ qkv_w[0].transpose(-1, -2)
-    q = qkv[..., :Q_DIM].view(B, NUM_Q_HEADS, HEAD_DIM)
-    k = qkv[..., Q_DIM:Q_DIM + KV_DIM].view(B, NUM_KV_HEADS, HEAD_DIM)
-    v = qkv[..., Q_DIM + KV_DIM:].view(B, NUM_KV_HEADS, HEAD_DIM)
-
-    cos = rope_cos[pos_id.long()]
-    sin = rope_sin[pos_id.long()]
-    q = _apply_rope_torch(q, cos, sin)
-    k = _apply_rope_torch(k, cos, sin)
-
-    k_flat = k_cache_layer.view(-1, NUM_KV_HEADS, HEAD_DIM)
-    v_flat = v_cache_layer.view(-1, NUM_KV_HEADS, HEAD_DIM)
-    idx = kv_append_indices.long()
-    k_flat[idx] = k
-    v_flat[idx] = v
-
-    return q.reshape(B, HIDDEN_DIM)
-
-
-def _attention_torch(
-    q_flat: torch.Tensor,
-    k_cache_layer: torch.Tensor,
-    v_cache_layer: torch.Tensor,
-    pos_id: torch.Tensor,
-    attn_scale: torch.Tensor,
-) -> torch.Tensor:
-    B = q_flat.shape[-2]
-    num_pages = k_cache_layer.shape[0]
-    pages_per_seq = num_pages // B
-    seq_len = pages_per_seq * PAGE_SIZE
-
-    q = q_flat.view(B, NUM_Q_HEADS, HEAD_DIM).float()
-    k_seq = k_cache_layer.view(B, seq_len, NUM_KV_HEADS, HEAD_DIM).float()
-    v_seq = v_cache_layer.view(B, seq_len, NUM_KV_HEADS, HEAD_DIM).float()
-
-    q_grouped = q.view(B, NUM_KV_HEADS, GQA_RATIO, HEAD_DIM)
-    k_t = k_seq.permute(0, 2, 3, 1)
-    scores = torch.matmul(q_grouped, k_t) * attn_scale
-
-    positions = torch.arange(seq_len, device=q_flat.device, dtype=pos_id.dtype)
-    mask = (positions <= pos_id).view(1, 1, 1, seq_len)
-    scores = scores.masked_fill(~mask, float("-inf"))
-
-    weights = torch.softmax(scores, dim=-1)
-    v_perm = v_seq.permute(0, 2, 1, 3)
-    out = torch.matmul(weights, v_perm)
-    return out.reshape(B, NUM_Q_HEADS * HEAD_DIM).to(q_flat.dtype)
 
 
 def _o_proj_residual_kernel(hidden: torch.Tensor, attn_out: torch.Tensor, o_w: torch.Tensor) -> None:
@@ -209,7 +122,7 @@ def decode(
     v_cache,               # [L * num_pages, PAGE_SIZE, NUM_KV_HEADS, HEAD_DIM] bf16
     rope_cos,              # [max_seq_len, HEAD_DIM] fp32, interleaved
     rope_sin,              # [max_seq_len, HEAD_DIM] fp32, interleaved
-    kv_append_indices,     # [B] int32, page * PAGE_SIZE + offset in layer-local page space
+    kv_append_indices,     # [B] int32, layer-local kv slot index
     pos_id,                # [1] int32
     attn_scale,            # [1] fp32
     rms_norm_eps,          # [1] fp32
@@ -281,8 +194,7 @@ class GraphedDecode:
             with torch.cuda.graph(self.graph):
                 self.logits = self.decode_fn(*args)
 
-            # Warmup + capture advanced pos_id and wrote garbage into kv;
-            # reset so the triggering call returns from a clean state.
+            # Undo state mutated during warmup + capture.
             pos_id.zero_()
             k_cache.zero_()
             v_cache.zero_()
