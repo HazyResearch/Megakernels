@@ -1,10 +1,4 @@
-"""Multi-layer decode using megakittens.compile on explicit fused llama1b ops.
-
-The decode forward is written in plain PyTorch using the five fused custom ops,
-slicing per-layer weights via `[i:i+1]` so the tracer narrows each op's
-TensorRange. `megakittens.compile` runs the tracer + scheduler + dispatcher
-end-to-end instead of the hand-written schedule in `scheduler.py`.
-"""
+"""Llama-3.2-1B decode using megakittens.compile"""
 
 from __future__ import annotations
 
@@ -12,27 +6,140 @@ import math
 import time
 
 import torch
+import torch.nn.functional as F
 
 import megakittens
 from megakittens.jit.cuda_utils import initialize_cuda_context
-from .benchmark_instructions import (
-    _make_rope_table,
-    _prefill_kv_cache,
-    _rmsnorm,
-    _stack_weights,
-)
-from .scheduler import (
-    HEAD_DIM,
-    HIDDEN_DIM,
-    INTERMEDIATE_DIM,
-    MAX_SEQ_LEN,
-    NUM_KV_HEADS,
-    NUM_LAYERS,
-    RMS_NORM_EPS,
-    VOCAB_SIZE,
-)
 
+
+NUM_LAYERS = 16
+HIDDEN_DIM = 2048
+INTERMEDIATE_DIM = 8192
+NUM_ATTENTION_HEADS = 32
+NUM_KV_HEADS = 8
+HEAD_DIM = 64
+VOCAB_SIZE = 128256
+RMS_NORM_EPS = 1e-5
+MAX_SEQ_LEN = 4096
+Q_DIM = NUM_ATTENTION_HEADS * HEAD_DIM
+K_DIM = NUM_KV_HEADS * HEAD_DIM
 ATTN_SCALE = 1.0 / math.sqrt(HEAD_DIM)
+
+
+def _apply_rope(x, cos, sin):
+    x1 = x[..., ::2]
+    x2 = x[..., 1::2]
+    rotated = torch.stack((-x2, x1), dim=-1).flatten(-2)
+    return (x * cos + rotated * sin).to(x.dtype)
+
+
+def _rmsnorm(x, weight, eps):
+    x_float = x.float()
+    variance = x_float.pow(2).mean(-1, keepdim=True)
+    normed = x_float * torch.rsqrt(variance + eps)
+    return (weight.float() * normed).to(x.dtype)
+
+
+def _interleave_indices(num_heads, head_dim):
+    half = head_dim // 2
+    indices = []
+    for h in range(num_heads):
+        offset = h * head_dim
+        for i in range(half):
+            indices.append(offset + i)
+            indices.append(offset + half + i)
+    return torch.tensor(indices)
+
+
+def _stack_weights(hf_model):
+    config = hf_model.config
+    model = hf_model.model
+    q_indices = _interleave_indices(config.num_attention_heads, config.head_dim)
+    k_indices = _interleave_indices(config.num_key_value_heads, config.head_dim)
+
+    qkv_weights, o_weights = [], []
+    attn_norm_weights, mlp_norm_weights = [], []
+    up_weights, gate_weights, down_weights = [], [], []
+
+    for layer in model.layers:
+        attn, mlp = layer.self_attn, layer.mlp
+        qkv_weights.append(torch.cat([attn.q_proj.weight[q_indices],
+                                       attn.k_proj.weight[k_indices],
+                                       attn.v_proj.weight], dim=0))
+        o_weights.append(attn.o_proj.weight)
+        attn_norm_weights.append(layer.input_layernorm.weight)
+        mlp_norm_weights.append(layer.post_attention_layernorm.weight)
+        up_weights.append(mlp.up_proj.weight)
+        gate_weights.append(mlp.gate_proj.weight)
+        down_weights.append(mlp.down_proj.weight)
+
+    return {
+        "qkv_weights": torch.stack(qkv_weights),
+        "o_weights": torch.stack(o_weights),
+        "attn_norm_weights": torch.stack(attn_norm_weights),
+        "mlp_norm_weights": torch.stack(mlp_norm_weights),
+        "up_weights": torch.stack(up_weights),
+        "gate_weights": torch.stack(gate_weights),
+        "down_weights": torch.stack(down_weights),
+        "lm_head_norm_weight": model.norm.weight,
+        "lm_head_weight": hf_model.lm_head.weight,
+        "embed_weight": model.embed_tokens.weight,
+    }
+
+
+def _make_rope_table(config, max_seq_len, device):
+    from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding
+    rope = LlamaRotaryEmbedding(config=config)
+    positions = torch.arange(max_seq_len).unsqueeze(0)
+    dummy = torch.empty(0, config.hidden_size, dtype=torch.float32)
+    cos_hf, sin_hf = rope(dummy, positions)
+    cos_hf = cos_hf.squeeze(0).to(device)
+    sin_hf = sin_hf.squeeze(0).to(device)
+    one_head_indices = _interleave_indices(1, config.head_dim)
+    return cos_hf[..., one_head_indices], sin_hf[..., one_head_indices]
+
+
+def _prefill_kv_cache(token_ids, weights, k_cache, v_cache, rope_cos, rope_sin):
+    for pos in range(len(token_ids)):
+        x = weights["embed_weight"][token_ids[pos]]
+        cos = rope_cos[pos]
+        sin = rope_sin[pos]
+        seq_len = pos + 1
+
+        for layer_idx in range(NUM_LAYERS):
+            normed = _rmsnorm(x, weights["attn_norm_weights"][layer_idx], RMS_NORM_EPS)
+            qkv = weights["qkv_weights"][layer_idx] @ normed
+            q = qkv[:Q_DIM].view(NUM_ATTENTION_HEADS, HEAD_DIM)
+            k = qkv[Q_DIM:Q_DIM + K_DIM].view(NUM_KV_HEADS, HEAD_DIM)
+            v = qkv[Q_DIM + K_DIM:].view(NUM_KV_HEADS, HEAD_DIM)
+
+            q = _apply_rope(q, cos, sin)
+            k = _apply_rope(k, cos, sin)
+            k_cache[layer_idx, pos] = k
+            v_cache[layer_idx, pos] = v
+
+            attn_out = torch.zeros(NUM_ATTENTION_HEADS, HEAD_DIM, device=x.device, dtype=x.dtype)
+            for kv_head in range(NUM_KV_HEADS):
+                k_cached = k_cache[layer_idx, :seq_len, kv_head]
+                v_cached = v_cache[layer_idx, :seq_len, kv_head]
+                gqa_size = NUM_ATTENTION_HEADS // NUM_KV_HEADS
+                for q_head in range(kv_head * gqa_size, (kv_head + 1) * gqa_size):
+                    scores = (q[q_head] @ k_cached.T) * ATTN_SCALE
+                    if seq_len > 1:
+                        mask = torch.full((seq_len,), float("-inf"), device=x.device)
+                        mask[:pos + 1] = 0.0
+                        scores = scores + mask
+                    w = F.softmax(scores.float(), dim=-1).to(x.dtype)
+                    attn_out[q_head] = w @ v_cached
+
+            x = x + weights["o_weights"][layer_idx] @ attn_out.reshape(HIDDEN_DIM)
+
+            normed_mlp = _rmsnorm(x, weights["mlp_norm_weights"][layer_idx], RMS_NORM_EPS)
+            gate = weights["gate_weights"][layer_idx] @ normed_mlp
+            up = weights["up_weights"][layer_idx] @ normed_mlp
+            x = x + weights["down_weights"][layer_idx] @ (F.silu(gate) * up)
+
+    return x
 
 
 def decode(
@@ -71,7 +178,6 @@ def decode(
             q, k_cache[i:i+1], v_cache[i:i+1], pos_id, attn_scale,
         )
 
-        # o_proj + residual: mutates hidden_states in place
         torch.ops.megakittens.mat_vec_adds(hidden_states, attn_out, o_weights[i:i+1])
 
         silu_out = torch.ops.megakittens.rms_upgate_silu(
@@ -95,7 +201,6 @@ def decode(
 
 @torch.inference_mode()
 def benchmark_tok_per_sec(prompt="Hello, my name is", max_new_tokens=200, num_samples=5, warmup=5):
-    """tok/s with HF weights + greedy decode, using megakittens.compile(decode)."""
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     D = "cuda"
@@ -124,8 +229,6 @@ def benchmark_tok_per_sec(prompt="Hello, my name is", max_new_tokens=200, num_sa
     first_token = torch.argmax(prefill_logits)
     k_cache_snapshot = k_cache.clone()
     v_cache_snapshot = v_cache.clone()
-
-    print("Attention mode: no reduction")
 
     hidden_states = embed_weight[first_token].clone()
     pos_id_tensor = torch.tensor([prompt_len], dtype=torch.int32, device=D)
@@ -209,7 +312,6 @@ def benchmark_tok_per_sec(prompt="Hello, my name is", max_new_tokens=200, num_sa
     print("==========")
     print(f"Prompt Length: {prompt_len}")
     print(f"Generated tokens: {max_new_tokens}")
-    print(f"Attention mode: no reduction")
     print(f"Average tokens/sec (decode only): {torch.mean(torch.tensor(decode_tokens_per_sec_list)).item():.2f}")
     print(f"Memory used: {torch.cuda.max_memory_reserved() / 1e9:.02f} GB")
 
