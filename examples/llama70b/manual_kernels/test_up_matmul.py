@@ -1,9 +1,3 @@
-"""Smoke + microbench for the up_matmul_forward binding.
-
-Reference mirrors megakittens/itypes/llama70b/up_matmul.py:
-out = (x @ up_w[0].T) * gate.
-"""
-
 from __future__ import annotations
 
 try:

@@ -1,8 +1,3 @@
-"""Smoke + microbench for the lm_head_forward binding.
-
-logits = hidden @ w[0].T. N = vocab (128256 for Llama-3.3-70B).
-"""
-
 from __future__ import annotations
 
 try:

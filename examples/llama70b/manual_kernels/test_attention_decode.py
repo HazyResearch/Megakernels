@@ -1,9 +1,3 @@
-"""Smoke + microbench for the attention_decode_forward binding.
-
-Paged GQA flash-attention decode. Reference is the same loop as
-megakittens/itypes/llama70b/attention_decode.py.
-"""
-
 from __future__ import annotations
 
 try:

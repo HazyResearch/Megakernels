@@ -1,11 +1,3 @@
-"""Smoke + microbench for the qkv_rope_append_forward binding.
-
-Reference path mirrors megakittens/itypes/llama70b/qkv_rope_append.py:
-weights and RoPE tables arrive Q/K-row interleaved (so the fused RoPE in
-registers can rotate complex pairs without a shuffle), and append_ids
-encode page*PAGE_SIZE + offset within the per-layer paged KV cache.
-"""
-
 from __future__ import annotations
 
 import torch

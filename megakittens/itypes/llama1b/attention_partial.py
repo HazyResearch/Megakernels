@@ -154,14 +154,12 @@ def attention_partial_multi_op(
     seq_len = pos_id.item() + 1
     qh = q.view(num_kv_heads, gqa_ratio, head_dim)
     k = k_cache[0, :seq_len].permute(1, 2, 0)
-    v = k_cache[0, :seq_len].permute(1, 0, 2)  # dummy, not used for multi
+    v = k_cache[0, :seq_len].permute(1, 0, 2)
     scores = torch.bmm(qh, k) * attn_scale
     lse = torch.log2(torch.sum(torch.exp(scores.float()), dim=-1))
     w = F.softmax(scores.float(), dim=-1).to(q.dtype)
     v = v_cache[0, :seq_len].permute(1, 0, 2)
     o = torch.bmm(w, v).float()
-    # Return as [num_heads, 1, head_dim] and [num_heads, 1] since this is
-    # a reference implementation that doesn't actually partition
     o_inter = o.view(num_heads, 1, head_dim)
     l_inter = lse.view(num_heads, 1)
     return o_inter, l_inter

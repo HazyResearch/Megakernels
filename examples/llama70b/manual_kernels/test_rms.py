@@ -1,5 +1,3 @@
-"""Smoke test for the rms_forward binding."""
-
 from __future__ import annotations
 
 import torch

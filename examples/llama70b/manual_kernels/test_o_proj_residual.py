@@ -1,9 +1,3 @@
-"""Smoke + microbench for the o_proj_residual_forward binding.
-
-Reference mirrors megakittens/itypes/llama70b/o_proj_residual.py:
-hidden += attn_out @ o_w[0].T.
-"""
-
 from __future__ import annotations
 
 try:

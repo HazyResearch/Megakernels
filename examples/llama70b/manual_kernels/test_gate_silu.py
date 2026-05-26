@@ -1,9 +1,3 @@
-"""Smoke + microbench for the gate_silu_forward binding.
-
-Reference path mirrors megakittens/itypes/llama70b/gate_silu.py:
-out = silu(x @ gate_w[0].T).
-"""
-
 from __future__ import annotations
 
 try:
