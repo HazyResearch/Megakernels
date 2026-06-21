@@ -5,7 +5,15 @@
 template <typename Config, typename Globals, typename parsed_instruction,
           typename pipeline_specifics>
 struct matvec_pipeline {
+#ifdef KITTENS_SM120
+    // GB10 (sm_121) has 5 shared-memory pages (99KB) vs 13 on H100. With
+    // STAGE_PAGES=4 a single input stage uses 4 weight pages + 1 activation = 5,
+    // which is the most that fits. Outputs live in scratch, not pages, so
+    // OUTPUT_PIPELINE_STAGES is unaffected. Cost: no weight prefetch overlap.
+    static constexpr int INPUT_PIPELINE_STAGES = 1;
+#else
     static constexpr int INPUT_PIPELINE_STAGES = 3;
+#endif
     static constexpr int OUTPUT_PIPELINE_STAGES = 3;
     static constexpr int STAGE_PAGES = 4;
     static constexpr int ACTIVATION_PAGE = 0;
@@ -75,6 +83,13 @@ struct matvec_pipeline {
         parsed_instruction inst{instruction};
         // unused pages, then activation, then weights
 
+#ifdef KITTENS_SM120
+        // GB10: single input stage, 5 pages (0 = activation, 1..4 = weights).
+        // Any valid permutation is correct (page readiness is gated by the
+        // page_finished semaphores); identity recycles in-place.
+        int ret_order[5] = {0, 1, 2, 3, 4};
+        return ret_order[query];
+#else
         static_assert(INPUT_PIPELINE_STAGES == 3,
                       "INPUT_PIPELINE_STAGES must be 3");
 
@@ -99,6 +114,7 @@ struct matvec_pipeline {
             int ret_order[13] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
             return ret_order[query];
         }
+#endif
     }
 
     __device__ static inline int init_semaphores(megakernel::state<Config> &s) {

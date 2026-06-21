@@ -27,7 +27,15 @@ struct default_config {
     static constexpr int NUM_THREADS = NUM_WARPS * ::kittens::WARP_THREADS;
     static constexpr int NUM_BLOCKS = 1;
     static constexpr int CLUSTER_BLOCKS = 1;
+#ifdef KITTENS_SM120
+    // GB10 (sm_121, Spark/consumer Blackwell) exposes only ~99KB opt-in shared
+    // memory per block, vs 227KB on Hopper. We build with KITTENS_SM120, under
+    // which ThunderKittens already reports kittens::MAX_SHARED_MEMORY == 99*1024;
+    // this constant is restated here only to make the GB10 budget explicit/local.
+    static constexpr int MAX_SHARED_MEMORY = 99 * 1024;
+#else
     static constexpr int MAX_SHARED_MEMORY = ::kittens::MAX_SHARED_MEMORY;
+#endif
 
     // Shared memory declared statically
     static constexpr int SCRATCH_BYTES = 4096;
@@ -36,12 +44,19 @@ struct default_config {
                   (SCRATCH_BYTES + (INSTRUCTION_WIDTH + TIMING_WIDTH) * 4 +
                    DYNAMIC_SEMAPHORES * 8);
     static constexpr int DYNAMIC_SHARED_MEMORY =
-        ::kittens::MAX_SHARED_MEMORY - STATIC_SHARED_MEMORY;
+        MAX_SHARED_MEMORY - STATIC_SHARED_MEMORY;
 
     // Shared memory declared dynamically
     static constexpr int PAGE_SIZE = 16384;
     static constexpr int NUM_PAGES = DYNAMIC_SHARED_MEMORY / PAGE_SIZE;
+#ifdef KITTENS_SM120
+    // GB10: 99KB smem -> 5 pages of 16KB, vs 13 on H100/B200. The matvec
+    // pipeline (matvec_pipeline.cuh) and attention ops are re-tiled for 5 pages
+    // under KITTENS_SM120 (INPUT_PIPELINE_STAGES=1, identity release_lid[5]).
+    static_assert(NUM_PAGES == 5, "NUM_PAGES must be 5 on GB10 (sm_121)");
+#else
     static_assert(NUM_PAGES == 13, "NUM_PAGES must be 13");
+#endif
 
     static constexpr bool TIMING_RECORD_ENABLED = false;
 

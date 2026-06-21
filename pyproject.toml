@@ -8,7 +8,7 @@ version = "0.0.1"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "transformers==4.48.3",
+    "transformers>=4.48.3",
     "pydra-config>=0.0.13",
     "accelerate",
     "tabulate",

@@ -146,6 +146,12 @@ def main(config: ScriptConfig):
     match config.mode:
         case "torch":
             gen = PyTorchGenerator(model)
+        case "compile":
+            # Same model as `torch`, but torch.compile'd with cudagraphs to
+            # remove per-op launch + Python overhead -- the fair production
+            # baseline to compare the megakernel against.
+            model.forward = torch.compile(model.forward, mode="reduce-overhead")
+            gen = PyTorchGenerator(model)
         case "pyvm":
             interpreter = make_pyvm_interpreter(config.setting)
             gen = PyVM_Generator(model, interpreter, schedule)
