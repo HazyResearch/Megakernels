@@ -24,6 +24,7 @@
 #define LLAMA_1B_VOCAB_SIZE 128256
 #define H100_SM_COUNT 132
 #define B200_SM_COUNT 148
+#define GB10_SM_COUNT 48
 
 constexpr int ATOMIC_ADD_START = megakernel::FREE_SLOTS_START;
 constexpr int ATOMIC_ADD_END = ATOMIC_ADD_START + 1;
@@ -150,7 +151,9 @@ typedef globals_t<LLAMA_1B_NUM_LAYERS, LLAMA_1B_HIDDEN_DIM,
                   LLAMA_1B_INTERMEDIATE_DIM, LLAMA_1B_HEAD_DIM,
                   LLAMA_1B_NUM_ATTENTION_HEADS, LLAMA_1B_NUM_KV_HEADS,
                   LLAMA_1B_KV_BLOCK_SIZE, LLAMA_1B_MATVEC_BLOCK_SIZE,
-#ifndef KITTENS_BLACKWELL
+#if defined(KITTENS_SM120)
+                  GB10_SM_COUNT>
+#elif !defined(KITTENS_BLACKWELL)
                   H100_SM_COUNT>
 #else
                   B200_SM_COUNT>

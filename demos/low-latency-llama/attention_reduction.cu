@@ -137,7 +137,11 @@ template <typename Config, typename Globals> struct attention_reduction {
         static __device__ int
         release_lid(const Globals &g,
                     typename Config::instruction_t &instruction, int &query) {
+#ifdef KITTENS_SM120
+            int ret_order[5] = {0, 1, 2, 3, 4}; // GB10: 5 pages, identity recycle
+#else
             int ret_order[13] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 0};
+#endif
             return ret_order[query];
         }
         static __device__ int init_semaphores(const Globals &g,

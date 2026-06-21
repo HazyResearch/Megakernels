@@ -163,11 +163,25 @@ struct megakernel_wrapper {
     }
 };
 
+// NOTE: `__cluster_dims__` makes nvcc emit cluster / distributed-shared-memory
+// addressing (SR_CgaCtaId + cluster-scoped mbarrier) for ALL shared-memory
+// barriers, even when the cluster size is 1. That path is an illegal instruction
+// on sm_121 (GB10 / consumer Blackwell), which has no thread-block-cluster engine.
+// Since the latency config uses CLUSTER_BLOCKS == 1 (cluster syncs are already
+// guarded by `if (CLUSTER_BLOCKS > 1)`), omit the attribute on SM120.
+#ifdef KITTENS_SM120
+template <typename config, typename globals, typename... ops>
+__launch_bounds__(config::NUM_THREADS, 1) __global__
+    void mk(const __grid_constant__ globals g) {
+    megakernel_wrapper<config, globals, ops...>::run(g);
+}
+#else
 template <typename config, typename globals, typename... ops>
 __launch_bounds__(config::NUM_THREADS, 1)
     __cluster_dims__(config::CLUSTER_BLOCKS) __global__
     void mk(const __grid_constant__ globals g) {
     megakernel_wrapper<config, globals, ops...>::run(g);
 }
+#endif
 
 } // namespace megakernel
