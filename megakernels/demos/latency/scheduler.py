@@ -48,7 +48,8 @@ def make_globals(
 
     stacked_params = model.stacked_params
 
-    max_attn_partitions = get_sm_count(device)
+    # Must match ROUNDED_MAX_ATTN_PARTIALS in attention_reduction.cu.
+    max_attn_partitions = ((get_sm_count(device) + 15) // 16) * 16
 
     barriers = torch.zeros(
         [
