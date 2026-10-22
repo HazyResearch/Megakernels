@@ -5,11 +5,21 @@
 template <typename Config, typename Globals, typename parsed_instruction,
           typename pipeline_specifics>
 struct matvec_pipeline {
-    static constexpr int INPUT_PIPELINE_STAGES = 3;
+    // The RTX 5090 has room for one activation page plus one four-page
+    // 16x2048 BF16 weight tile. Datacenter GPUs retain the triple-buffered
+    // pipeline.
+    static constexpr int INPUT_PIPELINE_STAGES =
+        Config::NUM_PAGES == 5 ? 1 : 3;
     static constexpr int OUTPUT_PIPELINE_STAGES = 3;
     static constexpr int STAGE_PAGES = 4;
     static constexpr int ACTIVATION_PAGE = 0;
     static constexpr int WEIGHTS_START_PAGE = 1;
+    static constexpr int REQUIRED_PAGES =
+        WEIGHTS_START_PAGE + INPUT_PIPELINE_STAGES * STAGE_PAGES;
+    static_assert(REQUIRED_PAGES <= Config::NUM_PAGES,
+                  "Matvec pipeline requests more pages than the GPU provides");
+    static_assert(Config::NUM_PAGES == 5 || Config::NUM_PAGES == 13,
+                  "Define a release order for this shared-memory page count");
 
     static constexpr int REDUCTION_DIM_PER_WARP =
         Globals::hidden_dim / Config::NUM_CONSUMER_WARPS;
@@ -70,13 +80,18 @@ struct matvec_pipeline {
     __device__ static inline int
     release_lid(const Globals &g, typename Config::instruction_t &instruction,
                 int &query) {
-        // NOTE: assumes a three stage pipeline
-
         parsed_instruction inst{instruction};
         // unused pages, then activation, then weights
 
-        static_assert(INPUT_PIPELINE_STAGES == 3,
-                      "INPUT_PIPELINE_STAGES must be 3");
+        static_assert(INPUT_PIPELINE_STAGES == 1 ||
+                          INPUT_PIPELINE_STAGES == 3,
+                      "Unsupported input pipeline depth");
+
+        if constexpr (INPUT_PIPELINE_STAGES == 1) {
+            // Page 0 is released after normalization. Pages 1-4 hold the
+            // single weight stage until its final matvec iteration.
+            return query;
+        }
 
         auto iters = inst.iters;
         auto remainder = iters % INPUT_PIPELINE_STAGES;

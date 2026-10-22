@@ -88,6 +88,8 @@ template <typename Config, typename Globals> struct attention_reduction {
     // --- Shared Memory Page Management Helpers ---
     static constexpr int SHARED_DATA_PAGE =
         0; // Use only the first logical page
+    static_assert(SHARED_DATA_PAGE < Config::NUM_PAGES,
+                  "Attention reduction page exceeds available pages");
 
     __device__ static inline void wait_shared_page(megakernel::state<Config> &s) {
         if (kittens::warp::laneid() == 0) {
@@ -137,8 +139,9 @@ template <typename Config, typename Globals> struct attention_reduction {
         static __device__ int
         release_lid(const Globals &g,
                     typename Config::instruction_t &instruction, int &query) {
-            int ret_order[13] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 0};
-            return ret_order[query];
+            // Release unused pages first and retain the shared-data page
+            // until all reduction consumers finish.
+            return (query + 1) % Config::NUM_PAGES;
         }
         static __device__ int init_semaphores(const Globals &g,
                                               megakernel::state<Config> &s) {

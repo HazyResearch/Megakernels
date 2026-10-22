@@ -66,6 +66,10 @@ __device__ void main_loop(const globals &g, ::megakernel::state<config> &kvms) {
         // Step 1. Load instructions (no semaphores used)
         load_instructions<config, globals>(&kvms.instruction()[0],
                                            kvms.instruction_index, g);
+        // Each lane loads one instruction word. SM120's independent thread
+        // scheduling requires an explicit handoff before lane 0 and the page
+        // allocator consume words written by the other lanes.
+        kittens::warp::sync();
 
         if (laneid == 0) {
             kvms.record(TEVENT_IFETCH_DONE);
@@ -97,6 +101,9 @@ __device__ void main_loop(const globals &g, ::megakernel::state<config> &kvms) {
                     kvms.all_instructions[last_instruction_ring].pid_order[lid];
             }
         }
+        // The next instruction may read any logical-to-physical mapping entry,
+        // not only the entry written by the same lane.
+        kittens::warp::sync();
 
         if (laneid == 0) {
             kvms.record(TEVENT_PAGE_ALLOC_DONE);

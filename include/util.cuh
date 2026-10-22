@@ -25,8 +25,11 @@ __device__ inline unsigned int get_smid() {
 }
 
 __device__ inline unsigned int get_worker_id() {
-    return get_smid();
-    // return blockIdx.x;
+    // Physical SM IDs can be sparse on partially enabled consumer dies (for
+    // example GB202 in RTX 5090). blockIdx.x is dense and is the queue index
+    // supplied by the host scheduler. One resident block per SM still gives
+    // persistent execution without risking an out-of-bounds instruction row.
+    return blockIdx.x;
 }
 
 template <template <typename> typename op_dispatcher, typename... ops>

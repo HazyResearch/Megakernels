@@ -27,7 +27,14 @@ struct default_config {
     static constexpr int NUM_THREADS = NUM_WARPS * ::kittens::WARP_THREADS;
     static constexpr int NUM_BLOCKS = 1;
     static constexpr int CLUSTER_BLOCKS = 1;
+#if defined(KITTENS_5090)
+    // GB202 has the Blackwell instruction set but the consumer-GPU shared
+    // memory capacity. ThunderKittens' legacy branch otherwise reports the
+    // datacenter Blackwell/Hopper capacity when both feature macros are set.
+    static constexpr int MAX_SHARED_MEMORY = 100000;
+#else
     static constexpr int MAX_SHARED_MEMORY = ::kittens::MAX_SHARED_MEMORY;
+#endif
 
     // Shared memory declared statically
     static constexpr int SCRATCH_BYTES = 4096;
@@ -35,13 +42,27 @@ struct default_config {
         512 + INSTRUCTION_PIPELINE_STAGES *
                   (SCRATCH_BYTES + (INSTRUCTION_WIDTH + TIMING_WIDTH) * 4 +
                    DYNAMIC_SEMAPHORES * 8);
-    static constexpr int DYNAMIC_SHARED_MEMORY =
+#if defined(KITTENS_5090)
+    static constexpr int AVAILABLE_DYNAMIC_SHARED_MEMORY =
+        MAX_SHARED_MEMORY - STATIC_SHARED_MEMORY;
+#else
+    static constexpr int AVAILABLE_DYNAMIC_SHARED_MEMORY =
         ::kittens::MAX_SHARED_MEMORY - STATIC_SHARED_MEMORY;
+#endif
 
     // Shared memory declared dynamically
     static constexpr int PAGE_SIZE = 16384;
-    static constexpr int NUM_PAGES = DYNAMIC_SHARED_MEMORY / PAGE_SIZE;
-    static_assert(NUM_PAGES == 13, "NUM_PAGES must be 13");
+    static constexpr int PAGE_ALIGNMENT = 1024;
+    static constexpr int NUM_PAGES =
+        (AVAILABLE_DYNAMIC_SHARED_MEMORY - (PAGE_ALIGNMENT - 1)) / PAGE_SIZE;
+    static constexpr int DYNAMIC_SHARED_MEMORY =
+        NUM_PAGES * PAGE_SIZE + (PAGE_ALIGNMENT - 1);
+    static_assert(DYNAMIC_SHARED_MEMORY <= AVAILABLE_DYNAMIC_SHARED_MEMORY,
+                  "Dynamic pages and alignment padding exceed shared memory");
+    static_assert(NUM_PAGES >= 5,
+                  "Megakernel VM requires at least five shared-memory pages");
+    static_assert(NUM_PAGES <= 32,
+                  "Page allocator uses one warp-wide bit mask");
 
     static constexpr bool TIMING_RECORD_ENABLED = false;
 

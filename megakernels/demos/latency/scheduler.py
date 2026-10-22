@@ -48,7 +48,12 @@ def make_globals(
 
     stacked_params = model.stacked_params
 
-    max_attn_partitions = get_sm_count(device)
+    # TMA requires global-memory strides to be 16-byte aligned. The RTX 5090
+    # has 170 SMs, so an unpadded FP32 partition row has a 680-byte stride.
+    # Match the CUDA shared-vector extent while the scheduler still uses the
+    # physical SM count (170).
+    sm_count = get_sm_count(device)
+    max_attn_partitions = ((sm_count + 15) // 16) * 16
 
     barriers = torch.zeros(
         [
