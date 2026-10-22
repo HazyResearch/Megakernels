@@ -84,14 +84,17 @@ __device__ inline void mk_internal(const globals &g) {
         init_semaphore(instruction_finished[threadIdx.x],
                        config::NUM_WARPS - 1);
     }
-    if (threadIdx.x < config::NUM_PAGES) {
-        for (int i = 0; i < config::INSTRUCTION_PIPELINE_STAGES_BITS; i++) {
-            auto count = config::NUM_CONSUMER_WARPS * (1 << i);
-            init_semaphore(page_finished[threadIdx.x][i], count);
-            arrive(page_finished[threadIdx.x][i], count);
-        }
-    }
     if (threadIdx.x == 0) {
+        // Initialize the page-barrier array from one thread. This happens once
+        // per persistent block and avoids ambiguous concurrent mbarrier
+        // initialization under SM120's independent thread scheduling.
+        for (int page_idx = 0; page_idx < config::NUM_PAGES; ++page_idx) {
+            for (int i = 0; i < config::INSTRUCTION_PIPELINE_STAGES_BITS; ++i) {
+                auto count = config::NUM_CONSUMER_WARPS * (1 << i);
+                init_semaphore(page_finished[page_idx][i], count);
+                arrive(page_finished[page_idx][i], count);
+            }
+        }
 #ifdef KITTENS_BLACKWELL
         init_semaphore(tensor_finished, config::NUM_CONSUMER_WARPS);
         arrive(tensor_finished,
@@ -116,10 +119,14 @@ __device__ inline void mk_internal(const globals &g) {
 #endif
 
     if (kittens::warpid() < config::NUM_CONSUMER_WARPS) {
+#ifndef KITTENS_5090
         kittens::warpgroup::increase_registers<config::CONSUMER_REGISTERS>();
+#endif
         ::megakernel::consumer::main_loop<config, globals, ops...>(g, mks);
     } else {
+#ifndef KITTENS_5090
         kittens::warpgroup::decrease_registers<config::NON_CONSUMER_REGISTERS>();
+#endif
         switch (kittens::warpgroup::warpid()) {
         case 0:
             ::megakernel::loader::main_loop<config, globals, ops...>(g, mks);

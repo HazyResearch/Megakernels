@@ -13,6 +13,9 @@ template <typename config, typename globals> struct attention_partial {
 
     static_assert(GQA_RATIO == 4, "GQA_RATIO must be 4.");
     static_assert(NUM_STAGES <= 4, "Modify page allocation for KVs.");
+    static_assert(QOL_PAGE < config::NUM_PAGES &&
+                      KV_PAGE < config::NUM_PAGES,
+                  "Attention partial page index exceeds available pages");
 
     using q_rt = kittens::rt_bf<16, LLAMA_1B_HEAD_DIM>; // only 4 rows are used
     using q_st = kittens::st_bf<16, LLAMA_1B_HEAD_DIM>; // only 4 rows are used
@@ -35,6 +38,11 @@ template <typename config, typename globals> struct attention_partial {
     using o_rt = kittens::rt_fl<16, LLAMA_1B_HEAD_DIM>; // only 4 rows are used
     using o_sv = kittens::sv_fl<LLAMA_1B_HEAD_DIM>;
     using o_sv_bf = kittens::sv_bf<LLAMA_1B_HEAD_DIM>;
+    static_assert(sizeof(q_st) + 4 * sizeof(o_sv) + sizeof(l_sv) <=
+                      config::PAGE_SIZE,
+                  "Q/O/L buffers exceed their shared-memory page");
+    static_assert(2 * NUM_STAGES * sizeof(kv_st) <= config::PAGE_SIZE,
+                  "K/V pipeline buffers exceed their shared-memory page");
 
     struct parsed_instruction {
         int layer_idx;
@@ -277,8 +285,9 @@ template <typename config, typename globals> struct attention_partial {
         static __device__ int
         release_lid(const globals &g,
                     typename config::instruction_t &instruction, int &query) {
-            int ret_order[13] = {2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 0, 1};
-            return ret_order[query];
+            // Unused pages are immediately reusable; Q/O/L and K/V pages
+            // remain last in the physical-page rotation.
+            return (query + 2) % config::NUM_PAGES;
         }
         static __device__ int init_semaphores(const globals &g,
                                               megakernel::state<config> &s) {
